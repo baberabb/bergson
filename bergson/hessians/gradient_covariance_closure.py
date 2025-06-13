@@ -344,7 +344,7 @@ if __name__ == "__main__":
     embed.requires_grad_(True)  # Make sure backward hooks are called though
 
     covariance_processor = CovarianceProcessor(task=task)
-    train_dataset = get_pile_dataset(model_str=model_name, step=0, max_samples=100)
+    train_dataset = get_pile_dataset(model_str=model_name, step=0, max_samples=1000)
     # covariance_processor.compute_covariances(model=model, data=train_dataset)
 
     # torch.cuda.memory._record_memory_history(max_entries=100000)
