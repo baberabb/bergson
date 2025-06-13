@@ -9,7 +9,7 @@ from bergson.gradients import (
     AdafactorNormalizer,
     AdamNormalizer,
     GradientCollector,
-    ProjectionGenerator,
+    GradientProcessor,
 )
 
 torch._dynamo.cache_size = 0  # Disable cache size limit for this example
@@ -81,14 +81,17 @@ if __name__ == "__main__":
     adafactors: dict[str, AdafactorNormalizer] = {}
     adams: dict[str, AdamNormalizer] = {}
 
+    p = collector.processor.projection_dim
+    assert p is not None, "Projection dimension must be set"
+
     # Go through the motions of what GradientCollector does, but after the fact
-    generator = ProjectionGenerator(model.device, collector.seed)
     for name, layer in model.named_modules():
         if not isinstance(layer, nn.Linear):
             continue
 
         o, i = layer.out_features, layer.in_features
-        A, B = generator.next_projection(collector.p, collector.q, o, i)
+        A = collector.projection(name, p, o, "left")
+        B = collector.projection(name, p, i, "right")
 
         g = layer.weight.grad
         assert g is not None
@@ -108,7 +111,7 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         start = time.monotonic()
 
-        with GradientCollector(model, normalizers=normalizers) as collector:
+        with GradientCollector(model, GradientProcessor(normalizers)) as collector:
             model(**inputs).loss.backward()
 
         torch.cuda.synchronize()

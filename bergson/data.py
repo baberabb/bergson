@@ -1,10 +1,63 @@
+import math
 import os
 import re
+from dataclasses import dataclass
+from typing import Literal, Sequence
 
 import numpy as np
 import torch
-from datasets import concatenate_datasets, load_from_disk
+from datasets import Dataset, concatenate_datasets, load_from_disk
+from simple_parsing import field
 from torch.utils.data import Dataset as TorchDataset
+
+from .utils import assert_type
+
+
+@dataclass
+class IndexConfig:
+    """Config for building the index and running the model/dataset pipeline."""
+
+    run_path: str = field(positional=True)
+    """Name of the run. Used to create a directory for the index."""
+
+    model: str = "HuggingFaceTB/SmolLM2-135M"
+    """Name of the model to load."""
+
+    dataset: str = "EleutherAI/SmolLM2-135M-10B"
+    """Dataset identifier to build the index from."""
+
+    load_in_8bit: bool = False
+    """Load the model in 8-bit mode. Requires the bitsandbytes library."""
+
+    projection_dim: int = 16
+    """Dimension of the random projection for the index, or 0 to disable it."""
+
+    token_batch_size: int = 8192
+    """Batch size in tokens for building the index."""
+
+    prompt_column: str = "text"
+    """Column in the dataset that contains the prompts."""
+
+    completion_column: str = ""
+    """Optional column in the dataset that contains the completions."""
+
+    conversation_column: str = ""
+    """Optional column in the dataset that contains the conversation."""
+
+    normalizer: Literal["adafactor", "adam", "none"] = "adafactor"
+    """Type of normalizer to use for the gradients."""
+
+    fisher_fourth_root: bool = False
+    """Whether to use the fourth root of the Fisher information matrix."""
+
+    processor_path: str = ""
+    """Path to a precomputed processor."""
+
+    stats_sample_size: int = 10_000
+    """Number of examples to use for estimating processor statistics."""
+
+    drop_columns: bool = False
+    """Only return the new dataset columns."""
 
 
 class MemmapDataset(TorchDataset):
@@ -68,7 +121,7 @@ def compute_batches(lengths, max_tokens: int):
     return batches
 
 
-def load_and_concatenate_ranked_datasets(root_dir: str):
+def load_index(root_dir: str) -> Dataset:
     """
     Walk `root_dir`, find all subdirectories matching 'rank_{integer}.idx',
     load the HF dataset from each, and concatenate them in ascending order
@@ -132,3 +185,70 @@ def pad_and_tensor(
     padded_tokens = torch.tensor(padded, dtype=dtype, device=device)
     padded_labels = torch.tensor(labels, dtype=dtype, device=device)
     return padded_tokens, padded_labels
+
+
+def tokenize(batch: dict, *, args: IndexConfig, tokenizer):
+    """Tokenize a batch of data with `tokenizer` according to `args`."""
+    kwargs = dict(
+        return_attention_mask=False,
+        return_length=True,
+    )
+    if args.completion_column:
+        # We're dealing with a prompt-completion dataset
+        convos = [
+            [
+                {"role": "user", "content": assert_type(str, prompt)},
+                {"role": "assistant", "content": assert_type(str, resp)},
+            ]
+            for prompt, resp in zip(
+                batch[args.prompt_column], batch[args.completion_column]
+            )
+        ]
+    elif args.conversation_column:
+        # We're dealing with a conversation dataset
+        convos = assert_type(list, batch[args.conversation_column])
+    else:
+        # We're dealing with vanilla next-token prediction
+        return tokenizer(batch[args.prompt_column], truncation=True, **kwargs)
+
+    # Make sure we only compute loss on the assistant's responses
+    strings = tokenizer.apply_chat_template(convos, tokenize=False)
+    encodings = tokenizer(strings, truncation=True, **kwargs)
+    labels_list: list[list[int]] = []
+
+    for i, convo in enumerate(convos):
+        # Find the spans of the assistant's responses in the tokenized output
+        pos = 0
+        spans: list[tuple[int, int]] = []
+
+        for msg in convo:
+            if msg["role"] != "assistant":
+                continue
+
+            ans = msg["content"]
+            start = strings[i].find(ans, pos)
+            pos = start + len(ans)  # move past this match
+
+            start_token = encodings.char_to_token(i, start)
+            end_token = encodings.char_to_token(i, pos)
+            spans.append((start_token, end_token))
+
+        # Labels are -100 everywhere except where the assistant's response is
+        tokens = encodings["input_ids"][i]
+        labels = [-100] * len(tokens)
+        for start, end in spans:
+            if start is not None and end is not None:
+                labels[start:end] = tokens[start:end]
+
+        labels_list.append(labels)
+
+    return dict(**encodings, labels=labels_list)
+
+
+def unflatten(x: torch.Tensor, shapes: dict[str, Sequence[int]], dim: int = -1):
+    """Unflatten a tensor `x` into a dictionary of tensors with specified shapes."""
+    numels = [math.prod(shape) for shape in shapes.values()]
+    return {
+        name: x.unflatten(dim, shape)
+        for (name, shape), x in zip(shapes.items(), x.split(numels, dim=dim))
+    }

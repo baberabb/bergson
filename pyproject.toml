@@ -14,6 +14,8 @@ dependencies = [
     "datasets",
     "ipykernel>=6.29.5",
     "ipywidgets>=8.1.7",
+    "natsort",
+    "simple-parsing",
     "torch",
     "transformers",
 ]
@@ -22,6 +24,12 @@ version = "0.0.1"
 dev = [
     "pre-commit",
 ]
+example = [
+    "trl",
+]
+
+[project.scripts]
+bergson = "bergson.__main__:run"
 
 [tool.pyright]
 include = ["bergson*"]
@@ -31,6 +39,7 @@ reportPrivateImportUsage = false
 include = ["bergson*"]
 
 [tool.ruff]
+lint.ignore = ["E741"]   # Ambiguous variable name
 # Enable pycodestyle (`E`), Pyflakes (`F`), and isort (`I`) codes
 # See https://beta.ruff.rs/docs/rules/ for more possible rules
 lint.select = ["E", "F", "I"]

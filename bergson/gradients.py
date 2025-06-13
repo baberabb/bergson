@@ -1,21 +1,24 @@
+import hashlib
 import json
+import math
 import os
+import random
 from abc import ABC, abstractmethod
 from contextlib import ContextDecorator
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Mapping
+from typing import Callable, Literal, Mapping
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from accelerate.utils import send_to_device
 from datasets import Dataset
+from natsort import natsorted
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 from tqdm.auto import trange
 from transformers import PreTrainedModel
 
-from .data import MemmapDataset
+from .data import MemmapDataset, pad_and_tensor
 
 NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
 
@@ -45,7 +48,12 @@ class Normalizer(ABC):
         return cls(**state_dict)
 
     @abstractmethod
-    def normalize_(self, grad: Tensor, eps: float = 1e-8) -> Tensor:
+    def normalize_(
+        self,
+        grad: Tensor,
+        fisher_fourth_root: bool = False,
+        eps: float = 1e-8,
+    ) -> Tensor:
         """
         Normalize gradients in-place, adding a small epsilon to avoid division by zero.
         """
@@ -76,7 +84,12 @@ class AdafactorNormalizer(Normalizer):
         assert self.col.ndim == 1, f"Expected 1D tensor for col, got {self.col.ndim}D"
 
     @torch.compile
-    def normalize_(self, grad: Tensor, eps: float = 1e-30) -> Tensor:
+    def normalize_(
+        self,
+        grad: Tensor,
+        fisher_fourth_root: bool = False,
+        eps: float = 1e-30,
+    ) -> Tensor:
         """
         Normalize the row and column sums by adding a small epsilon.
 
@@ -102,8 +115,12 @@ class AdafactorNormalizer(Normalizer):
         # by diag(a) and right-multiplying by diag(b). In this case we can represent
         # the elementwise reciprocal square root of V as ab^T where:
         # a = denom.sqrt() * r.rsqrt() and b = c.rsqrt()
-        a = denom.sqrt() * r.rsqrt_()  # shape [O]
-        b = c.rsqrt_()
+        if fisher_fourth_root:
+            a = denom.pow(0.25) * r.pow(-0.25)
+            b = c.pow(-0.25)
+        else:
+            a = denom.sqrt() * r.rsqrt_()  # shape [O]
+            b = c.rsqrt_()
 
         # Implicitly do the Hadamard product
         grad *= a[:, None]  # [N, O] * [O] → [N, O]
@@ -132,10 +149,16 @@ class AdamNormalizer(Normalizer):
     avg_sq: Tensor
 
     @torch.compile
-    def normalize_(self, grad: Tensor, eps: float = 1e-8) -> Tensor:
+    def normalize_(
+        self,
+        grad: Tensor,
+        fisher_fourth_root: bool = False,
+        eps: float = 1e-8,
+    ) -> Tensor:
         """Normalize the gradients by the square root of the second moments."""
         # Adam-style epsilon is added outside the square root
-        return grad.div_(self.avg_sq.sqrt().add_(eps))
+        denom = self.avg_sq.pow(0.25) if fisher_fourth_root else self.avg_sq.sqrt()
+        return grad.div_(denom.add_(eps))
 
     def to_adafactor(self) -> AdafactorNormalizer:
         """
@@ -170,55 +193,92 @@ class GradientProcessor:
     These are applied after the normalization and random projection steps.
     """
 
+    fisher_fourth_root: bool = False
+    """
+    Whether to use the fourth root of the inverse Fisher information matrix when
+    normalizing gradients. This means any inner product between normalized gradients
+    will implicitly use the square root of the inverse Fisher, rather than the inverse
+    Fisher itself.
+    """
+
     projection_dim: int | None = None
     """Number of rows and columns to project the gradients to. If `None`, keep the
     original shape of the gradients."""
-
-    projection_seed: int = 42
-    """Seed for generating the random projection matrices."""
 
     def estimate_preconditioners(
         self,
         model: PreTrainedModel,
         data: Dataset | MemmapDataset,
-        num_examples: int = 1000,
+        *,
+        batches: list[slice] | None = None,
+        max_documents: int | None = None,
+        target_modules: set[str] | None = None,
     ):
         """
         Estimate preconditioners from data. Overwrites the `preconditioners` field.
         """
         preconditioners = {}
         rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-        for i in trange(num_examples, position=rank):
-            example = send_to_device(data[i], model.device)
+        # Batch size of one by default
+        if batches is None:
+            batches = [slice(idx, idx + 1) for idx in range(len(data))]
 
-            x = torch.as_tensor(example["input_ids"], device=model.device).unsqueeze(0)
-            with GradientCollector(model, self) as mgr:
-                model(x, labels=x).loss.backward()
+        # If max_tokens is specified, randomly select a subset of batches
+        elif max_documents is not None:
+            batches = batches.copy()
+
+            rng = random.Random(rank)
+            rng.shuffle(batches)
+
+        def callback(name: str, g: torch.Tensor):
+            # Compute the outer product of the flattened gradient
+            g = g.flatten(1).float()
+            preconditioner = preconditioners.get(name, None)
+            if preconditioner is None:
+                preconditioners[name] = g.mT @ g
+            else:
+                preconditioner.addmm_(g.mT, g)
+
+        N = 0
+        total = (max_documents or len(batches)) // world_size
+        pbar = trange(total, disable=rank != 0, desc="Estimating preconditioners")
+
+        for sl in batches:
+            batch = data[sl]
+
+            # Update progress
+            n = len(range(*sl.indices(len(data))))
+            pbar.update(n)
+
+            N += n
+            if total and N >= total:
+                break
+
+            with GradientCollector(
+                model.base_model,
+                self,
+                closure=callback,
+                target_modules=target_modules,
+            ):
+                x, y = pad_and_tensor(
+                    batch["input_ids"],  # type: ignore
+                    labels=batch.get("labels", None),  # type: ignore
+                    device=model.device,
+                )
+                model(x, labels=y).loss.backward()
                 model.zero_grad()
 
-            for name, g in mgr.collected_grads.items():
-                if g is None or g.numel() == 0:
-                    continue
-
-                # Skip vector-valued parameters since they are negligible
-                if g.ndim < 2:
-                    continue
-
-                # Compute the outer product of the flattened gradient
-                g = g.flatten()
-                preconditioner = preconditioners.get(name, None)
-                if preconditioner is None:
-                    preconditioners[name] = torch.outer(g, g) / num_examples
-                else:
-                    preconditioner.addmm_(g[:, None], g[None], alpha=1 / num_examples)
-
         # Sanity check
+        pbar.close()
         assert preconditioners, "num_examples must be > 0"
 
-        # Reduce the preconditioners across processes if needed
-        if dist.is_initialized():
-            for preconditioner in preconditioners.values():
+        for name, preconditioner in preconditioners.items():
+            preconditioner /= N  # Normalize by the number of examples
+
+            # Reduce the preconditioners across processes if needed
+            if dist.is_initialized():
                 dist.all_reduce(preconditioner)
                 preconditioner /= dist.get_world_size()
 
@@ -258,7 +318,6 @@ class GradientProcessor:
                 weights_only=True,
             ),
             projection_dim=cfg.get("projection_dim"),
-            projection_seed=cfg.get("projection_seed", 42),
         )
 
     def save(self, path: str):
@@ -284,23 +343,6 @@ class GradientProcessor:
         torch.save(self.preconditioners, precond_path)
 
 
-class ProjectionGenerator:
-    """Wrapper around a torch.Generator that generates random projection matrices."""
-
-    def __init__(self, device: torch.device, seed: int = 42):
-        self.prng = torch.Generator(device).manual_seed(seed)
-
-    def next_projection(self, p: int, q: int, o: int, i: int) -> tuple[Tensor, Tensor]:
-        """
-        Return the left and right random projection matrices of shape [p, o] and [q, i]
-        """
-        A = torch.randn(p, o, device=self.prng.device, generator=self.prng)
-        B = torch.randn(q, i, device=self.prng.device, generator=self.prng)
-        A /= A.norm(dim=1, keepdim=True)
-        B /= B.norm(dim=1, keepdim=True)
-        return A, B
-
-
 @dataclass
 class GradientCollector(ContextDecorator):
     """
@@ -309,10 +351,6 @@ class GradientCollector(ContextDecorator):
     fixed seed to compress them into lower-dimensional blocks of shape [p×q]. We use
     a dictionary of `AdafactorNormalizer` to scale the gradients by the second moments
     of the parameters, which are expected to be precomputed and passed in.
-
-    The collected gradients are flattened into a single tensor after the backward pass.
-    You can access the flattened gradients via the `flat_grads` attribute after exiting
-    the context manager.
 
     We assume that the input to `model` is of shape `[N, S, I]`, where `N` is the
     batch size, `S` is the sequence length, and `I` is the input dimension. We take the
@@ -328,61 +366,75 @@ class GradientCollector(ContextDecorator):
     """Closure to call on the gradient as it is collected. If provided, we will not
     store the gradient after the closure is called."""
 
+    target_modules: set[str] | None = None
+    """
+    List of parameter names to collect gradients for. Should consist only of weight
+    matrices in `nn.Linear` modules. If `None`, the gradients for all weight matrices
+    will be collected.
+    """
+
     def __post_init__(self):
+        self.collected_grads: dict[str, Tensor] = {}
         self._fwd_hooks: list[RemovableHandle] = []
         self._bwd_hooks: list[RemovableHandle] = []
 
-        # We actually take advantage of the fact that modern Python dicts are ordered
-        # so that we can both keep track of the order in which the hooks are called
-        # and also use the names of the layers as keys for the normalizers.
-        self.collected_grads: dict[str, Tensor] = {}
+        self.target_info: dict[str, tuple[torch.device, torch.dtype, torch.Size]] = {}
 
-    def __enter__(self):
-        generator = None
-
-        # install a hook on every Linear
+        # Before we add any hooks, we need to peek at what modules we need to track.
         for name, layer in self.model.named_modules():
             if not isinstance(layer, nn.Linear):
                 continue
 
-            if generator is None:
-                generator = ProjectionGenerator(
-                    layer.weight.device,
-                    seed=self.processor.projection_seed,
-                )
+            if self.target_modules is not None and name not in self.target_modules:
+                continue
+
+            dtype = layer.weight.dtype
+            if not dtype.is_floating_point:
+                # bitsandbytes uses fp16 as the computation dtype
+                dtype = torch.float16
+
+            # Users of this class really like to know ahead of time what the shapes are
+            self.target_info[name] = layer.weight.device, dtype, layer.weight.shape
+
+    def gradient_size(self) -> int:
+        """Expected flattened size of the gradients collected by this collector."""
+        return sum(math.prod(s) for s in self.shapes().values())
+
+    def shapes(self) -> Mapping[str, torch.Size]:
+        """Return the shapes of the gradients collected by this collector."""
+        if (p_dim := self.processor.projection_dim) is not None:
+            return {name: torch.Size((p_dim, p_dim)) for name in self.target_info}
+
+        # If we don't have a projection dimension, we can just use the original shapes.
+        return {name: shape for name, (_, _, shape) in self.target_info.items()}
+
+    def projection(
+        self,
+        name: str,
+        m: int,
+        n: int,
+        side: Literal["left", "right"],
+    ) -> Tensor:
+        """Return the `side` projection matrix for parameter `name` of shape [m, n]."""
+        # Seed the PRNG with the name of the layer and what "side" we are projecting
+        message = bytes(f"{name}/{side}", "utf-8")
+        digest = hashlib.md5(message).digest()
+        seed = int.from_bytes(digest, byteorder="big") % (2**63 - 1)
+
+        device, dtype, _ = self.target_info[name]
+        prng = torch.Generator(device).manual_seed(seed)
+
+        A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
+        A /= A.norm(dim=1, keepdim=True)
+        return A
+
+    def __enter__(self):
+        # Install a hook on every Linear
+        for name in self.target_info:
+            layer = self.model.get_submodule(name)
 
             # Save the name of the layer for later use
             layer._name = name  # type: ignore[attr-defined]
-
-            o, i = layer.out_features, layer.in_features
-            p = self.processor.projection_dim
-
-            if p is None:
-                # TODO: Make this more efficient, don't actually materialize eye
-                A, B = torch.eye(o, device=layer.weight.device), torch.eye(i, device=layer.weight.device)
-            else:
-                A, B = generator.next_projection(p, p, o, i)
-
-            if norm := self.processor.normalizers.get(name):
-                # In the case of Adafactor, we can normalize the projection matrices
-                # directly because the normalizer matrix is rank-1.
-                if isinstance(norm, AdafactorNormalizer):
-                    # Compare to the normalize_ method in AdafactorNormalizer
-                    r, c = norm.row.add(1e-30), norm.col.add(1e-30)
-                    denom = r.mean()
-
-                    a, b = denom.sqrt() * r.rsqrt_(), c.rsqrt_()
-                    A *= a.unsqueeze(0)
-                    B *= b.unsqueeze(0)
-
-                # In the case of Adam, we need to use a slower code path
-                elif isinstance(norm, AdamNormalizer):
-                    layer._exp_avg_sq = norm.avg_sq
-                else:
-                    raise ValueError(f"Unsupported normalizer type: {type(norm)}")
-
-            layer._A_proj = A
-            layer._B_proj = B
 
             # register forward hook to save V = X @ B^T
             fwd_hook = layer.register_forward_hook(self._save_input)
@@ -392,6 +444,9 @@ class GradientCollector(ContextDecorator):
             bwd_hook = layer.register_full_backward_hook(self._process_grad)
             self._bwd_hooks.append(bwd_hook)
 
+        # Clean up any collected gradients from previous runs
+        self.collected_grads.clear()
+
         return self
 
     def _save_input(self, module: nn.Module, inp: tuple, _):
@@ -399,35 +454,69 @@ class GradientCollector(ContextDecorator):
         x = inp[0].detach()
         assert x.ndim == 3, f"Expected input of shape [N, S, I], got {x.shape}"
 
+        # Pre-scale the input by the Adafactor column stats
+        norm = self.processor.normalizers.get(module._name)
+        if isinstance(norm, AdafactorNormalizer):
+            b = norm.col.add(1e-30)
+            if self.processor.fisher_fourth_root:
+                b.pow_(-0.25)
+            else:
+                b.rsqrt_()
+
+            x = x * b.type_as(x)  # [N, S, I] * [I] → [N, S, I]
+
+        # If we're not using AdamNormalizer, we can randomly project the input here
+        # to save memory, rather than waiting until the backward pass.
+        p = self.processor.projection_dim
+        if p is not None and not isinstance(norm, AdamNormalizer):
+            i = module.in_features
+            x = x @ self.projection(module._name, p, i, "right").T
+
         module._inputs = x
 
-    def _process_grad(self, module, _, grad_out):
+    def _process_grad(self, module: nn.Module, _, grad_out):
         """Process the incoming gradient wrt the output of the module."""
+        # Sanity checks
+        assert isinstance(module, nn.Linear), "Expected a Linear module"
         G = grad_out[0]  # [N, S, O]
+        I = module._inputs  # [N, S, I/q]
 
-        # Slow code path for Adam
-        if hasattr(module, "_exp_avg_sq"):
-            # Materialize the full gradient for every sequence in the batch
-            P = G.mT @ module._inputs  # [N, O, S] @ [N, S, I] → [N, O, I]
+        p = self.processor.projection_dim
+        o, i = module.out_features, module.in_features
+
+        # Pre-scale G by the Adafactor row statistics
+        norm = self.processor.normalizers.get(module._name)
+        if isinstance(norm, AdafactorNormalizer):
+            # Compare to the normalize_ method in AdafactorNormalizer
+            r = norm.row.add(1e-30)
+
+            if self.processor.fisher_fourth_root:
+                a = r.mean().pow(0.25) * r.pow(-0.25)
+            else:
+                a = r.mean().sqrt() * r.rsqrt_()
+
+            G = G * a.type_as(G)  # [N, S, O] * [O] → [N, S, O]
+
+        # For Adam, we need to materialize the full gradient and then project
+        if isinstance(norm, AdamNormalizer):
+            P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
 
             # Normalize the gradients using the second moment matrix
-            P /= module._exp_avg_sq.sqrt().add_(1e-8)
+            P /= norm.avg_sq.sqrt().add_(1e-8)
 
             # Project the gradients to the lower-dimensional space
-            P = module._A_proj @ P @ module._B_proj.T  # [N, p, q]
-        else:
-            # With Adafactor, we can immediately project the incoming gradients and the
-            # saved inputs to the lower-dimensional space. This makes the outer product
-            # we're about to do much cheaper and more memory-efficient.
-            V = module._inputs @ module._B_proj.T  # [N, S, q]
-            U = G @ module._A_proj.T  # [N, S, p]
+            if p is not None:
+                A = self.projection(module._name, p, o, "left")
+                B = self.projection(module._name, p, i, "right")
+                P = A @ P @ B.T  # [N, p, q]
 
-            # The gradient for each token is an outer product. The gradient for a whole
-            # sequence is the sum of these outer products, which is equivalent to a
-            # matrix multiplication contracting along the sequence axis S.
-            # TODO: This approach will not work when we start supporting reduction along
-            # documents of variable length inside each "sequence."
-            P = U.mT @ V  # [N, p, S] @ [N, S, q] → [N, p, q]
+        # Both Adafactor and no normalizer, we can project G first
+        else:
+            if p is not None:
+                A = self.projection(module._name, p, o, "left")
+                G = G @ A.T  # [N, S, p]
+
+            P = G.mT @ I  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
 
         if self.closure is not None:
             self.closure(module._name, P)
@@ -440,12 +529,6 @@ class GradientCollector(ContextDecorator):
     def __exit__(self, exc_type, exc, tb):
         # clean up secret attributes
         for layer in self.model.modules():
-            if hasattr(layer, "_A_proj"):
-                del layer._A_proj
-            if hasattr(layer, "_B_proj"):
-                del layer._B_proj
-            if hasattr(layer, "_exp_avg_sq"):
-                del layer._exp_avg_sq
             if hasattr(layer, "_inputs"):
                 del layer._inputs
             if hasattr(layer, "_name"):
@@ -457,6 +540,8 @@ class GradientCollector(ContextDecorator):
         for h in self._bwd_hooks:
             h.remove()
 
+        # Naturally sort the collected gradients by name
+        self.collected_grads = {k: self.collected_grads[k] for k in natsorted(self.collected_grads)}
         return False
 
     def flattened_grads(self) -> Tensor:
