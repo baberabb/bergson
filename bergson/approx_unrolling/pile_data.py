@@ -1,8 +1,11 @@
+import os
 from itertools import chain
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import datasets
+import torch
 from datasets import load_dataset
+from torch import Tensor
 from torch.utils import data
 from transformers import AutoTokenizer
 
@@ -155,6 +158,30 @@ def create_dataloader(dataset, batch_size: int = 512):
     )
 
     return dataloader
+
+
+def randomize_batch(batch: Dict[str, Tensor], rank: int):
+    random_seed = int.from_bytes(os.urandom(4), "big")
+    torch.manual_seed(random_seed)
+
+    # Randomly sample how many entries to add (0 to 10)
+    num_entries = torch.randint(0, 5, (1,)).item()  # 0 to 10 inclusive
+    # num_entries = 4
+    if num_entries == 0:
+        return  # No entries to add
+
+    for k in batch.keys():
+        shape = batch[k].shape  # [b, s]
+        b, s = shape[0], shape[1]
+
+        # Create i new random entries with shape [num_entries, s]
+        if batch[k].dtype == torch.long:  # For integer tensors
+            random_entries = torch.randint(0, 10, (num_entries, s), device=f"cuda:{rank}")  # Adjust range as needed
+        else:  # For float tensors
+            random_entries = torch.randn(num_entries, s, device=f"cuda:{rank}")
+
+        # Concatenate to get [b+i, s]
+        batch[k] = torch.cat([batch[k], random_entries], dim=0)
 
 
 # Example usage

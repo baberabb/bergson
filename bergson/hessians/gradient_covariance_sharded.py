@@ -23,7 +23,7 @@ from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXLayer
 
 from bergson.approx_unrolling.language_task import LanguageModelingTask, Task
 from bergson.approx_unrolling.model_checkpoints import PythiaCheckpoints
-from bergson.approx_unrolling.pile_data import get_pile_dataset
+from bergson.approx_unrolling.pile_data import get_pile_dataset, randomize_batch
 from bergson.approx_unrolling.utils import TensorDict
 from bergson.data import MemmapDataset
 from bergson.gradients import Normalizer
@@ -35,14 +35,26 @@ NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
 
 def setup_distributed():
     """Properly initialize distributed training"""
-    if not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
+    try:
+        # Check if we're in a distributed environment
+        if "LOCAL_RANK" in os.environ and "WORLD_SIZE" in os.environ:
+            # Initialize the process group first
+            dist.init_process_group(backend="nccl")
 
-    # Set CUDA device for current rank
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local_rank)
-
-    return dist.get_rank(), dist.get_world_size()
+            # Set CUDA device for current rank
+            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+            torch.cuda.set_device(local_rank)
+            print("Distributed training initialized successfully")
+            return dist.get_rank(), dist.get_world_size()
+        else:
+            # Not in distributed environment
+            raise RuntimeError("Not in distributed environment")
+    except:
+        # Fall back to single GPU
+        print("Falling back to single GPU")
+        if torch.cuda.is_available():
+            torch.cuda.set_device(0)
+        return 0, 1
 
 
 @dataclass
@@ -129,7 +141,9 @@ class CovarianceProcessor:
 
         for batch in tqdm(dataloader, position=rank):
             batch = send_to_device(batch, model_device)
-
+            randomize_batch(batch, rank)
+            print(f"Processing batch on rank {rank}: {batch.keys()}")
+            print(f"Batch shapes: {[v.shape for v in batch.values()]}")
             with GradientCollector(
                 model, self, activation_closure=callback_activation, gradient_closure=callback_gradient
             ) as mgr:
@@ -361,7 +375,7 @@ if __name__ == "__main__":
     covariance_processor = CovarianceProcessor(task=task)
 
     # 3. Load dataset
-    train_dataset = get_pile_dataset(model_str=model_name, step=0, max_samples=100)
+    train_dataset = get_pile_dataset(model_str=model_name, step=0, max_samples=10_000)
 
     if rank == 0:
         print(f"Loaded {len(train_dataset)} samples from the Pile dataset.")  # type:ignore
@@ -385,6 +399,8 @@ if __name__ == "__main__":
 
     # 5. Apply FSDP2 wrapping BEFORE moving to device
     if dist.is_initialized() and world_size > 1:
+        print("Applying FSDP2 wrapping to model layers...")
+        print("-*" * 20)
         # Apply FSDP2 to transformer layers first
         for module in model.modules():
             if isinstance(module, GPTNeoXLayer):
