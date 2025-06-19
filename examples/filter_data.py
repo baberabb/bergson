@@ -13,8 +13,9 @@ from datasets import load_dataset, Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from trl import SFTConfig, SFTTrainer, setup_chat_format
 
-from bergson.data import load_index, tokenize
+from bergson.data import load_gradient_dataset, tokenize, DataConfig
 from bergson.utils import assert_type
+import numpy as np
 
 
 @dataclass
@@ -81,7 +82,7 @@ def select_topk(ds: Dataset, n: int, key: str, lowest: bool = False):
 
 def normalize_batch(batch):
     return {
-        "gradient": F.normalize(batch["gradient"].cuda(), dim=1).cpu(),
+        "gradients": F.normalize(batch["gradients"].cuda(), dim=1).cpu(),
     }
 
 
@@ -92,13 +93,9 @@ def add_index(
     assert index is not None, "Index must be provided for attribution or loss filtering"
 
     gradient_ds = (
-        load_index(index)
+        load_gradient_dataset(index)
         .with_format("torch")
-        .map(normalize_batch, batched=True, batch_size=512)
-        .sort("row_number")
-        .select_columns(["gradient", "loss", "row_number"])
     )
-
     def generator():
         for row, grad_row in zip(dataset, gradient_ds):
             yield {**dict(row), **dict(grad_row)}
@@ -127,12 +124,12 @@ def main(
         if args.query_index and args.filter == "attribution":
             print("loading index...")
             query_index = (
-                load_index(args.query_index)
+                load_gradient_dataset(args.query_index)
                     .with_format("torch")
                     .map(normalize_batch, batched=True, batch_size=512)      
             )
             print("query index loaded")
-            query = assert_type(Tensor, query_index["gradient"]).mean(0).cuda()
+            query = assert_type(Tensor, query_index["gradients"]).mean(0).cuda()
             del query_index
         else:
             query = None
@@ -160,20 +157,60 @@ def main(
             pass
         elif args.filter == "attribution":
             if query == None:
-                query = train["gradient"].mean(0).cuda()
+                # Calculate mean gradient in batches to avoid memory issues
+                print("Calculating mean gradient...")
+                mean_gradient = None
+                batch_size = 100  # Process in smaller batches
+                
+                for i in tqdm(range(0, len(train), batch_size), desc="Computing mean gradient"):
+                    batch = train.select(range(i, min(i + batch_size, len(train))))
+                    batch_gradients = torch.stack([g for g in batch["gradients"]])
+                    
+                    if mean_gradient is None:
+                        mean_gradient = batch_gradients.mean(0)
+                    else:
+                        mean_gradient = (mean_gradient * i + batch_gradients.sum(0)) / (i + len(batch))
+                    
+                    # Clear memory
+                    del batch_gradients
+                
+                query = mean_gradient.cuda()
             
-            def importance_score_generator():
-                for row in train:
-                    row = dict(row)
-                    yield {
-                        **row,
-                        "importance_score": (row["gradient"].cuda() @ query).item(),
-                    }
-
-            train = assert_type(
-                Dataset, Dataset.from_generator(importance_score_generator)
-            )
-            train = select_topk(train, args.num_examples, "importance_score", lowest=args.lowest)
+            print("Computing importance scores...")
+            # Calculate importance scores in batches
+            importance_scores = []
+            batch_size = 512
+            
+            for i in tqdm(range(0, len(train), batch_size), desc="Computing importance scores"):
+                batch = train.select(range(i, min(i + batch_size, len(train))))
+                batch_gradients = torch.stack([g for g in batch["gradients"]]).cuda()
+                
+                # Normalize gradients
+                batch_gradients = F.normalize(batch_gradients, dim=1)
+                
+                # Compute inner products
+                batch_scores = (batch_gradients @ query).cpu().numpy()
+                importance_scores.extend(batch_scores)
+                
+                # Clear GPU memory
+                del batch_gradients
+                torch.cuda.empty_cache()
+            
+            # Convert to numpy array for efficient sorting
+            importance_scores = np.array(importance_scores)
+            
+            # Get top-k indices
+            if args.lowest:
+                selected_indices = np.argsort(importance_scores)[:args.num_examples]
+            else:
+                selected_indices = np.argsort(importance_scores)[-args.num_examples:]
+            
+            # Select the top-k examples
+            train = train.select(selected_indices)
+            
+            # Clear memory
+            del importance_scores, query
+            torch.cuda.empty_cache()
         elif args.filter == "classification":
             ranks = {"excellent": 4, "good": 3, "average": 2, "poor": 1, "very poor": 0}
 
@@ -191,7 +228,7 @@ def main(
         elif args.filter == "loss":
             train = train.map(
                 lambda x: {"loss": x["loss"].mean().item()},
-                remove_columns=["gradient"],
+                remove_columns=["gradients"],
             )
             train = select_topk(train, args.num_examples, "loss", lowest=args.lowest)
         elif args.filter == "random":
@@ -199,22 +236,34 @@ def main(
         else:
             raise ValueError(f"Invalid filter: {args.filter}")
 
+        # Clear memory before loading model
+        torch.cuda.empty_cache()
+        
+        print("Loading model...")
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
             torch_dtype="bfloat16",
+            low_cpu_mem_usage=True,
         )
         tokenizer = AutoTokenizer.from_pretrained(args.model, max_length=8192)
         model, tokenizer = setup_chat_format(model, tokenizer)
 
+        # Create DataConfig for tokenization
+        data_config = DataConfig(
+            prompt_column=args.prompt_column,
+            completion_column=args.completion_column,
+            conversation_column=args.conversation_column,
+        )
+
         train = train.map(
             tokenize,
             batched=True,
-            fn_kwargs=dict(args=args, tokenizer=tokenizer),
+            fn_kwargs=dict(args=data_config, tokenizer=tokenizer),
         )
         eval = eval.map(
             tokenize,
             batched=True,
-            fn_kwargs=dict(args=args, tokenizer=tokenizer),
+            fn_kwargs=dict(args=data_config, tokenizer=tokenizer),
         )
 
         # https://github.com/huggingface/alignment-handbook/blob/main/recipes/smollm2/sft/config.yaml
