@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from typing import Literal, Sequence
 
 import numpy as np
+import pyarrow as pa
 import torch
 import torch.distributed as dist
+from datasets import Dataset
 from numpy.typing import DTypeLike
 from simple_parsing import field
 
@@ -72,11 +74,18 @@ class IndexConfig:
     """Only return the new dataset columns."""
 
 
+def ceildiv(a: int, b: int) -> int:
+    """Ceiling division of two integers."""
+    return -(-a // b)  # Equivalent to math.ceil(a / b) but faster for integers
+
+
 def compute_batches(lengths, max_tokens: int):
     """Split a list of lengths into batches that do not exceed `max_tokens`.
 
-    If `torch.distributed` is initialized, the batches are sliced to ensure
-    that each process only works on its own subset of the data.
+    Each batch is intended to be sharded into roughly equal parts across all available
+    processes in a distributed setup. Accordingly, if `torch.distributed` is
+    initialized, the batches are sliced to ensure that each process only works on its
+    own subset of the data.
     """
     start = 0
     tokens_in_batch = 0
@@ -88,8 +97,9 @@ def compute_batches(lengths, max_tokens: int):
     for idx, length in enumerate(lengths):
         # Would adding this `length` exceed the capacity?
         if tokens_in_batch + length > max_tokens:
-            # Close the previous batch: slice(start, idx)
-            batches.append(slice(start, idx))
+            batch = slice(start, idx)
+            if lengths[batch]:
+                batches.append(batch)
 
             # Start a new batch with this item
             start = idx
@@ -98,11 +108,30 @@ def compute_batches(lengths, max_tokens: int):
             # It fits, so accumulate and keep going
             tokens_in_batch += length
 
-    # distribute batches over different ranks
+    # Add the last batch if it has any items
+    if start < len(lengths):
+        batch = slice(start, len(lengths))
+        if lengths[batch]:
+            batches.append(batch)
 
-    batches = batches[rank::world_size]
-    print(f"{len(batches)}")
-    return batches
+    min_batches = ceildiv(len(batches), world_size)
+    local_batches = batches[rank::world_size]
+    if len(local_batches) < min_batches:
+        # Split the last batch in two
+        last_batch = local_batches[-1]
+        batch_len = last_batch.stop - last_batch.start
+
+        if batch_len <= 2:
+            raise RuntimeError(
+                "Unable to evenly split data into batches. Please pad the dataset to a"
+                " multiple of the world size."
+            )
+
+        local_batches[-1] = slice(last_batch.start, last_batch.start + batch_len // 2)
+        local_batches.append(slice(last_batch.start + batch_len // 2, last_batch.stop))
+
+    assert len(local_batches) == min_batches
+    return local_batches
 
 
 def create_index(root: str, dtype: DTypeLike, shape: tuple[int, ...]) -> np.memmap:
@@ -135,7 +164,7 @@ def create_index(root: str, dtype: DTypeLike, shape: tuple[int, ...]) -> np.memm
 
 
 def load_gradients(root_dir: str) -> np.memmap:
-    """ """
+    """Map the gradients stored in `root_dir` into memory."""
     with open(os.path.join(root_dir, "info.json")) as f:
         info = json.load(f)
         grad_size = info["grad_size"]
@@ -148,6 +177,17 @@ def load_gradients(root_dir: str) -> np.memmap:
         shape=(num_grads, grad_size),
     )
     return mmap
+
+
+def load_gradient_dataset(root_dir: str) -> Dataset:
+    """Load a dataset of gradients from `root_dir`."""
+    mmap = load_gradients(root_dir)
+    flat = pa.array(mmap.reshape(-1))
+    col = pa.FixedSizeListArray.from_arrays(flat, mmap.shape[1])
+
+    # Create a Dataset with the gradients as a single column
+    ds = Dataset.load_from_disk(root_dir + "/data.hf")
+    return ds.add_column("gradients", col, new_fingerprint="grads")
 
 
 def pad_and_tensor(

@@ -125,11 +125,13 @@ def main(
 
     with nullcontext() if rank == 0 else redirect_stdout(None):
         if args.query_index and args.filter == "attribution":
+            print("loading index...")
             query_index = (
                 load_index(args.query_index)
                     .with_format("torch")
                     .map(normalize_batch, batched=True, batch_size=512)      
             )
+            print("query index loaded")
             query = assert_type(Tensor, query_index["gradient"]).mean(0).cuda()
             del query_index
         else:

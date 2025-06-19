@@ -38,12 +38,13 @@ class Attributor:
         self,
         index_path: str,
         device: torch.device | str = "cpu",
+        dtype: torch.dtype = torch.float16,
     ):
         # Map the gradients into memory (very fast)
         mmap = load_gradients(index_path)
 
         # Load them onto the desired device (slow)
-        self.grads = torch.tensor(mmap, device=device)
+        self.grads = torch.tensor(mmap, device=device, dtype=dtype)
 
         # In-place normalize for numerical stability
         self.grads /= self.grads.norm(dim=1, keepdim=True)
@@ -51,7 +52,6 @@ class Attributor:
         # Load the gradient processor
         self.processor = GradientProcessor.load(index_path, map_location=device)
 
-    @torch.compile
     def search(self, queries: Tensor, k: int) -> torch.return_types.topk:
         """
         Search for the `k` nearest examples in the index based on the query or queries.
@@ -67,7 +67,13 @@ class Attributor:
         return torch.topk(queries @ self.grads.mT, k)
 
     @contextmanager
-    def trace(self, module: nn.Module, k: int) -> Generator[TraceResult, None, None]:
+    def trace(
+        self,
+        module: nn.Module,
+        k: int,
+        *,
+        precondition: bool = False,
+    ) -> Generator[TraceResult, None, None]:
         """
         Context manager to trace the gradients of a module and return the
         corresponding Attributor instance.
@@ -75,10 +81,18 @@ class Attributor:
         mod_grads: list[Tensor] = []
         result = TraceResult()
 
-        def callback(_, g: Tensor):
+        def callback(name: str, g: Tensor):
+            # Precondition the gradient using Cholesky solve
+            if precondition:
+                P = self.processor.preconditioners[name]
+                g = g.flatten(1).type_as(P)
+                g = torch.cholesky_solve(g.mT, P).mT
+            else:
+                g = g.flatten(1)
+
             # Store the gradient for later use
             mod_grads.append(
-                g.flatten(1).to(self.grads.device, self.grads.dtype, non_blocking=True)
+                g.to(self.grads.device, self.grads.dtype, non_blocking=True)
             )
 
         with GradientCollector(module, callback, self.processor):

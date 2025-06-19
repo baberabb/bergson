@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from datasets import Dataset
+from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
@@ -43,9 +43,13 @@ def collect_gradients(
     mod_grads = []
     preconditioners = {}
 
+    # TODO: Handle this more elegantly
+    lo = torch.finfo(torch.float16).min
+    hi = torch.finfo(torch.float16).max
+
     def callback(name: str, g: torch.Tensor):
-        # We aren't interested in the matrix-shape of the gradient
-        g = g.flatten(1)
+        # Prevent infs when casting to fp16 from bf16 or fp32
+        g = g.flatten(1).clamp_(lo, hi)
 
         # Asynchronously move the gradient to CPU and convert to fp16
         mod_grads.append(g.to(device="cpu", dtype=torch.float16, non_blocking=True))
@@ -72,7 +76,12 @@ def collect_gradients(
         dtype=np.float16,
         shape=(len(data), grad_size),
     )
-    per_token_losses: list[np.ndarray] = []
+    per_doc_losses = torch.full(
+        (len(data),),
+        device=model.device,
+        dtype=torch.float16,
+        fill_value=0.0,
+    )
 
     for sl in tqdm(batches, disable=rank != 0, desc="Building index"):
         batch = data[sl]
@@ -92,17 +101,9 @@ def collect_gradients(
 
             masks = y[:, 1:] != -100
             denoms = masks.sum(dim=1, dtype=logits.dtype)
-            avg_loss = losses.sum(1).div(denoms).mean()
+            losses = losses.sum(1).div(denoms)
 
-            # Start sending losses to the CPU just before the backward. Don't force
-            # a blocking host-device sync here.
-            losses = losses.detach().to(
-                device="cpu",
-                dtype=torch.float16,
-                non_blocking=True,
-            )
-            masks = masks.to(device="cpu", non_blocking=True)
-            avg_loss.backward()
+            losses.mean().backward()
 
             model.zero_grad()
 
@@ -112,14 +113,31 @@ def collect_gradients(
         # longer before syncing.
         indices = batch.get("_row") or sl
         grad_buffer[indices, :] = torch.cat(mod_grads, dim=1).numpy()
+        per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
         mod_grads.clear()
 
-        for loss, mask in zip(losses, masks):
-            # We only store the losses for the tokens that are not masked
-            per_token_losses.append(loss[mask].numpy())
+    chols = {}
+    for name, prec in preconditioners.items():
+        if dist.is_initialized():
+            dist.all_reduce(prec)
 
-    processor.preconditioners = preconditioners
-    processor.save(path)
+        chols[name] = torch.linalg.cholesky(prec / len(data))
+
+    processor.preconditioners = chols
+    if dist.is_initialized():
+        dist.reduce(per_doc_losses, dst=0)
+
+    if rank == 0:
+        data = data.sort("_row").remove_columns("_row")
+        data = data.add_column(
+            "loss",
+            per_doc_losses.cpu().numpy(),
+            feature=Value("float16"),
+            new_fingerprint="loss",
+        )
+        data.save_to_disk(path + "/data.hf")
+
+        processor.save(path)
 
     # Make sure the gradients are written to disk
     grad_buffer.flush()

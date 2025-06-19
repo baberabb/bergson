@@ -4,6 +4,7 @@ from datetime import timedelta
 
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 from datasets import Dataset, load_dataset
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from torch.distributed.fsdp import fully_shard
@@ -15,7 +16,7 @@ from .processing import collect_gradients, fit_normalizers
 from .utils import assert_type, get_layer_list, patch_fsdp_int8_model, post_patch_fsdp_int8_model
 
 
-def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
+def _worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
     # These should be set by the main process
     addr = os.environ.get("MASTER_ADDR", "localhost")
     port = os.environ.get("MASTER_PORT", "29500")
@@ -127,28 +128,36 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
             else:
                 normalizers = {}
 
-            processor = GradientProcessor(
-                normalizers,
-                fisher_fourth_root=cfg.fisher_fourth_root,
-                projection_dim=cfg.projection_dim or None,
-            )
-            if rank == 0:
-                processor.save(cfg.run_path)
-
-        collect_gradients(
-            model,
-            ds,
-            processor,
-            cfg.run_path,
-            batches=batches,
-            skip_preconditioners=cfg.skip_preconditioners,
-            target_modules=target_modules,
+        processor = GradientProcessor(
+            normalizers,
+            fisher_fourth_root=cfg.fisher_fourth_root,
+            projection_dim=cfg.projection_dim or None,
         )
+        if rank == 0:
+            processor.save(cfg.run_path)
+
+    batches = compute_batches(ds["length"], cfg.token_batch_size)
+    collect_gradients(
+        model,
+        ds,
+        processor,
+        cfg.run_path,
+        batches=batches,
+        skip_preconditioners=cfg.skip_preconditioners,
+        target_modules=target_modules,
+    )
+
+
+def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
+    try:
+        _worker(rank, world_size, cfg, ds)
     finally:
         dist.destroy_process_group()
 
 
 def build_index(cfg: IndexConfig):
+    mp.set_sharing_strategy("file_system")
+
     # Do all the data loading and preprocessing on the main process
     data_str = cfg.data.dataset
     if data_str.endswith(".csv"):
@@ -198,6 +207,5 @@ def build_index(cfg: IndexConfig):
             for i in range(world_size)
         },
         logs_specs=DefaultLogsSpecs(),
-        start_method="forkserver",
     )
     ctx.wait()
