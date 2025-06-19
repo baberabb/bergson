@@ -132,13 +132,13 @@ def _worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
         else:
             normalizers = {}
 
-    processor = GradientProcessor(
-        normalizers,
-        fisher_fourth_root=cfg.fisher_fourth_root,
-        projection_dim=cfg.projection_dim or None,
-    )
-    if rank == 0:
-        processor.save(cfg.run_path)
+        processor = GradientProcessor(
+            normalizers,
+            fisher_fourth_root=cfg.fisher_fourth_root,
+            projection_dim=cfg.projection_dim or None,
+        )
+        if rank == 0:
+            processor.save(cfg.run_path)
 
     batches = compute_batches(ds["length"], cfg.token_batch_size)
     collect_gradients(
