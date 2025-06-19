@@ -13,7 +13,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from .data import IndexConfig, compute_batches, tokenize
 from .gradients import GradientProcessor
 from .processing import collect_gradients, fit_normalizers
-from .utils import assert_type, get_layer_list, patch_fsdp_int8_model, post_patch_fsdp_int8_model
+from .utils import (
+    assert_type,
+    get_layer_list,
+    patch_fsdp_int8_model,
+    post_patch_fsdp_int8_model,
+)
 
 
 def _worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
@@ -106,35 +111,34 @@ def _worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
 
     batches = compute_batches(ds["length"], cfg.token_batch_size)
 
-    try:
-        if GradientProcessor.exists(cfg.run_path):
-            if rank == 0:
-                print(f"Loading processor from '{cfg.run_path}'")
+    if GradientProcessor.exists(cfg.run_path):
+        if rank == 0:
+            print(f"Loading processor from '{cfg.run_path}'")
 
-            processor = GradientProcessor.load(
-                cfg.run_path,
-                map_location=f"cuda:{rank}",
+        processor = GradientProcessor.load(
+            cfg.run_path,
+            map_location=f"cuda:{rank}",
+        )
+    else:
+        if cfg.normalizer != "none":
+            normalizers = fit_normalizers(
+                model,
+                ds,
+                batches=batches,
+                kind=cfg.normalizer,
+                max_documents=cfg.stats_sample_size or None,
+                target_modules=target_modules,
             )
         else:
-            if cfg.normalizer != "none":
-                normalizers = fit_normalizers(
-                    model,
-                    ds,
-                    batches=batches,
-                    kind=cfg.normalizer,
-                    max_documents=cfg.stats_sample_size or None,
-                    target_modules=target_modules,
-                )
-            else:
-                normalizers = {}
+            normalizers = {}
 
-        processor = GradientProcessor(
-            normalizers,
-            fisher_fourth_root=cfg.fisher_fourth_root,
-            projection_dim=cfg.projection_dim or None,
-        )
-        if rank == 0:
-            processor.save(cfg.run_path)
+    processor = GradientProcessor(
+        normalizers,
+        fisher_fourth_root=cfg.fisher_fourth_root,
+        projection_dim=cfg.projection_dim or None,
+    )
+    if rank == 0:
+        processor.save(cfg.run_path)
 
     batches = compute_batches(ds["length"], cfg.token_batch_size)
     collect_gradients(
