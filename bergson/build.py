@@ -177,7 +177,6 @@ def build_index(cfg: IndexConfig):
                 ds = Dataset.load_from_disk(data_str, keep_in_memory=False)
             else:
                 raise e
-    # ds = ds.select(list(range(73)))
     metadata = {"length"}
     if cfg.drop_columns:
         metadata |= set(ds.column_names)
@@ -197,7 +196,6 @@ def build_index(cfg: IndexConfig):
         _, port = s.getsockname()
 
     world_size = torch.cuda.device_count()
-
     ctx = start_processes(
         "build",
         worker,
