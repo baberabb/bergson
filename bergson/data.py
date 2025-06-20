@@ -67,7 +67,7 @@ class IndexConfig:
     skip_preconditioners: bool = False
     """Whether to skip computing preconditioners for the gradients."""
 
-    stats_sample_size: int = 1_000
+    stats_sample_size: int = 10_000
     """Number of examples to use for estimating processor statistics."""
 
     drop_columns: bool = False
@@ -79,59 +79,126 @@ def ceildiv(a: int, b: int) -> int:
     return -(-a // b)  # Equivalent to math.ceil(a / b) but faster for integers
 
 
-def compute_batches(lengths, max_tokens: int):
-    """Split a list of lengths into batches that do not exceed `max_tokens`.
-
-    Each batch is intended to be sharded into roughly equal parts across all available
-    processes in a distributed setup. Accordingly, if `torch.distributed` is
-    initialized, the batches are sliced to ensure that each process only works on its
-    own subset of the data.
+def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
     """
-    start = 0
-    tokens_in_batch = 0
-    batches = []
+    Allocate documents into batches that are then distributed evenly across
+    a fixed number of workers.
 
+    Parameters
+    ----------
+    doc_lengths : Sequence[int]
+        Length (in tokens) of each document.  The *i-th* document is referred to
+        internally by its index ``i``.
+    workers : int
+        Number of parallel workers ( 1 ≤ workers ≤ 8).
+    N : int
+        Hard memory budget per *batch*, expressed as
+        ``max(length in batch) * (# docs in batch) ≤ N``.
+
+    Returns
+    -------
+    list[list[list[int]]]
+        ``allocation[w][b]`` is the list of document indices that belong to the
+        *b-th* batch assigned to worker ``w``.  Every worker receives the same
+        number of (non-empty) batches.
+
+    Raises
+    ------
+    AllocationError
+        If the three hard constraints cannot be satisfied.
+
+    Notes
+    -----
+    1.  **Per-batch cost constraint**:  Each batch is padded to the maximum
+        sequence length *inside that batch*, so its cost in “token × examples”
+        units is ``max_len_in_batch * batch_size``.  This must stay ≤ ``N``.
+    2.  **Bin-packing strategy**:  We use *first-fit decreasing* (FFD) to obtain
+        an initial near-minimal set of batches, then split some of the larger
+        batches (never increases cost) until
+
+            * every worker has at least one batch,
+            * the total number of batches is a multiple of ``workers``.
+
+        Because each split only lowers the cost of the two resulting batches,
+        the constraint in (1) remains satisfied throughout.
+    """
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
+    if not doc_lengths:
+        raise RuntimeError("Empty document list.")
+    if max(doc_lengths) > N:  # a single document would overflow any batch
+        raise RuntimeError("At least one document is too long for the budget N.")
 
-    for idx, length in enumerate(lengths):
-        # Would adding this `length` exceed the capacity?
-        if tokens_in_batch + length > max_tokens:
-            batch = slice(start, idx)
-            if lengths[batch]:
-                batches.append(batch)
+    # ---------------------------------------------------------------------
+    # 1) First-fit decreasing (FFD) bin packing under the cost function
+    #    cost(batch) = max_len_in_batch * len(batch)
+    # ---------------------------------------------------------------------
+    docs_sorted = sorted(enumerate(doc_lengths), key=lambda x: x[1], reverse=True)
+    batches: list[list[int]] = []  # holds document *indices*
+    batch_meta = []  # (max_len, size) for each batch
 
-            # Start a new batch with this item
-            start = idx
-            tokens_in_batch = length
-        else:
-            # It fits, so accumulate and keep going
-            tokens_in_batch += length
+    for idx, length in docs_sorted:
+        placed = False
+        for j, (mx, sz) in enumerate(batch_meta):
+            new_mx = max(mx, length)
+            new_sz = sz + 1
+            if new_mx * new_sz <= N:  # still fits
+                batches[j].append(idx)
+                batch_meta[j] = (new_mx, new_sz)
+                placed = True
+                break
 
-    # Add the last batch if it has any items
-    if start < len(lengths):
-        batch = slice(start, len(lengths))
-        if lengths[batch]:
-            batches.append(batch)
+        if not placed:  # open a new batch
+            batches.append([idx])
+            batch_meta.append((length, 1))
 
-    min_batches = ceildiv(len(batches), world_size)
-    local_batches = batches[rank::world_size]
-    if len(local_batches) < min_batches:
-        # Split the last batch in two
-        last_batch = local_batches[-1]
-        batch_len = last_batch.stop - last_batch.start
+    # ---------------------------------------------------------------------
+    # 2) Ensure every worker gets ≥ 1 batch
+    # ---------------------------------------------------------------------
+    if len(batches) < world_size:
+        # split the largest batches (by size) until we have ≥ workers batches
+        batches.sort(key=len, reverse=True)
+        while len(batches) < world_size:
+            big = batches.pop(0)  # take the current largest
+            if len(big) == 1:  # cannot split a singleton
+                raise RuntimeError(
+                    "Not enough documents to give each worker at least one batch."
+                )
+            batches.append([big.pop()])  # move one doc into new batch
+            batches.append(big)  # put the remainder back
+            # preserve cost constraint automatically
 
-        if batch_len <= 2:
-            raise RuntimeError(
-                "Unable to evenly split data into batches. Please pad the dataset to a"
-                " multiple of the world size."
-            )
+    # ---------------------------------------------------------------------
+    # 3) Pad the number of batches to a multiple of `workers`
+    # ---------------------------------------------------------------------
+    k = -(-len(batches) // world_size)  # ceiling division
+    target_batches = world_size * k  # == k batches per worker
 
-        local_batches[-1] = slice(last_batch.start, last_batch.start + batch_len // 2)
-        local_batches.append(slice(last_batch.start + batch_len // 2, last_batch.stop))
+    # Split arbitrary (non-singleton) batches until we reach the target
+    i = 0
+    while len(batches) < target_batches:
+        batch = batches[i % len(batches)]
+        if len(batch) == 1:
+            i += 1  # try another batch
+            continue
+        batches.append([batch.pop()])  # split off a singleton
+        i += 1
 
-    assert len(local_batches) == min_batches
-    return local_batches
+    assert len(batches) == target_batches
+    assert all(
+        max(doc_lengths[i] for i in batch) * len(batch) <= N for batch in batches
+    )
+
+    # ---------------------------------------------------------------------
+    # 4) Round-robin assignment to workers
+    # ---------------------------------------------------------------------
+    allocation: list[list[list[int]]] = [[] for _ in range(world_size)]
+    for b_idx, batch in enumerate(batches):
+        allocation[b_idx % world_size].append(batch)
+
+    # sanity: equal # of batches per worker
+    assert len({len(b) for b in allocation}) == 1
+    return allocation[rank]
 
 
 def create_index(root: str, dtype: DTypeLike, shape: tuple[int, ...]) -> np.memmap:

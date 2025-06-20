@@ -10,26 +10,28 @@ from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_pr
 from torch.distributed.fsdp import fully_shard
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-from .data import IndexConfig, compute_batches, tokenize
+from .data import IndexConfig, allocate_batches, tokenize
 from .gradients import GradientProcessor
 from .processing import collect_gradients, fit_normalizers
 from .utils import assert_type, get_layer_list
 
 
-def _worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
-    # These should be set by the main process
-    addr = os.environ.get("MASTER_ADDR", "localhost")
-    port = os.environ.get("MASTER_PORT", "29500")
-
-    dist.init_process_group(
-        "nccl",
-        init_method=f"tcp://{addr}:{port}",
-        device_id=torch.device(f"cuda:{rank}"),
-        rank=rank,
-        timeout=timedelta(hours=1),
-        world_size=world_size,
-    )
+def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
     torch.cuda.set_device(rank)
+
+    # These should be set by the main process
+    if world_size > 1:
+        addr = os.environ.get("MASTER_ADDR", "localhost")
+        port = os.environ.get("MASTER_PORT", "29500")
+
+        dist.init_process_group(
+            "nccl",
+            init_method=f"tcp://{addr}:{port}",
+            device_id=torch.device(f"cuda:{rank}"),
+            rank=rank,
+            timeout=timedelta(hours=1),
+            world_size=world_size,
+        )
 
     match cfg.precision:
         case "bf16":
@@ -108,11 +110,17 @@ def _worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
         )
     else:
         if cfg.normalizer != "none":
+            # Sample evenly stats_sample_size examples to compute statistics
+            if cfg.stats_sample_size is not None and cfg.stats_sample_size < len(ds):
+                stats_ds = ds.shuffle(seed=0).select(range(cfg.stats_sample_size))
+            else:
+                stats_ds = ds
+
             normalizers = fit_normalizers(
                 model,
-                ds,
+                stats_ds,
+                batches=allocate_batches(stats_ds["length"], cfg.token_batch_size),
                 kind=cfg.normalizer,
-                max_documents=cfg.stats_sample_size or None,
                 target_modules=target_modules,
             )
         else:
@@ -126,7 +134,7 @@ def _worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
         if rank == 0:
             processor.save(cfg.run_path)
 
-    batches = compute_batches(ds["length"], cfg.token_batch_size)
+    batches = allocate_batches(ds["length"], cfg.token_batch_size)
     collect_gradients(
         model,
         ds,
@@ -138,16 +146,14 @@ def _worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
     )
 
 
-def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
+def dist_worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
     try:
-        _worker(rank, world_size, cfg, ds)
+        worker(rank, world_size, cfg, ds)
     finally:
         dist.destroy_process_group()
 
 
-def build_index(cfg: IndexConfig):
-    mp.set_sharing_strategy("file_system")
-
+def build_gradient_dataset(cfg: IndexConfig):
     # Do all the data loading and preprocessing on the main process
     data_str = cfg.data.dataset
     if data_str.endswith(".csv"):
@@ -169,32 +175,39 @@ def build_index(cfg: IndexConfig):
         metadata |= set(ds.column_names)
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model)
-    ds = ds.map(lambda _, idx: dict(_row=idx), with_indices=True).shuffle(seed=42)
     ds = ds.map(
         tokenize,
         batched=True,
         fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
     )
-    ds = ds.sort("length", reverse=True)
-
-    # Find an available port for distributed training
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        _, port = s.getsockname()
+    ds = ds.map(lambda _, idx: dict(_row=idx), with_indices=True)
 
     world_size = torch.cuda.device_count()
-    ctx = start_processes(
-        "build",
-        worker,
-        args={i: (i, world_size, cfg, ds) for i in range(world_size)},
-        envs={
-            i: {
-                "LOCAL_RANK": str(i),
-                "MASTER_ADDR": "localhost",
-                "MASTER_PORT": str(port),
-            }
-            for i in range(world_size)
-        },
-        logs_specs=DefaultLogsSpecs(),
-    )
-    ctx.wait()
+    if world_size <= 1:
+        # Run the worker directly if no distributed training is needed. This is great
+        # for debugging purposes.
+        worker(0, 1, cfg, ds)
+    else:
+        # Set up multiprocessing and distributed training
+        mp.set_sharing_strategy("file_system")
+
+        # Find an available port for distributed training
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            _, port = s.getsockname()
+
+        ctx = start_processes(
+            "build",
+            dist_worker,
+            args={i: (i, world_size, cfg, ds) for i in range(world_size)},
+            envs={
+                i: {
+                    "LOCAL_RANK": str(i),
+                    "MASTER_ADDR": "localhost",
+                    "MASTER_PORT": str(port),
+                }
+                for i in range(world_size)
+            },
+            logs_specs=DefaultLogsSpecs(),
+        )
+        ctx.wait()
