@@ -227,7 +227,7 @@ def create_index(root: str, dtype: DTypeLike, shape: tuple[int, ...]) -> np.memm
     if dist.is_initialized():
         dist.barrier()
 
-    return np.memmap(grad_path, dtype=dtype, mode="w+", shape=shape)
+    return np.memmap(grad_path, dtype=dtype, mode="r+", shape=shape)
 
 
 def load_gradients(root_dir: str) -> np.memmap:
