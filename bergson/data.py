@@ -1,39 +1,24 @@
+import json
 import math
 import os
-import re
 from dataclasses import dataclass
 from typing import Literal, Sequence
 
 import numpy as np
+import pyarrow as pa
 import torch
-from datasets import Dataset, concatenate_datasets, load_from_disk
+import torch.distributed as dist
+from datasets import Dataset
+from numpy.typing import DTypeLike
 from simple_parsing import field
-from torch.utils.data import Dataset as TorchDataset
 
 from .utils import assert_type
 
 
 @dataclass
-class IndexConfig:
-    """Config for building the index and running the model/dataset pipeline."""
-
-    run_path: str = field(positional=True)
-    """Name of the run. Used to create a directory for the index."""
-
-    model: str = "HuggingFaceTB/SmolLM2-135M"
-    """Name of the model to load."""
-
+class DataConfig:
     dataset: str = "EleutherAI/SmolLM2-135M-10B"
     """Dataset identifier to build the index from."""
-
-    load_in_8bit: bool = False
-    """Load the model in 8-bit mode. Requires the bitsandbytes library."""
-
-    projection_dim: int = 16
-    """Dimension of the random projection for the index, or 0 to disable it."""
-
-    token_batch_size: int = 8192
-    """Batch size in tokens for building the index."""
 
     prompt_column: str = "text"
     """Column in the dataset that contains the prompts."""
@@ -44,6 +29,32 @@ class IndexConfig:
     conversation_column: str = ""
     """Optional column in the dataset that contains the conversation."""
 
+
+@dataclass
+class IndexConfig:
+    """Config for building the index and running the model/dataset pipeline."""
+
+    run_path: str = field(positional=True)
+    """Name of the run. Used to create a directory for the index."""
+
+    data: DataConfig = field(default_factory=DataConfig)
+    """Specification of the data on which to build the index."""
+
+    model: str = "HuggingFaceTB/SmolLM2-135M"
+    """Name of the model to load."""
+
+    fsdp: bool = False
+    """Whether to use Fully Sharded Data Parallel (FSDP) for collecing gradients."""
+
+    precision: Literal["bf16", "fp16", "fp32", "int4", "int8"] = "bf16"
+    """Precision to use for the model parameters."""
+
+    projection_dim: int = 16
+    """Dimension of the random projection for the index, or 0 to disable it."""
+
+    token_batch_size: int = 8192
+    """Batch size in tokens for building the index."""
+
     normalizer: Literal["adafactor", "adam", "none"] = "adafactor"
     """Type of normalizer to use for the gradients."""
 
@@ -53,61 +64,44 @@ class IndexConfig:
     processor_path: str = ""
     """Path to a precomputed processor."""
 
-    stats_sample_size: int = 10_000
+    skip_preconditioners: bool = False
+    """Whether to skip computing preconditioners for the gradients."""
+
+    stats_sample_size: int = 1_000
     """Number of examples to use for estimating processor statistics."""
 
     drop_columns: bool = False
     """Only return the new dataset columns."""
 
 
-class MemmapDataset(TorchDataset):
-    """Torch Dataset backed by a memory-mapped numpy array."""
-
-    def __init__(
-        self,
-        data_path: str,
-        ctx_len: int,
-        max_examples: int | None = None,
-        dtype=np.uint16,
-    ):
-        mmap = np.memmap(data_path, dtype=dtype, mode="r").reshape(-1, ctx_len)
-        self.mmap = mmap[:max_examples]
-
-    def __len__(self):
-        return len(self.mmap)
-
-    def __getitem__(self, idx):
-        return dict(input_ids=torch.from_numpy(self.mmap[idx].astype(np.int64)))
-
-    def select(self, rng: range) -> "MemmapDataset":
-        """Select a subset of the dataset."""
-        mmap = MemmapDataset.__new__(MemmapDataset)
-        mmap.mmap = self.mmap[rng.start : rng.stop]
-        return mmap
-
-    def shard(self, num_shards: int, shard_id: int) -> "MemmapDataset":
-        """Split the dataset into `num_shards` and return the `shard_id`-th shard."""
-        mmap = MemmapDataset.__new__(MemmapDataset)
-
-        # Split the mmap array into `num_shards` and return the `shard_id`-th shard
-        shards = np.array_split(self.mmap, num_shards)
-        mmap.mmap = shards[shard_id]
-        return mmap
+def ceildiv(a: int, b: int) -> int:
+    """Ceiling division of two integers."""
+    return -(-a // b)  # Equivalent to math.ceil(a / b) but faster for integers
 
 
 def compute_batches(lengths, max_tokens: int):
-    """Split a list of lengths into batches that do not exceed `max_tokens`."""
+    """Split a list of lengths into batches that do not exceed `max_tokens`.
+
+    Each batch is intended to be sharded into roughly equal parts across all available
+    processes in a distributed setup. Accordingly, if `torch.distributed` is
+    initialized, the batches are sliced to ensure that each process only works on its
+    own subset of the data.
+    """
     start = 0
     tokens_in_batch = 0
     batches = []
 
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+
     for idx, length in enumerate(lengths):
         # Would adding this `length` exceed the capacity?
         if tokens_in_batch + length > max_tokens:
-            # Close the previous batch: slice(start, idx)
-            batches.append(slice(start, idx))
+            batch = slice(start, idx)
+            if lengths[batch]:
+                batches.append(batch)
 
-            # Start a new batch _with_ this item
+            # Start a new batch with this item
             start = idx
             tokens_in_batch = length
         else:
@@ -116,46 +110,84 @@ def compute_batches(lengths, max_tokens: int):
 
     # Add the last batch if it has any items
     if start < len(lengths):
-        batches.append(slice(start, len(lengths)))
+        batch = slice(start, len(lengths))
+        if lengths[batch]:
+            batches.append(batch)
 
-    return batches
+    min_batches = ceildiv(len(batches), world_size)
+    local_batches = batches[rank::world_size]
+    if len(local_batches) < min_batches:
+        # Split the last batch in two
+        last_batch = local_batches[-1]
+        batch_len = last_batch.stop - last_batch.start
+
+        if batch_len <= 2:
+            raise RuntimeError(
+                "Unable to evenly split data into batches. Please pad the dataset to a"
+                " multiple of the world size."
+            )
+
+        local_batches[-1] = slice(last_batch.start, last_batch.start + batch_len // 2)
+        local_batches.append(slice(last_batch.start + batch_len // 2, last_batch.stop))
+
+    assert len(local_batches) == min_batches
+    return local_batches
 
 
-def load_index(root_dir: str) -> Dataset:
-    """
-    Walk `root_dir`, find all subdirectories matching 'rank_{integer}.idx',
-    load the HF dataset from each, and concatenate them in ascending order
-    of the integer.
-    """
-    pattern = re.compile(r"rank_(\d+)\.idx$")
-    ranked_dirs = []
+def create_index(root: str, dtype: DTypeLike, shape: tuple[int, ...]) -> np.memmap:
+    """Create a memory-mapped file for storing gradients, and persist metadata."""
+    grad_path = os.path.join(root, "gradients.bin")
+    rank = dist.get_rank() if dist.is_initialized() else 0
 
-    # Traverse the directory tree
-    for dirpath, dirnames, _ in os.walk(root_dir):
-        for dirname in dirnames:
-            match = pattern.match(dirname)
-            if match:
-                rank = int(match.group(1))
-                full_path = os.path.join(dirpath, dirname)
-                ranked_dirs.append((rank, full_path))
+    # ── 1. Rank-0 creates file & metadata exactly once ─────────────────────────
+    if rank == 0:
+        # Ensure the directory exists
+        os.makedirs(root, exist_ok=True)
 
-    # Sort by the extracted integer
-    ranked_dirs.sort(key=lambda x: x[0])
+        # Allocate (extends file to right size without writing zeros byte-by-byte)
+        nbytes = np.dtype(dtype).itemsize * int(np.prod(shape))
+        with open(grad_path, "wb") as f:
+            f.truncate(nbytes)
 
-    # Load each dataset and collect into a list
-    datasets_list = []
-    for rank, ds_path in ranked_dirs:
-        ds = load_from_disk(ds_path)
-        datasets_list.append(ds)
+            # Force the directory entry + data to disk *before* other ranks continue
+            os.fsync(f.fileno())
 
-    # Concatenate all datasets into one
-    if not datasets_list:
-        raise RuntimeError(
-            f"No subdirectories matching 'rank_{{integer}}.idx' found under {root_dir}"
-        )
+        # Persist metadata for future runs
+        with open(root + "/info.json", "w") as f:
+            json.dump({"grad_size": shape[1], "num_grads": shape[0]}, f, indent=2)
 
-    concatenated = concatenate_datasets(datasets_list)
-    return concatenated
+    # 2. Everyone blocks until the file is definitely there & sized
+    if dist.is_initialized():
+        dist.barrier()
+
+    return np.memmap(grad_path, dtype=dtype, mode="w+", shape=shape)
+
+
+def load_gradients(root_dir: str) -> np.memmap:
+    """Map the gradients stored in `root_dir` into memory."""
+    with open(os.path.join(root_dir, "info.json")) as f:
+        info = json.load(f)
+        grad_size = info["grad_size"]
+        num_grads = info["num_grads"]
+
+    mmap = np.memmap(
+        root_dir + "/gradients.bin",
+        dtype=np.float16,
+        mode="r",
+        shape=(num_grads, grad_size),
+    )
+    return mmap
+
+
+def load_gradient_dataset(root_dir: str) -> Dataset:
+    """Load a dataset of gradients from `root_dir`."""
+    mmap = load_gradients(root_dir)
+    flat = pa.array(mmap.reshape(-1))
+    col = pa.FixedSizeListArray.from_arrays(flat, mmap.shape[1])
+
+    # Create a Dataset with the gradients as a single column
+    ds = Dataset.load_from_disk(root_dir + "/data.hf")
+    return ds.add_column("gradients", col, new_fingerprint="grads")
 
 
 def pad_and_tensor(
@@ -187,7 +219,7 @@ def pad_and_tensor(
     return padded_tokens, padded_labels
 
 
-def tokenize(batch: dict, *, args: IndexConfig, tokenizer):
+def tokenize(batch: dict, *, args: DataConfig, tokenizer):
     """Tokenize a batch of data with `tokenizer` according to `args`."""
     kwargs = dict(
         return_attention_mask=False,

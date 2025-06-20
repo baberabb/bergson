@@ -29,7 +29,7 @@ example = [
 ]
 
 [project.scripts]
-bergson = "bergson.__main__:run"
+bergson = "bergson.__main__:main"
 
 [tool.pyright]
 include = ["bergson*"]

@@ -17,11 +17,16 @@ def test_phi3():
     # aggregate gradients from the backward itself and compare against those
     tokens = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], device=model.device)
     inputs = dict(input_ids=tokens, labels=tokens)
+    collected_grads = {}
+
+    def closure(name: str, g: torch.Tensor):
+        """Store the gradients in a dictionary for later comparison."""
+        collected_grads[name] = g
 
     # Test with 16 x 16 random projection as well as with no projection
     for p in (16, None):
         processor = GradientProcessor(projection_dim=p)
-        collector = GradientCollector(model, processor)
+        collector = GradientCollector(model, closure, processor)
         with collector:
             model.zero_grad()
             model(**inputs).loss.backward()
@@ -30,7 +35,7 @@ def test_phi3():
         adams: dict[str, AdamNormalizer] = {}
 
         # Go through the motions of what GradientCollector does, but after the fact
-        for name, collected_grad in collector.collected_grads.items():
+        for name, collected_grad in collected_grads.items():
             layer = model.get_submodule(name)
 
             o, i = layer.out_features, layer.in_features
@@ -52,12 +57,12 @@ def test_phi3():
         # Now do it again but this time use the normalizers
         for normalizers in (adafactors, adams):
             processor = GradientProcessor(normalizers=normalizers, projection_dim=p)
-            collector = GradientCollector(model, processor)
+            collector = GradientCollector(model, closure, processor)
             with collector:
                 model.zero_grad()
                 model(**inputs).loss.backward()
 
-            for name, collected_grad in collector.collected_grads.items():
+            for name, collected_grad in collected_grads.items():
                 layer = model.get_submodule(name)
 
                 o, i = layer.out_features, layer.in_features

@@ -1,15 +1,16 @@
-import json
+import math
 import random
 from typing import Literal
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from datasets import Dataset, Features, Sequence, Value
-from tqdm.auto import tqdm, trange
+from datasets import Dataset, Value
+from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from .data import MemmapDataset, pad_and_tensor
+from .data import create_index, pad_and_tensor
 from .gradients import (
     AdafactorNormalizer,
     AdamNormalizer,
@@ -19,13 +20,14 @@ from .gradients import (
 )
 
 
-def build_index(
+def collect_gradients(
     model: PreTrainedModel,
-    data: Dataset | MemmapDataset,
+    data: Dataset,
     processor: GradientProcessor,
     path: str,
     *,
     batches: list[slice] | None = None,
+    skip_preconditioners: bool = False,
     target_modules: set[str] | None = None,
 ):
     """
@@ -37,73 +39,114 @@ def build_index(
     if batches is None:
         batches = [slice(idx, idx + 1) for idx in range(len(data))]
 
+    # Mutable state for the GradientCollector callback
+    mod_grads = []
+    preconditioners = {}
+
+    # TODO: Handle this more elegantly
+    lo = torch.finfo(torch.float16).min
+    hi = torch.finfo(torch.float16).max
+
+    def callback(name: str, g: torch.Tensor):
+        # Prevent infs when casting to fp16 from bf16 or fp32
+        g = g.flatten(1).clamp_(lo, hi)
+
+        # Asynchronously move the gradient to CPU and convert to fp16
+        mod_grads.append(g.to(device="cpu", dtype=torch.float16, non_blocking=True))
+
+        # Compute the outer product of the flattened gradient
+        if not skip_preconditioners:
+            g = g.float()
+            preconditioner = preconditioners.get(name, None)
+            if preconditioner is None:
+                preconditioners[name] = g.mT @ g
+            else:
+                preconditioner.addmm_(g.mT, g)
+
     collector = GradientCollector(
         model.base_model,
+        callback,
         processor,
         target_modules=target_modules,
     )
-    features = (
-        data.features.copy()
-        if isinstance(data, Dataset)
-        else Features(input_ids=Value("string"))
+    # Allocate space ahead of time for the gradients
+    grad_size = sum(math.prod(s) for s in collector.shapes().values())
+    grad_buffer = create_index(
+        path,
+        dtype=np.float16,
+        shape=(len(data), grad_size),
     )
-    # Make sure gradients are stored in fp16 for efficiency
-    features.update(
-        gradient=Sequence(Value("float16"), length=collector.gradient_size()),
-        loss=Sequence(Value("float16")),
+    per_doc_losses = torch.full(
+        (len(data),),
+        device=model.device,
+        dtype=torch.float16,
+        fill_value=0.0,
     )
 
-    def generator():
-        pbar = tqdm(batches, disable=rank != 0, desc="Building index")
-        for sl in pbar:
-            batch = data[sl]
-            x, y = pad_and_tensor(
-                batch["input_ids"],  # type: ignore
-                labels=batch.get("labels"),  # type: ignore
-                device=model.device,
-            )
+    for sl in tqdm(batches, disable=rank != 0, desc="Building index"):
+        batch = data[sl]
+        x, y = pad_and_tensor(
+            batch["input_ids"],  # type: ignore
+            labels=batch.get("labels"),  # type: ignore
+            device=model.device,
+        )
 
-            with collector:
-                logits = model(x).logits
-                losses = F.cross_entropy(
-                    logits[:, :-1].reshape(-1, logits.size(-1)),
-                    y[:, 1:].flatten(),
-                    reduction="none",
-                ).reshape_as(y[:, 1:])
+        with collector:
+            logits = model(x).logits
+            losses = F.cross_entropy(
+                logits[:, :-1].reshape(-1, logits.size(-1)),
+                y[:, 1:].flatten(),
+                reduction="none",
+            ).reshape_as(y[:, 1:])
 
-                mask = y[:, 1:] != -100
-                denoms = mask.sum(dim=1, dtype=logits.dtype)
-                avg_loss = losses.sum(1).div(denoms).mean()
-                avg_loss.backward()
+            masks = y[:, 1:] != -100
+            denoms = masks.sum(dim=1, dtype=logits.dtype)
+            losses = losses.sum(1).div(denoms)
 
-                pbar.set_postfix(
-                    loss=f"{avg_loss.item():.3f}",
-                )
-                model.zero_grad()
+            losses.mean().backward()
 
-            gradient = collector.flattened_grads().half().cpu().numpy()
-            losses = losses.detach().half().cpu().numpy()
+            model.zero_grad()
 
-            for i, (g, l, m) in enumerate(zip(gradient, losses, mask.cpu())):
-                row = {k: batch[k][i] for k in batch.keys()}
-                row.update(gradient=g, loss=l[m])
-                yield row
+        # This forces a host-device sync, but hopefully the transfer to CPU is
+        # already done since we called to("cpu", non_blocking=True) in the callback.
+        # We could make this even better, potentially, by using a ring buffer to wait
+        # longer before syncing.
+        indices = batch.get("_row") or sl
+        grad_buffer[indices, :] = torch.cat(mod_grads, dim=1).numpy()
+        per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
+        mod_grads.clear()
 
-    index = Dataset.from_generator(generator, features)
-    index.save_to_disk(path + f"/rank_{rank}.idx")  # type: ignore
+    chols = {}
+    for name, prec in preconditioners.items():
+        if dist.is_initialized():
+            dist.all_reduce(prec)
+
+        chols[name] = torch.linalg.cholesky(prec / len(data))
+
+    processor.preconditioners = chols
+    if dist.is_initialized():
+        dist.reduce(per_doc_losses, dst=0)
 
     if rank == 0:
-        with open(path + "/shapes.json", "w") as f:
-            json.dump(collector.shapes(), f, indent=2)
+        data = data.sort("_row").remove_columns("_row")
+        data = data.add_column(
+            "loss",
+            per_doc_losses.cpu().numpy(),
+            feature=Value("float16"),
+            new_fingerprint="loss",
+        )
+        data.save_to_disk(path + "/data.hf")
 
-    return index
+        processor.save(path)
+
+    # Make sure the gradients are written to disk
+    grad_buffer.flush()
 
 
 def fit_normalizers(
     model: PreTrainedModel,
-    data: Dataset | MemmapDataset,
+    data: Dataset,
     *,
-    batches: list[slice] | None = None,
     kind: Literal["adafactor", "adam"] = "adafactor",
     max_documents: int | None = None,
     target_modules: set[str] | None = None,
@@ -111,20 +154,20 @@ def fit_normalizers(
     """
     Estimate the second moments of the model's gradients using a subset of the dataset.
     """
+    max_documents = max_documents or len(data)
     normalizers: dict[str, Normalizer] = {}
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-    # Batch size of one by default
-    if batches is None:
-        batches = [slice(idx, idx + 1) for idx in range(len(data))]
+    # Round down to nearest multiple of world_size
+    max_documents -= max_documents % world_size
 
-    # If max_tokens is specified, randomly select a subset of batches
-    elif max_documents is not None:
-        batches = batches.copy()
-
-        rng = random.Random(rank)
-        rng.shuffle(batches)
+    batches = [
+        slice(idx + rank, idx + rank + 1) for idx in range(0, max_documents, world_size)
+    ]
+    # Just to make the pbar more accurate
+    rng = random.Random(0)
+    rng.shuffle(batches)
 
     def adafactor_update(name: str, g: torch.Tensor):
         # We follow the tensor2tensor implementation of Adafactor, which
@@ -160,21 +203,10 @@ def fit_normalizers(
         # in‐place accumulate
         normalizer.avg_sq.add_(sq)
 
-    N = 0
     callback = adafactor_update if kind == "adafactor" else adam_update
-    total = (max_documents or len(batches)) // world_size
-    pbar = trange(total, disable=rank != 0, desc="Estimating normalizers")
 
-    for sl in batches:
+    for sl in tqdm(batches, disable=rank != 0, desc="Estimating normalizers"):
         batch = data[sl]
-
-        # Update progress
-        n = len(batch["input_ids"])
-        pbar.update(n)
-
-        N += n
-        if total and N >= total:
-            break
 
         with GradientCollector(
             model.base_model,
@@ -192,14 +224,14 @@ def fit_normalizers(
     # Divide by the number of documents processed and average across all ranks
     for normalizer in normalizers.values():
         if isinstance(normalizer, AdamNormalizer):
-            normalizer.avg_sq.div_(N)
+            normalizer.avg_sq.div_(max_documents)
 
             if dist.is_initialized():
                 dist.all_reduce(normalizer.avg_sq, op=dist.ReduceOp.AVG)
 
         elif isinstance(normalizer, AdafactorNormalizer):
-            normalizer.row.div_(N)
-            normalizer.col.div_(N)
+            normalizer.row.div_(max_documents)
+            normalizer.col.div_(max_documents)
 
             if dist.is_initialized():
                 dist.all_reduce(normalizer.row, op=dist.ReduceOp.AVG)
