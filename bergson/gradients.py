@@ -4,7 +4,7 @@ import os
 from abc import ABC, abstractmethod
 from contextlib import ContextDecorator
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Literal, Mapping
+from typing import Callable, Literal, Mapping, Optional
 
 import torch
 import torch.nn as nn
@@ -285,6 +285,9 @@ class GradientCollector(ContextDecorator):
     matrices in `nn.Linear` modules. If `None`, the gradients for all weight matrices
     will be collected.
     """
+
+    fwd_closure: Optional[Callable] = None
+    """Closure to call on the forward hook"""
 
     def __post_init__(self):
         self._fwd_hooks: list[RemovableHandle] = []

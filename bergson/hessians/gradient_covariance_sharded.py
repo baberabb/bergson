@@ -12,7 +12,7 @@ import torch.nn as nn
 from accelerate.utils import send_to_device
 from datasets import Dataset
 from safetensors.torch import save_file
-from torch import Tensor, autocast
+from torch import Tensor
 from torch.distributed.fsdp import fully_shard
 from torch.utils.data import DataLoader, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
@@ -23,9 +23,8 @@ from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXLayer
 
 from bergson.approx_unrolling.language_task import LanguageModelingTask, Task
 from bergson.approx_unrolling.model_checkpoints import PythiaCheckpoints
-from bergson.approx_unrolling.pile_data import get_pile_dataset, randomize_batch
+from bergson.approx_unrolling.pile_data import get_pile_dataset
 from bergson.approx_unrolling.utils import TensorDict
-from bergson.data import MemmapDataset
 from bergson.gradients import Normalizer
 
 NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
@@ -84,7 +83,7 @@ class CovarianceProcessor:
     def compute_covariances(
         self,
         model: nn.Module,
-        data: Dataset | MemmapDataset,
+        data: Dataset,
     ):
         """
         Estimate preconditioners from data. Overwrites the `preconditioners` field.
@@ -102,8 +101,8 @@ class CovarianceProcessor:
             print(f"Model device: {model_device}")
 
         if dist.is_initialized() and world_size > 1:
-            sampler = DistributedSampler(data, num_replicas=world_size, rank=rank)  # type: ignore
-            batch_size_per_gpu = 32 // world_size  # Adjust batch size for distributed
+            sampler = DistributedSampler(data, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False)  # type: ignore
+            batch_size_per_gpu = 32
         else:
             sampler = SequentialSampler(data)
             batch_size_per_gpu = 32
@@ -120,6 +119,8 @@ class CovarianceProcessor:
 
         activation_covariances = {}
         gradient_covariances = {}
+        c, b = 10571 // 129, 10571 % 129
+        name = "gpt_neox.layers.0.attention.dense"
 
         def callback_activation(name: str, a: torch.Tensor):
             activation_covariance = activation_covariances.get(name, None)
@@ -139,34 +140,42 @@ class CovarianceProcessor:
             else:
                 gradient_covariances[name].addmm_(g.T, g)  # [O,O]
 
+        total_processed = 0
+        total_batches = 0
+
         for batch in tqdm(dataloader, position=rank):
             batch = send_to_device(batch, model_device)
-            randomize_batch(batch, rank)
+
+            batch_size = batch["input_ids"].shape[0]  # or whatever your batch key is
+            total_processed += batch_size
+            total_batches += 1
+
             print(f"Processing batch on rank {rank}: {batch.keys()}")
             print(f"Batch shapes: {[v.shape for v in batch.values()]}")
             with GradientCollector(
                 model, self, activation_closure=callback_activation, gradient_closure=callback_gradient
             ) as mgr:
                 model.zero_grad()
-                with autocast(
-                    device_type="cuda",
-                    enabled=True,
-                    dtype=torch.float32,
-                ):
-                    loss = self.task.compute_train_loss(batch=batch, model=model, sample=False)
+
+                loss = self.task.compute_train_loss(batch=batch, model=model, sample=False)
 
                 loss.backward()
 
             del loss
+        # dist.barrier()
+        # print(f"Rank {rank}: activation_covariances[{name}][{c},{b}] = {activation_covariances[name][c, b]} \n")
 
+        # dist.barrier()
         # Reduce the preconditioners across processes if needed
+        dist.barrier() 
         if dist.is_initialized():
             for activation_covariance in activation_covariances.values():
-                dist.all_reduce(activation_covariance)
+                dist.all_reduce(activation_covariance, op=dist.ReduceOp.SUM)
 
             for gradient_covariance in gradient_covariances.values():
-                dist.all_reduce(gradient_covariance)
+                dist.all_reduce(gradient_covariance, op=dist.ReduceOp.SUM)
 
+        print(f"Rank {rank}: Processed {total_processed} total samples in {total_batches} batches")
         # save using safetensors
         save_dir = "influence_results_sharded"
         os.makedirs(save_dir, exist_ok=True)
@@ -175,7 +184,7 @@ class CovarianceProcessor:
 
         if dist.is_initialized():
             dist.destroy_process_group()
-        print("saved")
+        print(f"saved to {save_dir}")
 
     @classmethod
     def load(
@@ -375,7 +384,7 @@ if __name__ == "__main__":
     covariance_processor = CovarianceProcessor(task=task)
 
     # 3. Load dataset
-    train_dataset = get_pile_dataset(model_str=model_name, step=0, max_samples=10_000)
+    train_dataset = get_pile_dataset(model_str=model_name, step=0, max_samples=1000)
 
     if rank == 0:
         print(f"Loaded {len(train_dataset)} samples from the Pile dataset.")  # type:ignore

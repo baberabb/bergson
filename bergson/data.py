@@ -73,6 +73,9 @@ class IndexConfig:
     drop_columns: bool = False
     """Only return the new dataset columns."""
 
+    ekfac_path: str = ""
+    """Path to the EKFAC computation, if it exists."""
+
 
 def ceildiv(a: int, b: int) -> int:
     """Ceiling division of two integers."""
@@ -123,8 +126,7 @@ def compute_batches(lengths, max_tokens: int):
 
         if batch_len <= 2:
             raise RuntimeError(
-                "Unable to evenly split data into batches. Please pad the dataset to a"
-                " multiple of the world size."
+                "Unable to evenly split data into batches. Please pad the dataset to a multiple of the world size."
             )
 
         local_batches[-1] = slice(last_batch.start, last_batch.start + batch_len // 2)
@@ -232,9 +234,7 @@ def tokenize(batch: dict, *, args: DataConfig, tokenizer):
                 {"role": "user", "content": assert_type(str, prompt)},
                 {"role": "assistant", "content": assert_type(str, resp)},
             ]
-            for prompt, resp in zip(
-                batch[args.prompt_column], batch[args.completion_column]
-            )
+            for prompt, resp in zip(batch[args.prompt_column], batch[args.completion_column])
         ]
     elif args.conversation_column:
         # We're dealing with a conversation dataset
@@ -280,7 +280,4 @@ def tokenize(batch: dict, *, args: DataConfig, tokenizer):
 def unflatten(x: torch.Tensor, shapes: dict[str, Sequence[int]], dim: int = -1):
     """Unflatten a tensor `x` into a dictionary of tensors with specified shapes."""
     numels = [math.prod(shape) for shape in shapes.values()]
-    return {
-        name: x.unflatten(dim, shape)
-        for (name, shape), x in zip(shapes.items(), x.split(numels, dim=dim))
-    }
+    return {name: x.unflatten(dim, shape) for (name, shape), x in zip(shapes.items(), x.split(numels, dim=dim))}

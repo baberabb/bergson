@@ -4,17 +4,17 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 from datasets import Dataset
+from simple_parsing import parse
 from torch.distributed.fsdp import fully_shard
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
-from .data import IndexConfig, compute_batches
-from .distributed import distributed_computing
-from .gradients import GradientProcessor
-from .processing import collect_gradients, fit_normalizers
-from .utils import get_layer_list
+from bergson.data import IndexConfig, compute_batches
+from bergson.distributed import distributed_computing
+from bergson.gradients import GradientProcessor
+from bergson.utils import get_layer_list
 
 
-def worker_build_index(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
+def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
     # These should be set by the main process
     addr = os.environ.get("MASTER_ADDR", "localhost")
     port = os.environ.get("MASTER_PORT", "29500")
@@ -96,25 +96,16 @@ def worker_build_index(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset
 
                 target_modules.add(name.removeprefix("model."))
 
-    if os.path.exists(cfg.processor_path):
+    if os.path.exists(cfg.ekfac_path):
         if rank == 0:
-            print(f"Loading processor from '{cfg.processor_path}'")
+            print(f"Loading matrices from '{cfg.ekfac_path}'")
 
         processor = GradientProcessor.load(
             cfg.processor_path,
             map_location=f"cuda:{rank}",
         )
     else:
-        if cfg.normalizer != "none":
-            normalizers = fit_normalizers(
-                model,
-                ds,
-                kind=cfg.normalizer,
-                max_documents=cfg.stats_sample_size or None,
-                target_modules=target_modules,
-            )
-        else:
-            normalizers = {}
+        normalizers = {}
 
         processor = GradientProcessor(
             normalizers,
@@ -125,16 +116,23 @@ def worker_build_index(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset
             processor.save(cfg.run_path)
 
     batches = compute_batches(ds["length"], cfg.token_batch_size)
-    collect_gradients(
+    EKFAC(
         model,
         ds,
         processor,
         cfg.run_path,
         batches=batches,
-        skip_preconditioners=cfg.skip_preconditioners,
         target_modules=target_modules,
     )
 
 
-def build_index(cfg: IndexConfig):
-    distributed_computing(cfg, worker_fn=worker_build_index)
+def compute_EKFAC(cfg: IndexConfig):
+    distributed_computing(cfg=cfg, worker_fn=worker_ekfac)
+
+
+def main():
+    compute_EKFAC(parse(IndexConfig))
+
+
+if __name__ == "__main__":
+    main()
