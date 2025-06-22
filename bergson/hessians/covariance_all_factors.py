@@ -4,7 +4,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import Dataset
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
@@ -128,3 +128,39 @@ def compute_covariance(
 
     if dist.is_initialized():
         dist.destroy_process_group()
+
+
+def compute_eigendecomposition(path: str):
+    covariances = load_file(path)
+
+    base, ext = os.path.splitext(path)
+    eigen_path = base + "_eigen" + ext
+
+    covariances_eigen = {}
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    if rank == 0:
+        print(f"Computing covariance eigendecompositions for {os.path.basename(path)}...")
+
+    for name, covariance in covariances.items():
+        eigenvalues, eigenvectors = torch.linalg.eigh(covariance)
+        covariances_eigen[name] = {
+            "eigenvalues": eigenvalues,
+            "eigenvectors": eigenvectors,
+        }
+
+    save_file(
+        covariances_eigen,
+        os.path.join(os.path.dirname(path), eigen_path),
+    )
+
+
+def compute_eigenvalue_correction(
+    model: PreTrainedModel,
+    data: Dataset,
+    processor: GradientProcessor,
+    path: str,
+    *,
+    batches: list[slice] | None = None,
+    target_modules: set[str] | None = None,
+):
+    pass

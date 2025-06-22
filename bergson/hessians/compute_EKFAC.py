@@ -4,13 +4,17 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 from datasets import Dataset
-from simple_parsing import parse
 from torch.distributed.fsdp import fully_shard
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig, PreTrainedModel
 
 from bergson.data import IndexConfig, compute_batches
 from bergson.distributed import distributed_computing
 from bergson.gradients import GradientProcessor
+from bergson.hessians.covariance_all_factors import (
+    compute_covariance,
+    compute_eigendecomposition,
+    compute_eigenvalue_correction,
+)
 from bergson.utils import get_layer_list
 
 
@@ -116,7 +120,7 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
             processor.save(cfg.run_path)
 
     batches = compute_batches(ds["length"], cfg.token_batch_size)
-    EKFAC(
+    compute_all_factors(
         model,
         ds,
         processor,
@@ -126,13 +130,39 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
     )
 
 
+def compute_all_factors(
+    model: PreTrainedModel,
+    data: Dataset,
+    processor: GradientProcessor,
+    path: str,
+    *,
+    batches: list[slice] | None = None,
+    target_modules: set[str] | None = None,
+):
+    compute_covariance(
+        model,
+        data,
+        processor,
+        path,
+        batches=batches,
+        target_modules=target_modules,
+    )
+
+    compute_eigendecomposition(
+        path,
+    )
+
+    compute_eigenvalue_correction(
+        model,
+        data,
+        processor,
+        path,
+        batches=batches,
+        target_modules=target_modules,
+    )
+
+    pass
+
+
 def compute_EKFAC(cfg: IndexConfig):
     distributed_computing(cfg=cfg, worker_fn=worker_ekfac)
-
-
-def main():
-    compute_EKFAC(parse(IndexConfig))
-
-
-if __name__ == "__main__":
-    main()

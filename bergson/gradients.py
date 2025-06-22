@@ -287,7 +287,7 @@ class GradientCollector(ContextDecorator):
     """
 
     fwd_closure: Optional[Callable] = None
-    """Closure to call on the forward hook"""
+    """Closure to call on the activations during forward hook."""
 
     def __post_init__(self):
         self._fwd_hooks: list[RemovableHandle] = []

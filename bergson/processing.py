@@ -162,9 +162,7 @@ def fit_normalizers(
     # Round down to nearest multiple of world_size
     max_documents -= max_documents % world_size
 
-    batches = [
-        slice(idx + rank, idx + rank + 1) for idx in range(0, max_documents, world_size)
-    ]
+    batches = [slice(idx + rank, idx + rank + 1) for idx in range(0, max_documents, world_size)]
     # Just to make the pbar more accurate
     rng = random.Random(0)
     rng.shuffle(batches)
