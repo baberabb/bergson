@@ -12,6 +12,13 @@ from .data import IndexConfig, tokenize
 from .utils import assert_type
 
 
+def worker_wrapper(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset, worker_fn: Callable):
+    try:
+        worker_fn(rank, world_size, cfg, ds)
+    finally:
+        dist.destroy_process_group()
+
+
 def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
     mp.set_sharing_strategy("file_system")
 
@@ -51,16 +58,10 @@ def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
 
     world_size = torch.cuda.device_count()
 
-    def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
-        try:
-            worker_fn(rank, world_size, cfg, ds)
-        finally:
-            dist.destroy_process_group()
-
     ctx = start_processes(
         "build",
-        worker,
-        args={i: (i, world_size, cfg, ds) for i in range(world_size)},
+        worker_wrapper,
+        args={i: (i, world_size, cfg, ds, worker_fn) for i in range(world_size)},
         envs={
             i: {
                 "LOCAL_RANK": str(i),
