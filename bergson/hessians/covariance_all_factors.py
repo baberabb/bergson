@@ -49,11 +49,12 @@ def compute_covariance(
         activation_covariance = activation_covariances.get(name, None)
 
         # a = a.clamp_(lo, hi)
+        a = a.reshape(-1, a.shape[-1])  # [N*S, O]
 
         if activation_covariance is None:
-            activation_covariances[name] = a.T.matmul(a)
+            activation_covariances[name] = a.mT.matmul(a)
         else:
-            activation_covariance.addmm_(a.T, a)
+            activation_covariance.addmm_(a.mT, a)
 
     def callback_gradient(name: str, g: torch.Tensor):
         gradient_covariance = gradient_covariances.get(name, None)
@@ -118,7 +119,6 @@ def compute_covariance(
         if dist.is_initialized():
             for activation_covariance in activation_covariances.values():
                 dist.all_reduce(activation_covariance, op=dist.ReduceOp.SUM)
-
             for gradient_covariance in gradient_covariances.values():
                 dist.all_reduce(gradient_covariance, op=dist.ReduceOp.SUM)
 
@@ -131,16 +131,12 @@ def compute_covariance(
 
         print(f"Covariance matrices saved to {path}.")
 
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
 
 def compute_eigendecomposition(path: str):
     covariances = load_file(path)
 
     base, ext = os.path.splitext(path)
     eigen_path = base + "_eigen" + ext
-
     covariances_eigen = {}
     rank = dist.get_rank() if dist.is_initialized() else 0
     if rank == 0:
@@ -148,6 +144,7 @@ def compute_eigendecomposition(path: str):
 
     for name, covariance in covariances.items():
         eigenvalues, eigenvectors = torch.linalg.eigh(covariance.to(torch.float32))
+
         covariances_eigen[name] = eigenvectors.to(torch.float16).contiguous()
 
     save_file(
@@ -183,21 +180,20 @@ def compute_eigenvalue_correction(
 
     # Mutable state for the GradientCollector callback
     mod_grads = []
-    activation_covariances = {}
 
-    gradient_covariances = {}
+    eigenvalue_corrections = {}
 
     # TODO: Make this faster using Kronecker product structure of g
     def callback_gradient(name: str, g: torch.Tensor):
-        gradient_covariance = gradient_covariances.get(name, None)
+        eigenvalue_correction = eigenvalue_corrections.get(name, None)
         transformed_g = torch.einsum("N S O, S S-> N S O", g, gradient_covariance_eigen[name])
         transformed_g = torch.einsum("N S O, O O -> N S O", transformed_g, activation_covariance_eigen[name])
 
-        if gradient_covariance is None:
+        if eigenvalue_correction is None:
             # Initialize the covariance matrix for this module
-            gradient_covariances[name] = (transformed_g**2).mean(dim=0)
+            eigenvalue_corrections[name] = (transformed_g**2).mean(dim=0)
         else:
-            gradient_covariances[name].add((transformed_g**2).mean(dim=0))  # [O,O]
+            eigenvalue_corrections[name].add((transformed_g**2).mean(dim=0))  # [O,O]
 
     collector = GradientCollector(
         model.base_model,
@@ -206,12 +202,12 @@ def compute_eigenvalue_correction(
         target_modules=target_modules,
     )
 
-    per_doc_losses = torch.full(
-        (len(data),),
-        device=model.device,
-        dtype=torch.float16,
-        fill_value=0.0,
-    )
+    # per_doc_losses = torch.full(
+    #     (len(data),),
+    #     device=model.device,
+    #     dtype=torch.float16,
+    #     fill_value=0.0,
+    # )
 
     for sl in tqdm(batches, disable=rank != 0, desc="Computing eigenvalue correction"):
         batch = data[sl]
@@ -241,25 +237,18 @@ def compute_eigenvalue_correction(
         # already done since we called to("cpu", non_blocking=True) in the callback.
         # We could make this even better, potentially, by using a ring buffer to wait
         # longer before syncing.
-        indices = batch.get("_row") or sl
-        per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
+        # indices = batch.get("_row") or sl
+        # per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
         mod_grads.clear()
 
         if dist.is_initialized():
-            for activation_covariance in activation_covariances.values():
-                dist.all_reduce(activation_covariance, op=dist.ReduceOp.SUM)
+            for eigenvalue_correction in eigenvalue_corrections.values():
+                dist.all_reduce(eigenvalue_correction, op=dist.ReduceOp.SUM)
 
-            for gradient_covariance in gradient_covariances.values():
-                dist.all_reduce(gradient_covariance, op=dist.ReduceOp.SUM)
-
-    if dist.is_initialized():
-        dist.reduce(per_doc_losses, dst=0)
+    # if dist.is_initialized():
+    #     dist.reduce(per_doc_losses, dst=0)
 
     if rank == 0:
-        save_file(activation_covariances, os.path.join(path, "activation_covariance.safetensors"))
-        save_file(gradient_covariances, os.path.join(path, "gradient_covariance.safetensors"))
+        save_file(eigenvalue_corrections, os.path.join(path, "eigenvalue_corrections.safetensors"))
 
-        print(f"Covariance matrices saved to {path}.")
-
-    if dist.is_initialized():
-        dist.destroy_process_group()
+        print(f"Covariance matrices saved to {os.path.join(path, 'eigenvalue_corrections.safetensors')}.")

@@ -23,7 +23,6 @@ from bergson.approx_unrolling.language_task import LanguageModelingTask, Task
 from bergson.approx_unrolling.model_checkpoints import PythiaCheckpoints
 from bergson.approx_unrolling.pile_data import get_pile_dataset
 from bergson.approx_unrolling.utils import TensorDict
-from bergson.data import MemmapDataset
 from bergson.gradients import Normalizer
 
 NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
@@ -62,7 +61,7 @@ class CovarianceProcessor:
     def compute_covariances(
         self,
         model: nn.Module,
-        data: Dataset | MemmapDataset,
+        data: Dataset,
     ):
         """
         Estimate preconditioners from data. Overwrites the `preconditioners` field.

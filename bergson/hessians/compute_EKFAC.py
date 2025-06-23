@@ -11,8 +11,8 @@ from bergson.data import IndexConfig, compute_batches
 from bergson.distributed import distributed_computing
 from bergson.gradients import GradientProcessor
 from bergson.hessians.covariance_all_factors import (
-    # compute_covariance,
-    # compute_eigendecomposition,
+    compute_covariance,
+    compute_eigendecomposition,
     compute_eigenvalue_correction,
 )
 from bergson.utils import get_layer_list
@@ -140,28 +140,28 @@ def compute_all_factors(
     batches: list[slice] | None = None,
     target_modules: set[str] | None = None,
 ):
-    # compute_covariance(
-    #     model,
-    #     data,
-    #     processor,
-    #     path,
-    #     batches=batches,
-    #     target_modules=target_modules,
-    # )
+    compute_covariance(
+        model,
+        data,
+        processor,
+        path,
+        batches=batches,
+        target_modules=target_modules,
+    )
 
-    # rank = dist.get_rank() if dist.is_initialized() else 0
+    rank = dist.get_rank() if dist.is_initialized() else 0
 
-    # # TODO: Would it make sense to shard this?
-    # if rank == 0:
-    #     activation_covariance_path = os.path.join(path, "activation_covariance.safetensors")
-    #     compute_eigendecomposition(
-    #         activation_covariance_path,
-    #     )
-    #     gradient_covariance_path = os.path.join(path, "gradient_covariance.safetensors")
-    #     compute_eigendecomposition(
-    #         gradient_covariance_path,
-    #     )
-
+    # TODO: Would it make sense to shard this?
+    if rank == 0:
+        activation_covariance_path = os.path.join(path, "activation_covariance.safetensors")
+        compute_eigendecomposition(
+            activation_covariance_path,
+        )
+        gradient_covariance_path = os.path.join(path, "gradient_covariance.safetensors")
+        compute_eigendecomposition(
+            gradient_covariance_path,
+        )
+    dist.barrier()
     compute_eigenvalue_correction(
         model,
         data,

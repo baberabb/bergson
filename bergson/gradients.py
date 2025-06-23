@@ -376,6 +376,8 @@ class GradientCollector(ContextDecorator):
         if p is not None and not isinstance(norm, AdamNormalizer):
             i = module.in_features
             x = x @ self.projection(name, p, i, "right", x.dtype).T
+        if self.fwd_closure:
+            self.fwd_closure(name, x)
 
         module._inputs = x
 
