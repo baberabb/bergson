@@ -13,7 +13,7 @@ from datasets import load_dataset, Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from trl import SFTConfig, SFTTrainer, setup_chat_format
 
-from bergson.data import load_index, tokenize
+from bergson.data import load_gradient_dataset, tokenize, DataConfig
 from bergson.utils import assert_type
 
 
@@ -32,20 +32,11 @@ class FilterConfig():
     dataset_index: str = ""
     """Bergson index to use for attribution and loss filtering."""
 
-    query_index: str = ""
-    """
-    The mean of this index's gradients will be used to query the dataset index for 
-    attribution filtering. When unspecified the query is the mean of the value gradients.
-    """
-
     name: str | None = None
     """Name of the run, used to save the model and tokenizer."""
 
     num_examples: int = 30_000
     """Number of items to select from the training set."""
-
-    lowest: bool = False
-    """Select the lowest scores."""
 
     prompt_column: str = "text"
     """Column in the dataset that contains the prompts."""
@@ -56,33 +47,36 @@ class FilterConfig():
     conversation_column: str = ""
     """Optional column in the dataset that contains the conversation."""
 
+    batch_size: int = 512
+    """Batch size for processing the dataset."""
+
     seed: int = 42
     """Seed for reproducibility."""
+
+    query_index: str = ""
+    """
+    Use the mean of this index's gradients as the query for attribution 
+    filtering. If unspecified the query is calculated over the dataset 
+    index.
+    """
+
+    lowest: bool = False
+    """Select the lowest scores."""
+
+    sample: bool = False
+    """Filter by sampling from the dataset without replacement with 
+    probability proportional to the filtering criteria."""
+
+    temperature: float = 0.1
+    """Temperature for sampling, used to control the distribution of
+    the sampling probabilities. Lower values make the distribution more
+    uniform, while higher values make it more peaked."""
 
 
 def set_seeds(seed: int):
     """Set all random seeds for reproducibility."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-
-
-def select_topk(ds: Dataset, n: int, key: str, lowest: bool = False):
-    heap = []
-
-    for idx, s in enumerate(ds[key]):
-        key = -s if lowest else s
-
-        if len(heap) < n:
-            heapq.heappush(heap, (key, idx))
-        elif key > heap[0][0]:
-            heapq.heapreplace(heap, (key, idx))
-    return ds.select([i for _, i in heap])
-
-
-def normalize_batch(batch):
-    return {
-        "gradient": F.normalize(batch["gradient"].cuda(), dim=1).cpu(),
-    }
 
 
 def add_index(
@@ -92,19 +86,74 @@ def add_index(
     assert index is not None, "Index must be provided for attribution or loss filtering"
 
     gradient_ds = (
-        load_index(index)
+        load_gradient_dataset(index)
         .with_format("torch")
-        .map(normalize_batch, batched=True, batch_size=512)
-        .sort("row_number")
-        .select_columns(["gradient", "loss", "row_number"])
     )
-
     def generator():
         for row, grad_row in zip(dataset, gradient_ds):
             yield {**dict(row), **dict(grad_row)}
 
     return assert_type(Dataset, Dataset.from_generator(generator))
 
+
+def get_mean_normalized_gradients(
+    dataset: Dataset,
+    batch_size: int = 512,
+) -> Tensor:
+    """Compute the mean of the gradients in the dataset."""
+    gradients_sum = torch.zeros(dataset['gradients'][1].shape, device="cuda")
+    
+    for i in tqdm(range(0, len(dataset), batch_size), desc="Computing mean gradient"):
+        gradients_batch = dataset[i : min(i + batch_size, len(dataset))]['gradients'].cuda()
+        gradients_sum += gradients_batch.sum(0)
+        
+        del gradients_batch
+    
+    return gradients_sum / len(dataset)
+
+
+def attribution_filter(
+    args: FilterConfig,
+    train: Dataset,
+) -> Dataset:
+    query = None
+    if args.query_index:
+        print("Loading query index...")
+        query_dataset = load_gradient_dataset(args.query_index).with_format("torch")
+    else:
+        query_dataset = train
+
+    # Compute the mean of the normalized gradients in the query index
+    query = get_mean_normalized_gradients(query_dataset, args.batch_size)
+            
+    importance_scores = torch.zeros(len(train), device="cuda")
+    for i in tqdm(range(0, len(train), args.batch_size), desc="Computing importance scores"):
+        gradients_batch = train[i : min(i + args.batch_size, len(train))]['gradients'].cuda()
+        
+        gradients_batch = F.normalize(gradients_batch, dim=1)
+        
+        batch_scores = gradients_batch @ query
+
+        importance_scores[
+            i : min(i + args.batch_size, len(train))
+        ] += batch_scores
+        
+        del gradients_batch
+    
+    if args.sample:
+        probs = torch.softmax(importance_scores / args.temperature, dim=0)
+        selected_indices = torch.multinomial(probs, args.num_examples, replacement=False)
+    else:
+        # Select the top-k items
+        sorted_scores = torch.argsort(importance_scores)
+        selected_indices = (
+            sorted_scores[:args.num_examples]
+            if args.lowest
+            else sorted_scores[-args.num_examples:]
+        )
+
+    return train.select(selected_indices)
+        
 
 def main(
     args: FilterConfig,
@@ -124,25 +173,12 @@ def main(
         run_name = args.name
 
     with nullcontext() if rank == 0 else redirect_stdout(None):
-        if args.query_index and args.filter == "attribution":
-            print("loading index...")
-            query_index = (
-                load_index(args.query_index)
-                    .with_format("torch")
-                    .map(normalize_batch, batched=True, batch_size=512)      
-            )
-            print("query index loaded")
-            query = assert_type(Tensor, query_index["gradient"]).mean(0).cuda()
-            del query_index
-        else:
-            query = None
-        
         dataset = assert_type(Dataset, load_dataset(args.dataset, split="train"))
 
         if args.filter == "attribution" or args.filter == "loss":
             dataset = add_index(dataset, args.dataset_index)
 
-        dataset.shuffle(args.seed).with_format("torch")
+        dataset.shuffle(args.seed)
 
         train, eval = dataset.train_test_split(
             test_size=0.05,
@@ -159,21 +195,7 @@ def main(
         if args.num_examples == 0:
             pass
         elif args.filter == "attribution":
-            if query == None:
-                query = train["gradient"].mean(0).cuda()
-            
-            def importance_score_generator():
-                for row in train:
-                    row = dict(row)
-                    yield {
-                        **row,
-                        "importance_score": (row["gradient"].cuda() @ query).item(),
-                    }
-
-            train = assert_type(
-                Dataset, Dataset.from_generator(importance_score_generator)
-            )
-            train = select_topk(train, args.num_examples, "importance_score", lowest=args.lowest)
+            train  = attribution_filter(args, train)
         elif args.filter == "classification":
             ranks = {"excellent": 4, "good": 3, "average": 2, "poor": 1, "very poor": 0}
 
@@ -190,15 +212,22 @@ def main(
             )
         elif args.filter == "loss":
             train = train.map(
-                lambda x: {"loss": x["loss"].mean().item()},
-                remove_columns=["gradient"],
+                lambda x: {"loss": x["loss"].item()},
+                remove_columns=["gradients"],
             )
-            train = select_topk(train, args.num_examples, "loss", lowest=args.lowest)
+            # Select the top-k items
+            sorted_scores = torch.argsort(train["loss"])
+            selected_indices = (
+                sorted_scores[:args.num_examples]
+                if args.lowest
+                else sorted_scores[-args.num_examples:]
+            )
+            train = train.select(selected_indices)
         elif args.filter == "random":
             train = train.select(range(min(args.num_examples, len(train))))
         else:
             raise ValueError(f"Invalid filter: {args.filter}")
-
+        
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
             torch_dtype="bfloat16",
@@ -206,15 +235,22 @@ def main(
         tokenizer = AutoTokenizer.from_pretrained(args.model, max_length=8192)
         model, tokenizer = setup_chat_format(model, tokenizer)
 
+        # Create DataConfig for tokenization
+        data_config = DataConfig(
+            prompt_column=args.prompt_column,
+            completion_column=args.completion_column,
+            conversation_column=args.conversation_column,
+        )
+
         train = train.map(
             tokenize,
             batched=True,
-            fn_kwargs=dict(args=args, tokenizer=tokenizer),
+            fn_kwargs=dict(args=data_config, tokenizer=tokenizer),
         )
         eval = eval.map(
             tokenize,
             batched=True,
-            fn_kwargs=dict(args=args, tokenizer=tokenizer),
+            fn_kwargs=dict(args=data_config, tokenizer=tokenizer),
         )
 
         # https://github.com/huggingface/alignment-handbook/blob/main/recipes/smollm2/sft/config.yaml

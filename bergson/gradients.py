@@ -11,6 +11,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
+from .math import reshape_to_nearest_square
 from .utils import assert_type
 
 NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
@@ -199,6 +200,8 @@ class GradientProcessor:
     projection_dim: int | None = None
     """Number of rows and columns to project the gradients to. If `None`, keep the
     original shape of the gradients."""
+
+    reshape_to_square: bool = False
 
     @classmethod
     def load(
@@ -414,6 +417,10 @@ class GradientCollector(ContextDecorator):
 
             # Normalize the gradients using the second moment matrix
             P /= norm.avg_sq.sqrt().add_(1e-8)
+
+            if self.processor.reshape_to_square:
+                P = reshape_to_nearest_square(P)
+                o, i = P.shape[-2:]
 
             # Project the gradients to the lower-dimensional space
             if p is not None:

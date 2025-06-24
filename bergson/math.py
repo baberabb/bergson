@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch import Tensor
 
@@ -69,3 +71,32 @@ def trace(matrices: Tensor) -> Tensor:
     """Version of `torch.trace` that works for batches of matrices."""
     diag = torch.linalg.diagonal(matrices)
     return diag.sum(dim=-1, keepdim=True).unsqueeze(-1)
+
+
+def reshape_to_nearest_square(a: torch.Tensor) -> torch.Tensor:
+    """
+    Reshape a 2-D (or any-D) tensor into the *most square* 2-D shape
+    that preserves the total number of elements.
+
+    Returns
+    -------
+    out   : reshaped tensor (view when possible)
+    shape : tuple (rows, cols) that was chosen
+    """
+    n = math.prod(a.shape[-2:])
+    if n == 0:
+        raise ValueError("empty tensor")
+
+    # search divisors closest to sqrt(n)
+    root = math.isqrt(n)
+    cols, rows = None, None
+    for d in range(root, 0, -1):
+        if n % d == 0:
+            rows = d
+            cols = n // d
+            break
+
+    if rows is None or cols is None:
+        raise ValueError("could not find a valid shape for the tensor")
+
+    return a.reshape(*a.shape[:-2], rows, cols)
