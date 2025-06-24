@@ -29,6 +29,7 @@ def collect_gradients(
     batches: list[list[int]] | None = None,
     skip_preconditioners: bool = False,
     target_modules: set[str] | None = None,
+    kl_divergence: bool | None = None,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -90,21 +91,35 @@ def collect_gradients(
             device=model.device,
         )
 
-        with collector:
-            logits = model(x).logits
+        if kl_divergence:
+            model.enable_adapters()
+            with collector:
+                outputs_finetuned = model(x).logits
+                model.disable_adapters()
+                with torch.no_grad():
+                    outputs_base = model(x).logits
+                # kl divergence on the logits
+                outputs_finetuned = torch.log_softmax(outputs_finetuned.reshape(-1, outputs_finetuned.shape[-1]), dim=-1)
+                outputs_base = torch.softmax(outputs_base.reshape(-1, outputs_base.shape[-1]), dim=-1)
+                losses = torch.nn.functional.kl_div(outputs_finetuned, outputs_base, reduction="batchmean")
+                losses.backward()
+                model.zero_grad()
+        else:
+            with collector:
+                logits = model(x).logits
 
-            losses = F.cross_entropy(
-                logits[:, :-1].reshape(-1, logits.size(-1)),
-                y[:, 1:].flatten(),
-                reduction="none",
-            ).reshape_as(y[:, 1:])
+                losses = F.cross_entropy(
+                    logits[:, :-1].reshape(-1, logits.size(-1)),
+                    y[:, 1:].flatten(),
+                    reduction="none",
+                ).reshape_as(y[:, 1:])
 
-            masks = y[:, 1:] != -100
-            denoms = masks.sum(dim=1, dtype=logits.dtype)
-            losses = losses.sum(1).div(denoms)
-            losses.mean().backward()
+                masks = y[:, 1:] != -100
+                denoms = masks.sum(dim=1, dtype=logits.dtype)
+                losses = losses.sum(1).div(denoms)
+                losses.mean().backward()
 
-            model.zero_grad()
+                model.zero_grad()
 
         # It turns out that it's very important for efficiency to write the gradients
         # this way instead of first concatenating them and then writing.

@@ -79,11 +79,12 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
     try:
         adapters = model.active_adapters()
     except ValueError:
+        assert cfg.kl_divergence, "KL divergence requires PEFT adapters."
+        
         target_modules = None
     else:
         if rank == 0:
             print("PEFT model detected.")
-
         target_modules = set()
 
         for adapter_name in adapters:
@@ -143,6 +144,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
         batches=batches,
         skip_preconditioners=cfg.skip_preconditioners,
         target_modules=target_modules,
+        kl_divergence=cfg.kl_divergence,
     )
 
 

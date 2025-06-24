@@ -73,6 +73,9 @@ class IndexConfig:
     drop_columns: bool = False
     """Only return the new dataset columns."""
 
+    kl_divergence: bool = False
+    """Whether to compute KL as a loss function."""
+
 
 def ceildiv(a: int, b: int) -> int:
     """Ceiling division of two integers."""
