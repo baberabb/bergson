@@ -4,7 +4,7 @@ from typing import Callable
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from datasets import Dataset, load_dataset
+from datasets import Dataset, DatasetDict, IterableDatasetDict, load_dataset
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from transformers import AutoTokenizer
 
@@ -20,8 +20,6 @@ def worker_wrapper(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset, wo
 
 
 def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
-    mp.set_sharing_strategy("file_system")
-
     # Do all the data loading and preprocessing on the main process
     data_str = cfg.data.dataset
     if data_str.endswith(".csv"):
@@ -30,7 +28,10 @@ def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
         ds = assert_type(Dataset, Dataset.from_json(data_str))
     else:
         try:
-            ds = assert_type(Dataset, load_dataset(data_str, split="train"))
+            ds = load_dataset(data_str, split="train", streaming=cfg.streaming)
+
+            if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
+                raise NotImplementedError("DatasetDicts and IterableDatasetDicts are not supported.")
         except ValueError as e:
             # Automatically use load_from_disk if appropriate
             if "load_from_disk" in str(e):
@@ -38,38 +39,42 @@ def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
             else:
                 raise e
 
-    metadata = {"length"}
-    if cfg.drop_columns:
-        metadata |= set(ds.column_names)
+    remove_columns = ds.column_names if cfg.drop_columns else None
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model)
-    ds = ds.map(lambda _, idx: dict(_row=idx), with_indices=True).shuffle(seed=42)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model, model_max_length=cfg.token_batch_size, revision=cfg.revision)
     ds = ds.map(
         tokenize,
         batched=True,
         fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
+        remove_columns=remove_columns,
     )
-    ds = ds.sort("length", reverse=True)
-
-    # Find an available port for distributed training
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        _, port = s.getsockname()
 
     world_size = torch.cuda.device_count()
+    if world_size <= 1:
+        # Run the worker directly if no distributed training is needed. This is great
+        # for debugging purposes.
+        worker_fn(0, 1, cfg, ds)
+    else:
+        # Set up multiprocessing and distributed training
+        mp.set_sharing_strategy("file_system")
 
-    ctx = start_processes(
-        "build",
-        worker_wrapper,
-        args={i: (i, world_size, cfg, ds, worker_fn) for i in range(world_size)},
-        envs={
-            i: {
-                "LOCAL_RANK": str(i),
-                "MASTER_ADDR": "localhost",
-                "MASTER_PORT": str(port),
-            }
-            for i in range(world_size)
-        },
-        logs_specs=DefaultLogsSpecs(),
-    )
-    ctx.wait()
+        # Find an available port for distributed training
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            _, port = s.getsockname()
+
+        ctx = start_processes(
+            "build",
+            worker_wrapper,
+            args={i: (i, world_size, cfg, ds, worker_fn) for i in range(world_size)},
+            envs={
+                i: {
+                    "LOCAL_RANK": str(i),
+                    "MASTER_ADDR": "localhost",
+                    "MASTER_PORT": str(port),
+                }
+                for i in range(world_size)
+            },
+            logs_specs=DefaultLogsSpecs(),
+        )
+        ctx.wait()

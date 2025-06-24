@@ -125,9 +125,10 @@ class CovarianceProcessor:
         def callback_activation(name: str, a: torch.Tensor):
             activation_covariance = activation_covariances.get(name, None)
             if activation_covariance is None:
-                activation_covariances[name] = a.T.matmul(a)
+                activation_covariances[name] = a.T.matmul(a)  # [O,O]
+
             else:
-                activation_covariance.addmm_(a.T, a)
+                activation_covariance.addmm_(a.T, a)  # [O,O]
 
         def callback_gradient(name: str, g: torch.Tensor):
             gradient_covariance = gradient_covariances.get(name, None)
@@ -136,7 +137,7 @@ class CovarianceProcessor:
 
             if gradient_covariance is None:
                 # Initialize the covariance matrix for this module
-                gradient_covariances[name] = g.T.matmul(g)
+                gradient_covariances[name] = g.T.matmul(g)  # [O,O]
             else:
                 gradient_covariances[name].addmm_(g.T, g)  # [O,O]
 
@@ -167,13 +168,17 @@ class CovarianceProcessor:
 
         # dist.barrier()
         # Reduce the preconditioners across processes if needed
-        dist.barrier() 
+        dist.barrier()
         if dist.is_initialized():
             for activation_covariance in activation_covariances.values():
                 dist.all_reduce(activation_covariance, op=dist.ReduceOp.SUM)
+                # Normalize the covariance matrices by the number of samples
+                # activation_covariance.div_(total_batches)
 
             for gradient_covariance in gradient_covariances.values():
                 dist.all_reduce(gradient_covariance, op=dist.ReduceOp.SUM)
+                # Normalize the covariance matrices by the number of samples
+                # gradient_covariance.div_(total_batches)
 
         print(f"Rank {rank}: Processed {total_processed} total samples in {total_batches} batches")
         # save using safetensors

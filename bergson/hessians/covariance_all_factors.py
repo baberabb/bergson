@@ -21,7 +21,7 @@ def compute_covariance(
     processor: GradientProcessor,
     path: str,
     *,
-    batches: list[slice] | None = None,
+    batches: list[list[int]] | None = None,
     target_modules: set[str] | None = None,
 ):
     """
@@ -31,9 +31,6 @@ def compute_covariance(
 
     if rank == 0:
         print(f"Computing covariance matrices for {len(data)} documents...")
-    # Batch size of one by default
-    if batches is None:
-        batches = [slice(idx, idx + 1) for idx in range(len(data))]
 
     # Mutable state for the GradientCollector callback
     mod_grads = []
@@ -161,7 +158,7 @@ def compute_eigenvalue_correction(
     processor: GradientProcessor,
     path: str,
     *,
-    batches: list[slice] | None = None,
+    batches: list[list[int]] | None = None,
     target_modules: set[str] | None = None,
 ):
     """
@@ -172,8 +169,6 @@ def compute_eigenvalue_correction(
     if rank == 0:
         print(f"Computing eigenvalue correction for {len(data)} documents...")
     # Batch size of one by default
-    if batches is None:
-        batches = [slice(idx, idx + 1) for idx in range(len(data))]
 
     activation_covariance_eigen = load_file(path + "/activation_covariance_eigen.safetensors", device=f"cuda:{rank}")
     gradient_covariance_eigen = load_file(path + "/gradient_covariance_eigen.safetensors", device=f"cuda:{rank}")

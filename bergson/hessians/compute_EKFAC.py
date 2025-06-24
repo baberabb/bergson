@@ -3,11 +3,12 @@ from datetime import timedelta
 
 import torch
 import torch.distributed as dist
-from datasets import Dataset
+from datasets import Dataset, IterableDataset
 from torch.distributed.fsdp import fully_shard
+from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig, PreTrainedModel
 
-from bergson.data import IndexConfig, compute_batches
+from bergson.data import IndexConfig, allocate_batches
 from bergson.distributed import distributed_computing
 from bergson.gradients import GradientProcessor
 from bergson.hessians.covariance_all_factors import (
@@ -15,24 +16,26 @@ from bergson.hessians.covariance_all_factors import (
     compute_eigendecomposition,
     compute_eigenvalue_correction,
 )
-from bergson.utils import get_layer_list
+from bergson.processing import fit_normalizers
+from bergson.utils import assert_type, get_layer_list
 
 
-def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
-    ds = ds.select(list(range(96)))
-    # These should be set by the main process
-    addr = os.environ.get("MASTER_ADDR", "localhost")
-    port = os.environ.get("MASTER_PORT", "29500")
-
-    dist.init_process_group(
-        "nccl",
-        init_method=f"tcp://{addr}:{port}",
-        device_id=torch.device(f"cuda:{rank}"),
-        rank=rank,
-        timeout=timedelta(hours=1),
-        world_size=world_size,
-    )
+def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableDataset):
     torch.cuda.set_device(rank)
+
+    # These should be set by the main process
+    if world_size > 1:
+        addr = os.environ.get("MASTER_ADDR", "localhost")
+        port = os.environ.get("MASTER_PORT", "29500")
+
+        dist.init_process_group(
+            "nccl",
+            init_method=f"tcp://{addr}:{port}",
+            device_id=torch.device(f"cuda:{rank}"),
+            rank=rank,
+            timeout=timedelta(hours=1),
+            world_size=world_size,
+        )
 
     match cfg.precision:
         case "bf16":
@@ -62,6 +65,7 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
             else None
         ),
         torch_dtype=dtype,
+        revision=cfg.revision,
     )
 
     embed = model.get_input_embeddings()
@@ -101,16 +105,38 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
 
                 target_modules.add(name.removeprefix("model."))
 
-    if os.path.exists(cfg.ekfac_path):
+    if os.path.exists(cfg.processor_path):
         if rank == 0:
-            print(f"Loading matrices from '{cfg.ekfac_path}'")
+            print(f"Loading processor from '{cfg.processor_path}'")
 
         processor = GradientProcessor.load(
             cfg.processor_path,
             map_location=f"cuda:{rank}",
         )
     else:
-        normalizers = {}
+        if cfg.normalizer != "none":
+            # Evenly sample `stats_sample_size` examples to compute statistics
+            if isinstance(ds, Dataset):
+                if cfg.stats_sample_size is not None and cfg.stats_sample_size < len(ds):
+                    stats_ds = ds.shuffle(seed=0).select(range(cfg.stats_sample_size))
+                else:
+                    stats_ds = ds
+            else:
+                if cfg.stats_sample_size is not None:
+                    stats_iterable_ds = ds.shuffle(seed=0).take(cfg.stats_sample_size)
+                    stats_ds = assert_type(Dataset, Dataset.from_generator(lambda: iter(stats_iterable_ds)))
+                else:
+                    stats_ds = assert_type(Dataset, Dataset.from_generator(lambda: iter(ds)))
+
+            normalizers = fit_normalizers(
+                model,
+                stats_ds,
+                batches=allocate_batches(stats_ds["length"], cfg.token_batch_size),
+                kind=cfg.normalizer,
+                target_modules=target_modules,
+            )
+        else:
+            normalizers = {}
 
         processor = GradientProcessor(
             normalizers,
@@ -120,15 +146,46 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
         if rank == 0:
             processor.save(cfg.run_path)
 
-    batches = compute_batches(ds["length"], cfg.token_batch_size)
-    compute_all_factors(
-        model,
-        ds,
-        processor,
-        cfg.run_path,
-        batches=batches,
-        target_modules=target_modules,
-    )
+    if isinstance(ds, Dataset):
+        batches = allocate_batches(ds["length"], cfg.token_batch_size)
+
+        compute_all_factors(
+            model,
+            ds,
+            processor,
+            cfg.run_path,
+            batches=batches,
+            target_modules=target_modules,
+        )
+
+    else:
+        # Convert each chunk of the IterableDataset to Dataset then collect their gradients
+        buf, chunk_id = [], 0
+
+        def flush():
+            nonlocal buf, chunk_id
+            if not buf:
+                return
+            sub_ds = assert_type(Dataset, Dataset.from_list(buf))
+            batches = allocate_batches(sub_ds["length"], cfg.token_batch_size)
+
+            compute_all_factors(
+                model,
+                sub_ds,
+                processor,
+                os.path.join(cfg.run_path, f"chunk-{chunk_id:05d}"),
+                batches=batches,
+                target_modules=target_modules,
+            )
+
+            buf.clear()
+            chunk_id += 1
+
+        for ex in tqdm(ds, desc="Collecting gradients"):
+            buf.append(ex)
+            if len(buf) == cfg.streaming_chunk_size:
+                flush()
+        flush()
 
 
 def compute_all_factors(
@@ -137,7 +194,7 @@ def compute_all_factors(
     processor: GradientProcessor,
     path: str,
     *,
-    batches: list[slice] | None = None,
+    batches: list[list[int]] | None = None,
     target_modules: set[str] | None = None,
 ):
     compute_covariance(
