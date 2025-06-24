@@ -130,6 +130,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
             normalizers,
             fisher_fourth_root=cfg.fisher_fourth_root,
             projection_dim=cfg.projection_dim or None,
+            reshape_to_square=cfg.reshape_to_square,
         )
         if rank == 0:
             processor.save(cfg.run_path)

@@ -52,6 +52,9 @@ class IndexConfig:
     projection_dim: int = 16
     """Dimension of the random projection for the index, or 0 to disable it."""
 
+    reshape_to_square: bool = False
+    """Whether to reshape the gradients to a square matrix."""
+
     token_batch_size: int = 8192
     """Batch size in tokens for building the index."""
 
