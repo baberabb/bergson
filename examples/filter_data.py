@@ -72,6 +72,12 @@ class FilterConfig():
     the sampling probabilities. Lower values make the distribution more
     uniform, while higher values make it more peaked."""
 
+    num_epochs: int = 1
+    """Number of epochs to train for."""
+
+    hf_token: str | None = None
+    """Hugging Face token to use for the dataset."""
+
 
 def set_seeds(seed: int):
     """Set all random seeds for reproducibility."""
@@ -116,14 +122,12 @@ def attribution_filter(
     args: FilterConfig,
     train: Dataset,
 ) -> Dataset:
-    query = None
-    if args.query_index:
-        print("Loading query index...")
-        query_dataset = load_gradient_dataset(args.query_index).with_format("torch")
-    else:
-        query_dataset = train
-
-    # Compute the mean of the normalized gradients in the query index
+    query_dataset = (
+        load_gradient_dataset(args.query_index).with_format("torch")
+        if args.query_index
+        else train
+    )
+    # Compute the mean of the normalized gradients in the query dataset
     query = get_mean_normalized_gradients(query_dataset, args.batch_size)
             
     importance_scores = torch.zeros(len(train), device="cuda")
@@ -267,7 +271,7 @@ def main(
                 gradient_accumulation_steps=32,
                 gradient_checkpointing=True,
                 learning_rate=3e-4,
-                num_train_epochs=1,
+                num_train_epochs=args.num_epochs,
                 warmup_ratio=0.1,
                 lr_scheduler_type="cosine",
                 bf16=True,
@@ -287,6 +291,11 @@ def main(
         if rank == 0:
             trainer.save_model(f"examples/runs/{run_name}")
             tokenizer.save_pretrained(f"examples/runs/{run_name}")
+
+            if args.hf_token is not None:
+                os.environ["HF_TOKEN"] = args.hf_token
+                trainer.push_to_hub(repo_id=f"EleutherAI/{run_name}")
+                tokenizer.push_to_hub(repo_id=f"EleutherAI/{run_name}")
 
 
 if __name__ == "__main__":

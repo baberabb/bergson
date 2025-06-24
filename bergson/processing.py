@@ -26,7 +26,7 @@ def collect_gradients(
     processor: GradientProcessor,
     path: str,
     *,
-    batches: list[slice] | None = None,
+    batches: list[list[int]] | None = None,
     skip_preconditioners: bool = False,
     target_modules: set[str] | None = None,
 ):
@@ -37,7 +37,7 @@ def collect_gradients(
 
     # Batch size of one by default
     if batches is None:
-        batches = [slice(idx, idx + 1) for idx in range(len(data))]
+        batches = [[idx] for idx in range(len(data))]
 
     # Mutable state for the GradientCollector callback
     mod_grads = []
@@ -48,7 +48,6 @@ def collect_gradients(
     hi = torch.finfo(torch.float16).max
 
     def callback(name: str, g: torch.Tensor):
-        # Prevent infs when casting to fp16 from bf16 or fp32
         g = g.flatten(1).clamp_(lo, hi)
 
         # Asynchronously move the gradient to CPU and convert to fp16
@@ -83,8 +82,8 @@ def collect_gradients(
         fill_value=0.0,
     )
 
-    for sl in tqdm(batches, disable=rank != 0, desc="Building index"):
-        batch = data[sl]
+    for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
+        batch = data[indices]
         x, y = pad_and_tensor(
             batch["input_ids"],  # type: ignore
             labels=batch.get("labels"),  # type: ignore
@@ -93,6 +92,7 @@ def collect_gradients(
 
         with collector:
             logits = model(x).logits
+
             losses = F.cross_entropy(
                 logits[:, :-1].reshape(-1, logits.size(-1)),
                 y[:, 1:].flatten(),
@@ -102,33 +102,37 @@ def collect_gradients(
             masks = y[:, 1:] != -100
             denoms = masks.sum(dim=1, dtype=logits.dtype)
             losses = losses.sum(1).div(denoms)
-
             losses.mean().backward()
 
             model.zero_grad()
 
-        # This forces a host-device sync, but hopefully the transfer to CPU is
-        # already done since we called to("cpu", non_blocking=True) in the callback.
-        # We could make this even better, potentially, by using a ring buffer to wait
-        # longer before syncing.
-        indices = batch.get("_row") or sl
-        grad_buffer[indices, :] = torch.cat(mod_grads, dim=1).numpy()
-        per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
+        # It turns out that it's very important for efficiency to write the gradients
+        # this way instead of first concatenating them and then writing.
+        start = 0
+        for mod in mod_grads:
+            end = start + mod.shape[1]
+            grad_buffer[indices, start:end] = mod.numpy()
+            start = end
+
         mod_grads.clear()
+        per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
 
     chols = {}
     for name, prec in preconditioners.items():
         if dist.is_initialized():
             dist.all_reduce(prec)
 
-        chols[name] = torch.linalg.cholesky(prec / len(data))
+        L, info = torch.linalg.cholesky_ex(prec / len(data))
+        if info.any() and rank == 0:
+            print(f"Warning: {name} has a singular second moment matrix.")
+
+        chols[name] = L
 
     processor.preconditioners = chols
     if dist.is_initialized():
         dist.reduce(per_doc_losses, dst=0)
 
     if rank == 0:
-        data = data.sort("_row").remove_columns("_row")
         data = data.add_column(
             "loss",
             per_doc_losses.cpu().numpy(),
@@ -146,23 +150,17 @@ def collect_gradients(
 def fit_normalizers(
     model: PreTrainedModel,
     data: Dataset,
+    batches: list[list[int]],
     *,
     kind: Literal["adafactor", "adam"] = "adafactor",
-    max_documents: int | None = None,
     target_modules: set[str] | None = None,
 ) -> dict[str, Normalizer]:
     """
     Estimate the second moments of the model's gradients using a subset of the dataset.
     """
-    max_documents = max_documents or len(data)
     normalizers: dict[str, Normalizer] = {}
     rank = dist.get_rank() if dist.is_initialized() else 0
-    world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-    # Round down to nearest multiple of world_size
-    max_documents -= max_documents % world_size
-
-    batches = [slice(idx + rank, idx + rank + 1) for idx in range(0, max_documents, world_size)]
     # Just to make the pbar more accurate
     rng = random.Random(0)
     rng.shuffle(batches)
@@ -203,8 +201,8 @@ def fit_normalizers(
 
     callback = adafactor_update if kind == "adafactor" else adam_update
 
-    for sl in tqdm(batches, disable=rank != 0, desc="Estimating normalizers"):
-        batch = data[sl]
+    for indices in tqdm(batches, disable=rank != 0, desc="Estimating normalizers"):
+        batch = data[indices]
 
         with GradientCollector(
             model.base_model,
@@ -222,14 +220,14 @@ def fit_normalizers(
     # Divide by the number of documents processed and average across all ranks
     for normalizer in normalizers.values():
         if isinstance(normalizer, AdamNormalizer):
-            normalizer.avg_sq.div_(max_documents)
+            normalizer.avg_sq.div_(len(data))
 
             if dist.is_initialized():
                 dist.all_reduce(normalizer.avg_sq, op=dist.ReduceOp.AVG)
 
         elif isinstance(normalizer, AdafactorNormalizer):
-            normalizer.row.div_(max_documents)
-            normalizer.col.div_(max_documents)
+            normalizer.row.div_(len(data))
+            normalizer.col.div_(len(data))
 
             if dist.is_initialized():
                 dist.all_reduce(normalizer.row, op=dist.ReduceOp.AVG)
