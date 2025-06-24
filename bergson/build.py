@@ -82,7 +82,9 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
         target_modules = None
     else:
         if rank == 0:
-            print("PEFT model detected.")
+            print("PEFT model detected. Using Adam and reshape_to_square = True")
+            cfg.normalizer = "adam"
+            cfg.reshape_to_square = True
 
         target_modules = set()
 
