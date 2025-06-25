@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -13,6 +14,7 @@ from bergson.gradients import (
     GradientCollector,
     GradientProcessor,
 )
+from bergson.hessians.collector import EkfacCollector
 
 
 def compute_covariance(
@@ -32,19 +34,16 @@ def compute_covariance(
     if rank == 0:
         print(f"Computing covariance matrices for {len(data)} documents...")
 
-    # Mutable state for the GradientCollector callback
-    mod_grads = []
     activation_covariances = {}
-
     gradient_covariances = {}
 
-    # TODO: Handle this more elegantly
-    lo = torch.finfo(torch.float16).min
-    hi = torch.finfo(torch.float16).max
+    # # TODO: Handle this more elegantly
+    # lo = torch.finfo(torch.float16).min
+    # hi = torch.finfo(torch.float16).max
 
     def callback_activation(name: str, a: torch.Tensor):
         activation_covariance = activation_covariances.get(name, None)
-
+        print(name)
         # a = a.clamp_(lo, hi)
         a = a.reshape(-1, a.shape[-1])  # [N*S, O]
 
@@ -53,9 +52,22 @@ def compute_covariance(
         else:
             activation_covariance.addmm_(a.mT, a)
 
+    # def callback_activation(name: str, a: torch.Tensor):
+    #     activation_covariance = activation_covariances.get(name, None)
+
+    #     # a = a.clamp_(lo, hi)
+    #     a = a.reshape(-1, a.shape[-1])  # [N*S, O]
+
+    #     if activation_covariance is None:
+    #         activation_covariances[name] = (a.mT.matmul(a)).to("cpu", non_blocking=True)
+    #     else:
+    #         activation_covariance.to(a.device, non_blocking=True)
+    #         activation_covariance.addmm_(a.mT, a)
+    #         activation_covariance.to("cpu", non_blocking=True)  # [O,O]
+
     def callback_gradient(name: str, g: torch.Tensor):
         gradient_covariance = gradient_covariances.get(name, None)
-
+        print(name)
         # Prevent infs when casting to fp16 from bf16 or fp32
         g = g.reshape(-1, g.shape[-1])  # [N*S, O]
         # g = g.clamp_(lo, hi)  # [N*S, O]
@@ -66,20 +78,35 @@ def compute_covariance(
         else:
             gradient_covariances[name].addmm_(g.T, g)  # [O,O]
 
-    collector = GradientCollector(
+    # def callback_gradient(name: str, g: torch.Tensor):
+    #     gradient_covariance = gradient_covariances.get(name, None)
+
+    #     # Prevent infs when casting to fp16 from bf16 or fp32
+    #     g = g.reshape(-1, g.shape[-1])  # [N*S, O]
+    #     # g = g.clamp_(lo, hi)  # [N*S, O]
+
+    #     if gradient_covariance is None:
+    #         # Initialize the covariance matrix for this module
+    #         gradient_covariances[name] = g
+    #     else:
+    #         gradient_covariances[name].add_(g)  # [O,O]
+
+    collector = EkfacCollector(
         model.base_model,
         closure=callback_gradient,
         processor=processor,
         target_modules=target_modules,
         fwd_closure=callback_activation,
     )
-
-    # per_doc_losses = torch.full(
-    #     (len(data),),
-    #     device=model.device,
-    #     dtype=torch.float16,
-    #     fill_value=0.0,
+    # collector = GradientCollector(
+    #     model.base_model,
+    #     closure=callback_gradient,
+    #     processor=processor,
+    #     target_modules=target_modules,
+    #     fwd_closure=callback_activation,
     # )
+
+    total_processed = torch.tensor(0, device=model.device)
 
     for sl in tqdm(batches, disable=rank != 0, desc="Computing covariances"):
         batch = data[sl]
@@ -88,6 +115,8 @@ def compute_covariance(
             labels=batch.get("labels"),  # type: ignore
             device=model.device,
         )
+
+        total_processed += x.numel()
 
         with collector:
             logits = model(x).logits
@@ -105,44 +134,38 @@ def compute_covariance(
 
             model.zero_grad()
 
-        # This forces a host-device sync, but hopefully the transfer to CPU is
-        # already done since we called to("cpu", non_blocking=True) in the callback.
-        # We could make this even better, potentially, by using a ring buffer to wait
-        # longer before syncing.
-        # indices = batch.get("_row") or sl
-        # per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
-        mod_grads.clear()
-
         if dist.is_initialized():
             for activation_covariance in activation_covariances.values():
                 dist.all_reduce(activation_covariance, op=dist.ReduceOp.SUM)
             for gradient_covariance in gradient_covariances.values():
                 dist.all_reduce(gradient_covariance, op=dist.ReduceOp.SUM)
 
-    # if dist.is_initialized():
-    #     dist.reduce(per_doc_losses, dst=0)
+    if dist.is_initialized():
+        dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
 
     if rank == 0:
         save_file(activation_covariances, os.path.join(path, "activation_covariance.safetensors"))
         save_file(gradient_covariances, os.path.join(path, "gradient_covariance.safetensors"))
+        save_file({"total_processed": total_processed}, os.path.join(path, "total_processed.safetensors"))
 
         print(f"Covariance matrices saved to {path}.")
 
 
-def compute_eigendecomposition(path: str):
-    covariances = load_file(path)
+def compute_eigendecomposition(path: str, type: Literal["activation", "gradient"]):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    base, ext = os.path.splitext(path)
-    eigen_path = base + "_eigen" + ext
+    covariances = load_file(os.path.join(path, f"{type}_covariance.safetensors"), device=device)
+
+    num_processed = load_file(os.path.join(path, "total_processed.safetensors"), device=device)["total_processed"]
+
+    eigen_path = path + f"/{type}_covariance_eigen.safetensors"
     covariances_eigen = {}
-    rank = dist.get_rank() if dist.is_initialized() else 0
-    if rank == 0:
-        print(f"Computing covariance eigendecompositions for {os.path.basename(path)}...")
 
     for name, covariance in covariances.items():
-        eigenvalues, eigenvectors = torch.linalg.eigh(covariance.to(torch.float32))
+        original_dtype = covariance.dtype
+        eigenvalues, eigenvectors = torch.linalg.eigh(covariance.to(torch.float32) / num_processed)
 
-        covariances_eigen[name] = eigenvectors.to(torch.float16).contiguous()
+        covariances_eigen[name] = eigenvectors.to(original_dtype).contiguous()
 
     save_file(
         covariances_eigen,
@@ -168,13 +191,9 @@ def compute_eigenvalue_correction(
 
     if rank == 0:
         print(f"Computing eigenvalue correction for {len(data)} documents...")
-    # Batch size of one by default
 
     activation_covariance_eigen = load_file(path + "/activation_covariance_eigen.safetensors", device=f"cuda:{rank}")
     gradient_covariance_eigen = load_file(path + "/gradient_covariance_eigen.safetensors", device=f"cuda:{rank}")
-
-    # Mutable state for the GradientCollector callback
-    mod_grads = []
 
     eigenvalue_corrections = {}
 
@@ -196,13 +215,6 @@ def compute_eigenvalue_correction(
         processor=processor,
         target_modules=target_modules,
     )
-
-    # per_doc_losses = torch.full(
-    #     (len(data),),
-    #     device=model.device,
-    #     dtype=torch.float16,
-    #     fill_value=0.0,
-    # )
 
     for sl in tqdm(batches, disable=rank != 0, desc="Computing eigenvalue correction"):
         batch = data[sl]
@@ -227,14 +239,6 @@ def compute_eigenvalue_correction(
             losses.mean().backward()
 
             model.zero_grad()
-
-        # This forces a host-device sync, but hopefully the transfer to CPU is
-        # already done since we called to("cpu", non_blocking=True) in the callback.
-        # We could make this even better, potentially, by using a ring buffer to wait
-        # longer before syncing.
-        # indices = batch.get("_row") or sl
-        # per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
-        mod_grads.clear()
 
         if dist.is_initialized():
             for eigenvalue_correction in eigenvalue_corrections.values():

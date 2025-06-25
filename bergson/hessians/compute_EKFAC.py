@@ -1,4 +1,6 @@
+import json
 import os
+from dataclasses import asdict
 from datetime import timedelta
 
 import torch
@@ -118,19 +120,25 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | Ite
         processor = GradientProcessor(
             normalizers,
             fisher_fourth_root=cfg.fisher_fourth_root,
-            projection_dim=cfg.projection_dim or None,
+            projection_dim=None,
         )
         if rank == 0:
             processor.save(cfg.run_path)
 
+    if rank == 0:
+        json.dump(asdict(cfg), open(os.path.join(cfg.run_path, "config.json"), "w"), indent=2)
+    cfg.ekfac_path = os.path.join(cfg.run_path, "influence_results")
+    os.makedirs(cfg.ekfac_path, exist_ok=True)
+
     if isinstance(ds, Dataset):
+        ds = ds.select(list(range(96)))
         batches = allocate_batches(ds["length"], cfg.token_batch_size)
 
         compute_all_factors(
             model,
             ds,
             processor,
-            cfg.run_path,
+            cfg.ekfac_path,
             batches=batches,
             target_modules=target_modules,
         )
@@ -174,6 +182,8 @@ def compute_all_factors(
     batches: list[list[int]] | None = None,
     target_modules: set[str] | None = None,
 ):
+    rank = dist.get_rank() if dist.is_initialized() else 0
+
     compute_covariance(
         model,
         data,
@@ -183,17 +193,16 @@ def compute_all_factors(
         target_modules=target_modules,
     )
 
-    rank = dist.get_rank() if dist.is_initialized() else 0
-
     # TODO: Would it make sense to shard this?
     if rank == 0:
-        activation_covariance_path = os.path.join(path, "activation_covariance.safetensors")
         compute_eigendecomposition(
-            activation_covariance_path,
+            path,
+            type="activation",
         )
-        gradient_covariance_path = os.path.join(path, "gradient_covariance.safetensors")
+
         compute_eigendecomposition(
-            gradient_covariance_path,
+            path,
+            type="gradient",
         )
     dist.barrier()
     compute_eigenvalue_correction(

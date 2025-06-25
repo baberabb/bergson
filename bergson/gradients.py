@@ -306,6 +306,9 @@ class GradientCollector(ContextDecorator):
             if self.target_modules is not None and name not in self.target_modules:
                 continue
 
+            if "attn" in name:
+                continue
+
             # Users of this class really like to know ahead of time what the shapes are
             self.target_info[name] = layer.weight.device, layer.weight.shape
 
@@ -353,45 +356,69 @@ class GradientCollector(ContextDecorator):
             # register backward hook to compute P = sum(U @ V^T)
             bwd_hook = layer.register_full_backward_hook(self._process_grad)
             self._bwd_hooks.append(bwd_hook)
+            # self._register_post_forward_cleanup()
 
         return self
+
+    # def _register_post_forward_cleanup(self):
+    #     """Register a hook that cleans up GPU cache after forward pass completes."""
+    #     # Find the last layer we're hooking
+    #     last_layer_name = max(self.target_info.keys())  # or however you determine order
+    #     last_layer = self.model.get_submodule(last_layer_name)
+    #     print(f"---- {last_layer_name}")
+
+    #     def cleanup_cache(module, inp, out):
+    #         torch.cuda.empty_cache()
+    #         # Optionally log memory usage
+    #         print(f"GPU memory after cache clear: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
+
+    #     cleanup_hook = last_layer.register_forward_hook(cleanup_cache)
+    #     self._fwd_hooks.append(cleanup_hook)
 
     def _save_input(self, module: nn.Module, inp: tuple, _):
         """Save the input to the module for later use in the backward pass."""
         x = inp[0].detach()
         assert x.ndim == 3, f"Expected input of shape [N, S, I], got {x.shape}"
-
-        # Pre-scale the input by the Adafactor column stats
         name = assert_type(str, module._name)
-        norm = self.processor.normalizers.get(name)
-        if isinstance(norm, AdafactorNormalizer):
-            b = norm.col.add(1e-30)
-            if self.processor.fisher_fourth_root:
-                b.pow_(-0.25)
-            else:
-                b.rsqrt_()
-
-            x = x * b.type_as(x)  # [N, S, I] * [I] → [N, S, I]
-
-        # If we're not using AdamNormalizer, we can randomly project the input here
-        # to save memory, rather than waiting until the backward pass.
-        p = self.processor.projection_dim
-        if p is not None and not isinstance(norm, AdamNormalizer):
-            i = module.in_features
-            x = x @ self.projection(name, p, i, "right", x.dtype).T
         if self.fwd_closure:
             self.fwd_closure(name, x)
+            del x
+            torch.cuda.empty_cache()
+        else:
+            # Pre-scale the input by the Adafactor column stats
 
-        module._inputs = x
+            norm = self.processor.normalizers.get(name)
+            if isinstance(norm, AdafactorNormalizer):
+                b = norm.col.add(1e-30)
+                if self.processor.fisher_fourth_root:
+                    b.pow_(-0.25)
+                else:
+                    b.rsqrt_()
+
+                x = x * b.type_as(x)  # [N, S, I] * [I] → [N, S, I]
+
+            # If we're not using AdamNormalizer, we can randomly project the input here
+            # to save memory, rather than waiting until the backward pass.
+            p = self.processor.projection_dim
+            if p is not None and not isinstance(norm, AdamNormalizer):
+                i = module.in_features
+                assert isinstance(i, int)
+                x = x @ self.projection(name, p, i, "right", x.dtype).T
+            # Clear cache after forward pass
+
+            module._inputs = x
 
     def _process_grad(self, module: nn.Module, _, grad_out):
         """Process the incoming gradient wrt the output of the module."""
         # Sanity checks
         assert isinstance(module, nn.Linear), "Expected a Linear module"
         G = grad_out[0]  # [N, S, O]
+        name = assert_type(str, module._name)
+        if self.closure:
+            self.closure(name, G)
+            return
         I = module._inputs  # [N, S, I/q]
 
-        name = assert_type(str, module._name)
         p = self.processor.projection_dim
         o, i = module.out_features, module.in_features
 
@@ -453,8 +480,3 @@ class GradientCollector(ContextDecorator):
             h.remove()
 
         return False
-
-    def flattened_grads(self) -> Tensor:
-        """Concatenate and flatten all the collected gradients into a single tensor."""
-        # concatenate all the flattened [N, p*q] chunks → [N, total]
-        return torch.cat([buf.flatten(1) for buf in self.collected_grads.values()], dim=1)
