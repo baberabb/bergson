@@ -1,8 +1,8 @@
 from typing import Literal
 import os
-import heapq
 from dataclasses import dataclass
 from contextlib import nullcontext, redirect_stdout
+from typing import Sequence
 
 from simple_parsing import parse
 from tqdm import tqdm
@@ -11,15 +11,19 @@ import torch
 import torch.nn.functional as F
 from datasets import load_dataset, Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers.modeling_utils import PreTrainedModel
 from trl import SFTConfig, SFTTrainer, setup_chat_format
 
-from bergson.data import load_gradient_dataset, tokenize, DataConfig
+
+from bergson.data import load_gradient_dataset, tokenize, DataConfig, unflatten
+from bergson.processing import GradientProcessor, GradientCollector
 from bergson.utils import assert_type
 
 
 @dataclass
-class FilterConfig():
+class FilterConfig:
     """Config for building the index and running the model/dataset pipeline."""
+
     filter: Literal["classification", "attribution", "loss", "random"] = "attribution"
     """Filter to apply to the training set before finetuning."""
 
@@ -29,8 +33,11 @@ class FilterConfig():
     dataset: str = "argilla/magpie-ultra-v0.1"
     """Dataset identifier to finetune on."""
 
-    dataset_index: str = ""
+    index_dataset: str = ""
     """Bergson index to use for attribution and loss filtering."""
+
+    precondition: bool = False
+    """Whether to use preconditioner for attribution filtering."""
 
     name: str | None = None
     """Name of the run, used to save the model and tokenizer."""
@@ -53,11 +60,10 @@ class FilterConfig():
     seed: int = 42
     """Seed for reproducibility."""
 
-    query_index: str = ""
+    query_dataset: str = ""
     """
-    Use the mean of this index's gradients as the query for attribution 
-    filtering. If unspecified the query is calculated over the dataset 
-    index.
+    Use the mean of this dataset's gradients as the query for attribution 
+    filtering. If unspecified the query is calculated over the index dataset.
     """
 
     lowest: bool = False
@@ -91,10 +97,8 @@ def add_index(
 ) -> Dataset:
     assert index is not None, "Index must be provided for attribution or loss filtering"
 
-    gradient_ds = (
-        load_gradient_dataset(index)
-        .with_format("torch")
-    )
+    gradient_ds = load_gradient_dataset(index).with_format("torch")
+
     def generator():
         for row, grad_row in zip(dataset, gradient_ds):
             yield {**dict(row), **dict(grad_row)}
@@ -102,62 +106,125 @@ def add_index(
     return assert_type(Dataset, Dataset.from_generator(generator))
 
 
+def precondition(
+    grad: Tensor, processor: GradientProcessor, shapes: dict[str, Sequence[int]]
+) -> Tensor:
+    named_grads = unflatten(grad, shapes)
+
+    def precondition_module_grad(name: str, g: Tensor):
+        P = processor.preconditioners[name]
+        g = g.flatten(1).type_as(P)
+        # Figure out why we use this method and if it makes sense in unbatched context
+        try:
+            g = torch.cholesky_solve(g.mT, P).mT
+        except RuntimeError:
+            breakpoint()
+
+        return g
+
+    return torch.cat([
+        precondition_module_grad(k, v) for k, v in named_grads.items()
+    ], dim=1)
+
+
 def get_mean_normalized_gradients(
     dataset: Dataset,
+    processor: GradientProcessor | None = None,
+    shapes: dict[str, Sequence[int]] = dict(),
     batch_size: int = 512,
 ) -> Tensor:
     """Compute the mean of the gradients in the dataset."""
-    gradients_sum = torch.zeros(dataset['gradients'][1].shape, device="cuda")
-    
+    gradients_sum = torch.zeros(dataset["gradients"][1].shape, device="cuda")
+
     for i in tqdm(range(0, len(dataset), batch_size), desc="Computing mean gradient"):
-        gradients_batch = dataset[i : min(i + batch_size, len(dataset))]['gradients'].cuda()
+        gradients_batch = dataset[i : min(i + batch_size, len(dataset))][
+            "gradients"
+        ].cuda()
         gradients_sum += gradients_batch.sum(0)
-        
+
         del gradients_batch
-    
-    return gradients_sum / len(dataset)
+
+    mean_gradients = gradients_sum / len(dataset)
+
+    if processor is not None:
+        mean_gradients = precondition(mean_gradients.unsqueeze(0), processor, shapes).squeeze(0)
+
+    return mean_gradients / mean_gradients.norm()
 
 
 def attribution_filter(
     args: FilterConfig,
     train: Dataset,
+    model: PreTrainedModel,
+    projection_dim: int = 16,
 ) -> Dataset:
     query_dataset = (
-        load_gradient_dataset(args.query_index).with_format("torch")
-        if args.query_index
+        load_gradient_dataset(args.query_dataset).with_format("torch")
+        if args.query_dataset
         else train
     )
-    # Compute the mean of the normalized gradients in the query dataset
-    query = get_mean_normalized_gradients(query_dataset, args.batch_size)
-            
+
+    if args.precondition:
+        # Load the gradient processor
+        index_processor = GradientProcessor.load(
+            args.index_dataset, map_location="cuda"
+        )
+        target_info = GradientCollector(model.base_model, lambda _ : _, index_processor).target_info
+        shapes: dict[str, Sequence[int]] = {
+            k: [projection_dim, projection_dim]
+            for k in target_info.keys()
+        }
+
+        query_processor = (
+            GradientProcessor.load(args.query_dataset, map_location="cuda")
+            if args.query_dataset
+            else index_processor
+        )
+    else:
+        query_processor, index_processor, shapes = None, None, {}
+
+    # Compute the mean of the normalized gradients in the query index
+    query = get_mean_normalized_gradients(
+        query_dataset, query_processor, shapes, args.batch_size
+    )
+    del query_dataset, query_processor
+
     importance_scores = torch.zeros(len(train), device="cuda")
-    for i in tqdm(range(0, len(train), args.batch_size), desc="Computing importance scores"):
-        gradients_batch = train[i : min(i + args.batch_size, len(train))]['gradients'].cuda()
-        
-        gradients_batch = F.normalize(gradients_batch, dim=1)
-        
+    for i in tqdm(
+        range(0, len(train), args.batch_size), desc="Computing importance scores"
+    ):
+        gradients_batch = train[i : min(i + args.batch_size, len(train))][
+            "gradients"
+        ].cuda()
+
+        if index_processor and shapes:
+            gradients_batch = precondition(gradients_batch, index_processor, shapes)
+
+        gradients_batch /= gradients_batch.norm(dim=1, keepdim=True)
+
+    
         batch_scores = gradients_batch @ query
 
-        importance_scores[
-            i : min(i + args.batch_size, len(train))
-        ] += batch_scores
-        
+        importance_scores[i : min(i + args.batch_size, len(train))] += batch_scores
+
         del gradients_batch
-    
+
     if args.sample:
         probs = torch.softmax(importance_scores / args.temperature, dim=0)
-        selected_indices = torch.multinomial(probs, args.num_examples, replacement=False)
+        selected_indices = torch.multinomial(
+            probs, args.num_examples, replacement=False
+        )
     else:
         # Select the top-k items
         sorted_scores = torch.argsort(importance_scores)
         selected_indices = (
-            sorted_scores[:args.num_examples]
+            sorted_scores[: args.num_examples]
             if args.lowest
-            else sorted_scores[-args.num_examples:]
+            else sorted_scores[-args.num_examples :]
         )
 
     return train.select(selected_indices)
-        
+
 
 def main(
     args: FilterConfig,
@@ -180,7 +247,7 @@ def main(
         dataset = assert_type(Dataset, load_dataset(args.dataset, split="train"))
 
         if args.filter == "attribution" or args.filter == "loss":
-            dataset = add_index(dataset, args.dataset_index)
+            dataset = add_index(dataset, args.index_dataset)
 
         dataset.shuffle(args.seed)
 
@@ -195,11 +262,18 @@ def main(
         train.set_format("torch")
         eval.set_format("torch")
 
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype="bfloat16",
+        )
+        tokenizer = AutoTokenizer.from_pretrained(args.model, max_length=8192)
+        model, tokenizer = setup_chat_format(model, tokenizer)
+
         print("Filtering...")
         if args.num_examples == 0:
             pass
         elif args.filter == "attribution":
-            train  = attribution_filter(args, train)
+            train = attribution_filter(args, train, model)
         elif args.filter == "classification":
             ranks = {"excellent": 4, "good": 3, "average": 2, "poor": 1, "very poor": 0}
 
@@ -222,22 +296,15 @@ def main(
             # Select the top-k items
             sorted_scores = torch.argsort(train["loss"])
             selected_indices = (
-                sorted_scores[:args.num_examples]
+                sorted_scores[: args.num_examples]
                 if args.lowest
-                else sorted_scores[-args.num_examples:]
+                else sorted_scores[-args.num_examples :]
             )
             train = train.select(selected_indices)
         elif args.filter == "random":
             train = train.select(range(min(args.num_examples, len(train))))
         else:
             raise ValueError(f"Invalid filter: {args.filter}")
-        
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model,
-            torch_dtype="bfloat16",
-        )
-        tokenizer = AutoTokenizer.from_pretrained(args.model, max_length=8192)
-        model, tokenizer = setup_chat_format(model, tokenizer)
 
         # Create DataConfig for tokenization
         data_config = DataConfig(
@@ -301,6 +368,4 @@ def main(
 if __name__ == "__main__":
     args = parse(FilterConfig)
 
-    main(
-        args
-    )
+    main(args)

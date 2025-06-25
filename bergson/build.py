@@ -84,7 +84,9 @@ def worker_build_gradient_dataset(rank: int, world_size: int, cfg: IndexConfig, 
         target_modules = None
     else:
         if rank == 0:
-            print("PEFT model detected.")
+            print("PEFT model detected. Using Adam and reshape_to_square = True")
+            cfg.normalizer = "adam"
+            cfg.reshape_to_square = True
 
         target_modules = set()
 
@@ -139,6 +141,7 @@ def worker_build_gradient_dataset(rank: int, world_size: int, cfg: IndexConfig, 
             normalizers,
             fisher_fourth_root=cfg.fisher_fourth_root,
             projection_dim=cfg.projection_dim or None,
+            reshape_to_square=cfg.reshape_to_square,
         )
         if rank == 0:
             processor.save(cfg.run_path)
