@@ -29,8 +29,6 @@ from bergson.gradients import Normalizer
 
 NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
 
-NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
-
 
 def setup_distributed():
     """Properly initialize distributed training"""

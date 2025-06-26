@@ -129,7 +129,6 @@ class EkfacCollector(ContextDecorator):
 
     def _save_input(self, module: nn.Module, inp: tuple, _):
         name = assert_type(str, module._name)
-        print(f"{name}: Before: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
 
         """Save the input to the module for later use in the backward pass."""
         x = inp[0].detach()
@@ -137,18 +136,20 @@ class EkfacCollector(ContextDecorator):
 
         if self.fwd_closure:
             self.fwd_closure(name, x)
-
-        del x, inp  # Delete everything
-        torch.cuda.empty_cache()
-
-        print(f"{name}: After: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
+        else:
+            module._inputs = x  # type: ignore[attr-defined]
 
     def _process_grad(self, module: nn.Module, _, grad_out):
         """Process the incoming gradient wrt the output of the module."""
         # Sanity checks
         assert isinstance(module, nn.Linear), "Expected a Linear module"
         G = grad_out[0]  # [N, S, O]
+
         name = assert_type(str, module._name)
+        if self.fwd_closure is None:
+            assert hasattr(module, "_inputs"), "Expected inputs to be saved in the module"
+            X = module._inputs
+            G = G.mT @ X
         if self.closure:
             self.closure(name, G)
             return

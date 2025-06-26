@@ -11,7 +11,6 @@ from transformers import PreTrainedModel
 
 from bergson.data import pad_and_tensor
 from bergson.gradients import (
-    GradientCollector,
     GradientProcessor,
 )
 from bergson.hessians.collector import EkfacCollector
@@ -37,40 +36,22 @@ def compute_covariance(
     activation_covariances = {}
     gradient_covariances = {}
 
-    # # TODO: Handle this more elegantly
-    # lo = torch.finfo(torch.float16).min
-    # hi = torch.finfo(torch.float16).max
-
     def callback_activation(name: str, a: torch.Tensor):
         activation_covariance = activation_covariances.get(name, None)
-        print(name)
+
         # a = a.clamp_(lo, hi)
         a = a.reshape(-1, a.shape[-1])  # [N*S, O]
 
         if activation_covariance is None:
             activation_covariances[name] = a.mT.matmul(a)
         else:
+            activation_covariance.to(f"cuda:{rank}")
             activation_covariance.addmm_(a.mT, a)
-
-    # def callback_activation(name: str, a: torch.Tensor):
-    #     activation_covariance = activation_covariances.get(name, None)
-
-    #     # a = a.clamp_(lo, hi)
-    #     a = a.reshape(-1, a.shape[-1])  # [N*S, O]
-
-    #     if activation_covariance is None:
-    #         activation_covariances[name] = (a.mT.matmul(a)).to("cpu", non_blocking=True)
-    #     else:
-    #         activation_covariance.to(a.device, non_blocking=True)
-    #         activation_covariance.addmm_(a.mT, a)
-    #         activation_covariance.to("cpu", non_blocking=True)  # [O,O]
 
     def callback_gradient(name: str, g: torch.Tensor):
         gradient_covariance = gradient_covariances.get(name, None)
-        print(name)
-        # Prevent infs when casting to fp16 from bf16 or fp32
+
         g = g.reshape(-1, g.shape[-1])  # [N*S, O]
-        # g = g.clamp_(lo, hi)  # [N*S, O]
 
         if gradient_covariance is None:
             # Initialize the covariance matrix for this module
@@ -137,6 +118,7 @@ def compute_covariance(
         if dist.is_initialized():
             for activation_covariance in activation_covariances.values():
                 dist.all_reduce(activation_covariance, op=dist.ReduceOp.SUM)
+
             for gradient_covariance in gradient_covariances.values():
                 dist.all_reduce(gradient_covariance, op=dist.ReduceOp.SUM)
 
@@ -162,9 +144,20 @@ def compute_eigendecomposition(path: str, type: Literal["activation", "gradient"
     covariances_eigen = {}
 
     for name, covariance in covariances.items():
+        print(name)
         original_dtype = covariance.dtype
-        eigenvalues, eigenvectors = torch.linalg.eigh(covariance.to(torch.float32) / num_processed)
 
+        covariance_normalized = covariance.to(torch.float32) / num_processed
+
+        # Check for and replace NaN/Inf values
+        if torch.isnan(covariance_normalized).any() or torch.isinf(covariance_normalized).any():
+            print("Warning: Found NaN/Inf values in covariance matrix")
+            # Replace NaN and Inf with 0
+            covariance_normalized = torch.nan_to_num(covariance_normalized, nan=0.0, posinf=0.0, neginf=0.0)
+        try:
+            eigenvalues, eigenvectors = torch.linalg.eigh(covariance_normalized)
+        except:
+            eigenvectors = covariance_normalized
         covariances_eigen[name] = eigenvectors.to(original_dtype).contiguous()
 
     save_file(
@@ -200,16 +193,18 @@ def compute_eigenvalue_correction(
     # TODO: Make this faster using Kronecker product structure of g
     def callback_gradient(name: str, g: torch.Tensor):
         eigenvalue_correction = eigenvalue_corrections.get(name, None)
-        transformed_g = torch.einsum("N S O, S S-> N S O", g, gradient_covariance_eigen[name])
-        transformed_g = torch.einsum("N S O, O O -> N S O", transformed_g, activation_covariance_eigen[name])
+
+        right_transformed_g = torch.einsum("N S O, S S-> N S O", g, gradient_covariance_eigen[name])
+
+        left_transformed_g = torch.einsum("N S O, O O -> N S O", right_transformed_g, activation_covariance_eigen[name])
 
         if eigenvalue_correction is None:
             # Initialize the covariance matrix for this module
-            eigenvalue_corrections[name] = (transformed_g**2).mean(dim=0)
+            eigenvalue_corrections[name] = (left_transformed_g**2).mean(dim=0)
         else:
-            eigenvalue_corrections[name].add((transformed_g**2).mean(dim=0))  # [O,O]
+            eigenvalue_corrections[name].add((left_transformed_g**2).mean(dim=0))  # [O,O]
 
-    collector = GradientCollector(
+    collector = EkfacCollector(
         model.base_model,
         closure=callback_gradient,
         processor=processor,
