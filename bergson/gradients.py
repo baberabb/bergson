@@ -412,7 +412,7 @@ class GradientCollector(ContextDecorator):
         """Process the incoming gradient wrt the output of the module."""
         # Sanity checks
         assert isinstance(module, nn.Linear), "Expected a Linear module"
-        G = grad_out[0]  # [N, S, O]
+        G = grad_out[0].detach()  # [N, S, O]
         name = assert_type(str, module._name)
         if self.closure:
             self.closure(name, G)

@@ -118,7 +118,7 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | Ite
         normalizers = {}
 
         processor = GradientProcessor(
-            normalizers,
+            normalizers=normalizers,
             fisher_fourth_root=cfg.fisher_fourth_root,
             projection_dim=None,
         )

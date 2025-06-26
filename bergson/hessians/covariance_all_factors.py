@@ -59,19 +59,6 @@ def compute_covariance(
         else:
             gradient_covariances[name].addmm_(g.T, g)  # [O,O]
 
-    # def callback_gradient(name: str, g: torch.Tensor):
-    #     gradient_covariance = gradient_covariances.get(name, None)
-
-    #     # Prevent infs when casting to fp16 from bf16 or fp32
-    #     g = g.reshape(-1, g.shape[-1])  # [N*S, O]
-    #     # g = g.clamp_(lo, hi)  # [N*S, O]
-
-    #     if gradient_covariance is None:
-    #         # Initialize the covariance matrix for this module
-    #         gradient_covariances[name] = g
-    #     else:
-    #         gradient_covariances[name].add_(g)  # [O,O]
-
     collector = EkfacCollector(
         model.base_model,
         closure=callback_gradient,
@@ -79,13 +66,6 @@ def compute_covariance(
         target_modules=target_modules,
         fwd_closure=callback_activation,
     )
-    # collector = GradientCollector(
-    #     model.base_model,
-    #     closure=callback_gradient,
-    #     processor=processor,
-    #     target_modules=target_modules,
-    #     fwd_closure=callback_activation,
-    # )
 
     total_processed = torch.tensor(0, device=model.device)
 
@@ -238,9 +218,6 @@ def compute_eigenvalue_correction(
         if dist.is_initialized():
             for eigenvalue_correction in eigenvalue_corrections.values():
                 dist.all_reduce(eigenvalue_correction, op=dist.ReduceOp.SUM)
-
-    # if dist.is_initialized():
-    #     dist.reduce(per_doc_losses, dst=0)
 
     if rank == 0:
         save_file(eigenvalue_corrections, os.path.join(path, "eigenvalue_corrections.safetensors"))
