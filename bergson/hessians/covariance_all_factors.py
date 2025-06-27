@@ -6,6 +6,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import Dataset
 from safetensors.torch import load_file, save_file
+from torch.profiler import ProfilerActivity, profile, record_function, schedule, tensorboard_trace_handler
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
@@ -14,6 +15,27 @@ from bergson.gradients import (
     GradientProcessor,
 )
 from bergson.hessians.collector import EkfacCollector
+
+
+def sharded_covariance(
+    target_info: dict, activation_covariances: dict, gradient_covariances: dict, model: PreTrainedModel
+):
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+
+    for name, (device, weight_shape) in target_info.items():
+        # Activation covariance A^T A has shape [in_dim, in_dim]
+        in_dim = weight_shape[1]
+        if in_dim % world_size != 0:
+            raise ValueError(f"Activation dim {in_dim} for {name} not divisible by world_size {world_size}")
+        shard_size = in_dim // world_size
+        activation_covariances[name] = torch.zeros((shard_size, in_dim), device=model.device, dtype=torch.float16)
+
+        # Gradient covariance G^T G has shape [out_dim, out_dim]
+        out_dim = weight_shape[0]
+        if out_dim % world_size != 0:
+            raise ValueError(f"Gradient dim {out_dim} for {name} not divisible by world_size {world_size}")
+        shard_size = out_dim // world_size
+        gradient_covariances[name] = torch.zeros((shard_size, out_dim), device=model.device, dtype=torch.float16)
 
 
 def compute_covariance(
@@ -30,34 +52,68 @@ def compute_covariance(
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
 
+    # Set up the TensorBoard trace handler
+    # It will save a trace file for each rank in the specified directory
+    trace_handler = tensorboard_trace_handler(dir_name="profiler_logs", worker_name=f"rank_{rank}", use_gzip=True)
+
     if rank == 0:
         print(f"Computing covariance matrices for {len(data)} documents...")
+        log_dir = "profiler_logs"
+        os.makedirs(log_dir, exist_ok=True)
 
     activation_covariances = {}
     gradient_covariances = {}
 
-    def callback_activation(name: str, a: torch.Tensor):
-        activation_covariance = activation_covariances.get(name, None)
+    collector_for_shapes = EkfacCollector(model.base_model, target_modules=target_modules)
+    target_info = collector_for_shapes.target_info
+    del collector_for_shapes
 
+    sharded_covariance(
+        target_info=target_info,
+        activation_covariances=activation_covariances,
+        gradient_covariances=gradient_covariances,
+        model=model,
+    )
+
+    # def callback_activation(name: str, a: torch.Tensor):
+    #     activation_covariance = activation_covariances.get(name, None)
+
+    #     # a = a.clamp_(lo, hi)
+    #     a = a.reshape(-1, a.shape[-1])  # [N*S, O]
+
+    #     if activation_covariance is None:
+    #         activation_covariances[name] = a.mT.matmul(a)
+    #     else:
+    #         activation_covariance.to(f"cuda:{rank}")
+    #         activation_covariance.addmm_(a.mT, a)
+
+    def callback_activation(name: str, a: torch.Tensor):
+        sharded_cov_matrix = activation_covariances[name]  # Our stored slice
         # a = a.clamp_(lo, hi)
         a = a.reshape(-1, a.shape[-1])  # [N*S, O]
+        local_update = a.mT @ a
 
-        if activation_covariance is None:
-            activation_covariances[name] = a.mT.matmul(a)
-        else:
-            activation_covariance.to(f"cuda:{rank}")
-            activation_covariance.addmm_(a.mT, a)
+        dist.all_reduce(local_update, op=dist.ReduceOp.SUM)
+
+        start_row = rank * sharded_cov_matrix.shape[0]
+        end_row = (rank + 1) * sharded_cov_matrix.shape[0]
+        update_slice = local_update[start_row:end_row, :]
+
+        # Add it to our permanently stored slice
+        sharded_cov_matrix.add_(update_slice)
 
     def callback_gradient(name: str, g: torch.Tensor):
-        gradient_covariance = gradient_covariances.get(name, None)
+        gradient_covariance = gradient_covariances[name]
 
         g = g.reshape(-1, g.shape[-1])  # [N*S, O]
+        local_update = g.mT @ g
+        dist.all_reduce(local_update, op=dist.ReduceOp.SUM)
 
-        if gradient_covariance is None:
-            # Initialize the covariance matrix for this module
-            gradient_covariances[name] = g.T.matmul(g)
-        else:
-            gradient_covariances[name].addmm_(g.T, g)  # [O,O]
+        start_row = rank * gradient_covariance.shape[0]
+        end_row = (rank + 1) * gradient_covariance.shape[0]
+        update_slice = local_update[start_row:end_row, :]
+        # Add it to our permanently stored slice
+        gradient_covariance.add_(update_slice)
 
     collector = EkfacCollector(
         model.base_model,
@@ -68,39 +124,54 @@ def compute_covariance(
     )
 
     total_processed = torch.tensor(0, device=model.device)
+    step = 0
+    # The profiler context manager
+    my_schedule = schedule(wait=0, warmup=0, active=1, repeat=1)
+    prof = profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],  # Profile both
+        on_trace_ready=trace_handler,
+        schedule=my_schedule,  # <-- USE THE SCHEDULE
+        record_shapes=True,
+        with_stack=True,  # Catches the Python call stack, very useful but adds overhead
+        profile_memory=True,  # THIS IS THE KEY for memory tracking
+    )
 
-    for sl in tqdm(batches, disable=rank != 0, desc="Computing covariances"):
-        batch = data[sl]
-        x, y = pad_and_tensor(
-            batch["input_ids"],  # type: ignore
-            labels=batch.get("labels"),  # type: ignore
-            device=model.device,
-        )
+    with prof:
+        for sl in tqdm(batches, disable=rank != 0, desc="Computing covariances"):
+            batch = data[sl]
+            x, y = pad_and_tensor(
+                batch["input_ids"],  # type: ignore
+                labels=batch.get("labels"),  # type: ignore
+                device=model.device,
+            )
 
-        total_processed += x.numel()
+            total_processed += x.numel()
 
-        with collector:
-            logits = model(x).logits
-            losses = F.cross_entropy(
-                logits[:, :-1].reshape(-1, logits.size(-1)),
-                y[:, 1:].flatten(),
-                reduction="none",
-            ).reshape_as(y[:, 1:])
+            with record_function(f"step_{step}"):
+                with collector:
+                    logits = model(x).logits
+                    losses = F.cross_entropy(
+                        logits[:, :-1].reshape(-1, logits.size(-1)),
+                        y[:, 1:].flatten(),
+                        reduction="none",
+                    ).reshape_as(y[:, 1:])
 
-            masks = y[:, 1:] != -100
-            denoms = masks.sum(dim=1, dtype=logits.dtype)
-            losses = losses.sum(1).div(denoms)
+                    masks = y[:, 1:] != -100
+                    denoms = masks.sum(dim=1, dtype=logits.dtype)
+                    losses = losses.sum(1).div(denoms)
 
-            losses.mean().backward()
+                    losses.mean().backward()
 
-            model.zero_grad()
+                    model.zero_grad()
 
-        if dist.is_initialized():
-            for activation_covariance in activation_covariances.values():
-                dist.all_reduce(activation_covariance, op=dist.ReduceOp.SUM)
+                # if dist.is_initialized():
+                #     for activation_covariance in activation_covariances.values():
+                #         dist.all_reduce(activation_covariance, op=dist.ReduceOp.SUM)
 
-            for gradient_covariance in gradient_covariances.values():
-                dist.all_reduce(gradient_covariance, op=dist.ReduceOp.SUM)
+                #     for gradient_covariance in gradient_covariances.values():
+                #         dist.all_reduce(gradient_covariance, op=dist.ReduceOp.SUM)
+
+            prof.step()
 
     if dist.is_initialized():
         dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
@@ -124,7 +195,6 @@ def compute_eigendecomposition(path: str, type: Literal["activation", "gradient"
     covariances_eigen = {}
 
     for name, covariance in covariances.items():
-        print(name)
         original_dtype = covariance.dtype
 
         covariance_normalized = covariance.to(torch.float32) / num_processed

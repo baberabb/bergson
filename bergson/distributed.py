@@ -63,18 +63,23 @@ def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
             s.bind(("", 0))
             _, port = s.getsockname()
 
-        ctx = start_processes(
-            "build",
-            worker_wrapper,
-            args={i: (i, world_size, cfg, ds, worker_fn) for i in range(world_size)},
-            envs={
-                i: {
-                    "LOCAL_RANK": str(i),
-                    "MASTER_ADDR": "localhost",
-                    "MASTER_PORT": str(port),
-                }
-                for i in range(world_size)
-            },
-            logs_specs=DefaultLogsSpecs(),
-        )
-        ctx.wait()
+        ctx = None
+        try:
+            ctx = start_processes(
+                "build",
+                worker_wrapper,
+                args={i: (i, world_size, cfg, ds, worker_fn) for i in range(world_size)},
+                envs={
+                    i: {
+                        "LOCAL_RANK": str(i),
+                        "MASTER_ADDR": "localhost",
+                        "MASTER_PORT": str(port),
+                    }
+                    for i in range(world_size)
+                },
+                logs_specs=DefaultLogsSpecs(),
+            )
+            ctx.wait()
+        finally:
+            if ctx is not None:
+                ctx.close()  # Kill any processes that are still running

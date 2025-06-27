@@ -28,7 +28,7 @@ class EkfacCollector(ContextDecorator):
 
     model: nn.Module
 
-    closure: Callable
+    closure: Optional[Callable] = None
     """Closure to call on the gradient as it is collected."""
 
     processor: GradientProcessor = field(default_factory=GradientProcessor)
