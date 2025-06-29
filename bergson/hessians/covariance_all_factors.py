@@ -1,3 +1,4 @@
+import gc
 import os
 from typing import Literal
 
@@ -15,6 +16,49 @@ from bergson.gradients import (
     GradientProcessor,
 )
 from bergson.hessians.collector import EkfacCollector
+
+
+def all_gather_matrices(local_matrix):
+    """
+    Gather matrices from all processes and concatenate them
+    """
+    world_size = dist.get_world_size()
+
+    # Gather all matrices
+    gathered_matrices = [torch.zeros_like(local_matrix) for _ in range(world_size)]
+    dist.all_gather(gathered_matrices, local_matrix)
+
+    # Concatenate along the first dimension (typical sharding dimension)
+    full_matrix = torch.cat(gathered_matrices, dim=0)
+
+    return full_matrix
+
+
+def gather_and_save_covariances(local_covariances_dict: dict[str, torch.Tensor], path: str):
+    """
+    Gather matrices from all processes and concatenate them
+    """
+    if not dist.is_initialized():
+        torch.save(local_covariances_dict, path)
+        del local_covariances_dict
+        return
+
+    gathered_dict = {}
+
+    rank = dist.get_rank()
+
+    for name in local_covariances_dict:
+        gathered_tensor = all_gather_matrices(local_covariances_dict[name])
+        if rank == 0:
+            gathered_dict[name] = gathered_tensor
+        else:
+            del gathered_tensor  # Only keep the tensor on rank 0 to save memory
+
+    if rank == 0:
+        save_file(gathered_dict, path)
+        print(f"Covariance matrices saved to {path}.")
+
+    del local_covariances_dict
 
 
 def sharded_covariance(
@@ -75,18 +119,6 @@ def compute_covariance(
         model=model,
     )
 
-    # def callback_activation(name: str, a: torch.Tensor):
-    #     activation_covariance = activation_covariances.get(name, None)
-
-    #     # a = a.clamp_(lo, hi)
-    #     a = a.reshape(-1, a.shape[-1])  # [N*S, O]
-
-    #     if activation_covariance is None:
-    #         activation_covariances[name] = a.mT.matmul(a)
-    #     else:
-    #         activation_covariance.to(f"cuda:{rank}")
-    #         activation_covariance.addmm_(a.mT, a)
-
     def callback_activation(name: str, a: torch.Tensor):
         sharded_cov_matrix = activation_covariances[name]  # Our stored slice
         # a = a.clamp_(lo, hi)
@@ -126,7 +158,7 @@ def compute_covariance(
     total_processed = torch.tensor(0, device=model.device)
     step = 0
     # The profiler context manager
-    my_schedule = schedule(wait=0, warmup=0, active=1, repeat=1)
+    my_schedule = schedule(wait=0, warmup=0, active=4, repeat=1)
     prof = profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],  # Profile both
         on_trace_ready=trace_handler,
@@ -164,28 +196,28 @@ def compute_covariance(
 
                     model.zero_grad()
 
-                # if dist.is_initialized():
-                #     for activation_covariance in activation_covariances.values():
-                #         dist.all_reduce(activation_covariance, op=dist.ReduceOp.SUM)
-
-                #     for gradient_covariance in gradient_covariances.values():
-                #         dist.all_reduce(gradient_covariance, op=dist.ReduceOp.SUM)
-
             prof.step()
 
     if dist.is_initialized():
         dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
-
     if rank == 0:
-        save_file(activation_covariances, os.path.join(path, "activation_covariance.safetensors"))
-        save_file(gradient_covariances, os.path.join(path, "gradient_covariance.safetensors"))
         save_file({"total_processed": total_processed}, os.path.join(path, "total_processed.safetensors"))
 
-        print(f"Covariance matrices saved to {path}.")
+    gather_and_save_covariances(
+        local_covariances_dict=activation_covariances, path=os.path.join(path, "activation_covariance.safetensors")
+    )
+    torch.cuda.empty_cache()  # Clear cache to avoid OOM issues
+    gc.collect()
+    gather_and_save_covariances(
+        local_covariances_dict=gradient_covariances, path=os.path.join(path, "gradient_covariance.safetensors")
+    )
+    torch.cuda.empty_cache()  # Clear cache to avoid OOM issues
+    gc.collect()
 
 
 def compute_eigendecomposition(path: str, type: Literal["activation", "gradient"]):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
 
     covariances = load_file(os.path.join(path, f"{type}_covariance.safetensors"), device=device)
 
@@ -194,6 +226,9 @@ def compute_eigendecomposition(path: str, type: Literal["activation", "gradient"
     eigen_path = path + f"/{type}_covariance_eigen.safetensors"
     covariances_eigen = {}
 
+    covariance_list = list(covariances.values())
+
+    covariance_list_rank = covariance_list
     for name, covariance in covariances.items():
         original_dtype = covariance.dtype
 

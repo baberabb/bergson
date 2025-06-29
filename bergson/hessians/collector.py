@@ -108,24 +108,8 @@ class EkfacCollector(ContextDecorator):
             # register backward hook to compute P = sum(U @ V^T)
             bwd_hook = layer.register_full_backward_hook(self._process_grad)
             self._bwd_hooks.append(bwd_hook)
-            # self._register_post_forward_cleanup()
 
         return self
-
-    # def _register_post_forward_cleanup(self):
-    #     """Register a hook that cleans up GPU cache after forward pass completes."""
-    #     # Find the last layer we're hooking
-    #     last_layer_name = max(self.target_info.keys())  # or however you determine order
-    #     last_layer = self.model.get_submodule(last_layer_name)
-    #     print(f"---- {last_layer_name}")
-
-    #     def cleanup_cache(module, inp, out):
-    #         torch.cuda.empty_cache()
-    #         # Optionally log memory usage
-    #         print(f"GPU memory after cache clear: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
-
-    #     cleanup_hook = last_layer.register_forward_hook(cleanup_cache)
-    #     self._fwd_hooks.append(cleanup_hook)
 
     def _save_input(self, module: nn.Module, inp: tuple, _):
         name = assert_type(str, module._name)
