@@ -14,9 +14,7 @@ from bergson.data import IndexConfig, allocate_batches
 from bergson.distributed import distributed_computing
 from bergson.gradients import GradientProcessor
 from bergson.hessians.covariance_all_factors import (
-    compute_covariance,
-    compute_eigendecomposition,
-    compute_eigenvalue_correction,
+    EkfacComputer,
 )
 from bergson.utils import assert_type, get_layer_list
 
@@ -179,40 +177,31 @@ def compute_all_factors(
     processor: GradientProcessor,
     path: str,
     *,
-    batches: list[list[int]] | None = None,
+    batches: list[list[int]],
     target_modules: set[str] | None = None,
 ):
-    rank = dist.get_rank() if dist.is_initialized() else 0
-
-    compute_covariance(
-        model,
-        data,
-        processor,
-        path,
-        batches=batches,
-        target_modules=target_modules,
+    computer = EkfacComputer(
+        model=model, processor=processor, data=data, path=path, batches=batches, target_modules=target_modules
     )
+    # computer.compute_covariance()
 
-    # TODO: Would it make sense to shard this?
-    if rank == 0:
-        compute_eigendecomposition(
-            path,
-            type="activation",
-        )
+    dist.barrier() if dist.is_initialized() else None
 
-        compute_eigendecomposition(
-            path,
-            type="gradient",
-        )
-    dist.barrier()
-    compute_eigenvalue_correction(
-        model,
-        data,
-        processor,
-        path,
-        batches=batches,
-        target_modules=target_modules,
-    )
+    computer.compute_eigendecomposition(covariance_type="activation")
+    computer.compute_eigendecomposition(covariance_type="gradient")
+
+    dist.barrier() if dist.is_initialized() else None
+
+    # compute_eigenvalue_correction(
+    #     model,
+    #     data,
+    #     processor,
+    #     path,
+    #     batches=batches,
+    #     target_modules=target_modules,
+    # )
+
+    dist.barrier() if dist.is_initialized() else None
 
 
 def compute_EKFAC(cfg: IndexConfig):

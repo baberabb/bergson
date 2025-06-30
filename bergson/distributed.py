@@ -1,4 +1,5 @@
 import socket
+import sys
 from typing import Callable
 
 import torch
@@ -83,3 +84,4 @@ def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
         finally:
             if ctx is not None:
                 ctx.close()  # Kill any processes that are still running
+                sys.exit(0)
