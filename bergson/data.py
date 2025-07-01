@@ -2,7 +2,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Literal, Optional, Sequence
 
 import numpy as np
 import pyarrow as pa
@@ -94,7 +94,7 @@ def ceildiv(a: int, b: int) -> int:
     return -(-a // b)  # Equivalent to math.ceil(a / b) but faster for integers
 
 
-def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
+def allocate_batches(doc_lengths: list[int], N: int, workers: Optional[int] = None) -> list[list[int]]:
     """
     Allocate documents into batches that are then distributed evenly across
     a fixed number of workers.
@@ -138,7 +138,11 @@ def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
         the constraint in (1) remains satisfied throughout.
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
-    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    if workers is None:
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+    else:
+        world_size = workers
+
     if not doc_lengths:
         raise RuntimeError("Empty document list.")
     if max(doc_lengths) > N:  # a single document would overflow any batch

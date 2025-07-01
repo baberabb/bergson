@@ -13,9 +13,7 @@ from transformers import AutoModelForCausalLM, BitsAndBytesConfig, PreTrainedMod
 from bergson.data import IndexConfig, allocate_batches
 from bergson.distributed import distributed_computing
 from bergson.gradients import GradientProcessor
-from bergson.hessians.covariance_all_factors import (
-    EkfacComputer,
-)
+from bergson.hessians.covariance_all_factors import EkfacComputer, compute_eigenvalue_correction
 from bergson.utils import assert_type, get_layer_list
 
 
@@ -129,7 +127,7 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | Ite
     os.makedirs(cfg.ekfac_path, exist_ok=True)
 
     if isinstance(ds, Dataset):
-        ds = ds.select(list(range(96)))
+        # ds = ds.select(list(range(96)))
         batches = allocate_batches(ds["length"], cfg.token_batch_size)
 
         compute_all_factors(
@@ -192,14 +190,14 @@ def compute_all_factors(
 
     dist.barrier() if dist.is_initialized() else None
 
-    # compute_eigenvalue_correction(
-    #     model,
-    #     data,
-    #     processor,
-    #     path,
-    #     batches=batches,
-    #     target_modules=target_modules,
-    # )
+    compute_eigenvalue_correction(
+        model,
+        data,
+        processor,
+        path,
+        batches=batches,
+        target_modules=target_modules,
+    )
 
     dist.barrier() if dist.is_initialized() else None
 

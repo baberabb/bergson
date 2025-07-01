@@ -136,7 +136,6 @@ class EkfacCollector(ContextDecorator):
             G = G.mT @ X
         if self.closure:
             self.closure(name, G)
-            return
 
     def __exit__(self, exc_type, exc, tb):
         # clean up secret attributes
