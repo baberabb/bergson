@@ -21,7 +21,7 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | Ite
     torch.cuda.set_device(rank)
 
     # These should be set by the main process
-    if world_size > 1:
+    if world_size >= 1:
         addr = os.environ.get("MASTER_ADDR", "localhost")
         port = os.environ.get("MASTER_PORT", "29500")
 
@@ -127,7 +127,6 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | Ite
     os.makedirs(cfg.ekfac_path, exist_ok=True)
 
     if isinstance(ds, Dataset):
-        # ds = ds.select(list(range(96)))
         batches = allocate_batches(ds["length"], cfg.token_batch_size)
 
         compute_all_factors(
@@ -181,7 +180,7 @@ def compute_all_factors(
     computer = EkfacComputer(
         model=model, processor=processor, data=data, path=path, batches=batches, target_modules=target_modules
     )
-    # computer.compute_covariance()
+    computer.compute_covariance()
 
     dist.barrier() if dist.is_initialized() else None
 
@@ -198,8 +197,6 @@ def compute_all_factors(
         batches=batches,
         target_modules=target_modules,
     )
-
-    dist.barrier() if dist.is_initialized() else None
 
 
 def compute_EKFAC(cfg: IndexConfig):

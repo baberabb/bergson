@@ -58,7 +58,7 @@ class EkfacCollector(ContextDecorator):
             if self.target_modules is not None and name not in self.target_modules:
                 continue
 
-            if "attn" in name:
+            if "mlp" not in name:
                 continue
 
             # Users of this class really like to know ahead of time what the shapes are

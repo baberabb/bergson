@@ -43,6 +43,7 @@ class EkfacComputer:
         self.device = model.device
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.debug = debug
+        self.dtype = model.dtype
 
     def compute_covariance(self):
         """
@@ -65,6 +66,7 @@ class EkfacComputer:
         self.sharded_covariance(
             activation_covariances=activation_covariances,
             gradient_covariances=gradient_covariances,
+            dtype=self.dtype,
         )
 
         def callback_activation(name: str, a: torch.Tensor):
@@ -153,19 +155,16 @@ class EkfacComputer:
             torch.save(total_processed, os.path.join(self.path, "total_processed.pt"))
             print(f"Total processed: {total_processed.item()}")
 
-        print(f"{self.rank} finished computing gradients.")
         activation_path = os.path.join(self.path, "activation_covariance_sharded")
         gradient_path = os.path.join(self.path, "gradient_covariance_sharded")
 
         os.makedirs(activation_path, exist_ok=True)
         os.makedirs(gradient_path, exist_ok=True)
-        print(f"{self.rank} about to save gradients.")
 
         # Save the sharded covariance matrices
-        print(f"{self.rank} really about to save gradients.")
+
         save_file(activation_covariances, os.path.join(activation_path, f"shard_{rank}.safetensors"))
         save_file(gradient_covariances, os.path.join(gradient_path, f"shard_{rank}.safetensors"))
-        print(f"{self.rank} finished computing covariance.")
 
         dist.barrier()
         torch.cuda.empty_cache()
@@ -175,6 +174,7 @@ class EkfacComputer:
         self,
         activation_covariances: dict,
         gradient_covariances: dict,
+        dtype: torch.dtype,
     ):
         for name, (device, weight_shape) in self.target_info.items():
             # Activation covariance A^T A has shape [in_dim, in_dim]
@@ -182,14 +182,14 @@ class EkfacComputer:
             if in_dim % self.world_size != 0:
                 raise ValueError(f"Activation dim {in_dim} for {name} not divisible by world_size {self.world_size}")
             shard_size = in_dim // self.world_size
-            activation_covariances[name] = torch.zeros((shard_size, in_dim), device=self.device, dtype=torch.float16)
+            activation_covariances[name] = torch.zeros((shard_size, in_dim), device=self.device, dtype=dtype)
 
             # Gradient covariance G^T G has shape [out_dim, out_dim]
             out_dim = weight_shape[0]
             if out_dim % self.world_size != 0:
                 raise ValueError(f"Gradient dim {out_dim} for {name} not divisible by world_size {self.world_size}")
             shard_size = out_dim // self.world_size
-            gradient_covariances[name] = torch.zeros((shard_size, out_dim), device=self.device, dtype=torch.float16)
+            gradient_covariances[name] = torch.zeros((shard_size, out_dim), device=self.device, dtype=dtype)
 
     def compute_full_matrix(self, key: str, covariance_type: Literal["activation", "gradient"]):
         """
@@ -226,11 +226,10 @@ class EkfacComputer:
             if key not in input_dict:
                 d = d_out if covariance_type == "activation" else d_in
 
-                tensor = torch.zeros([d, d], device=self.device, dtype=torch.float16)
+                tensor = torch.zeros([d, d], device=self.device, dtype=self.dtype)
             else:
                 tensor = input_dict[key]
 
-            print(f" BEFORE {tensor.shape} is the sharded shape for {key} on rank {self.rank}.")
             # dist.barrier()
             # print(
             #     f"{self.rank} Merging and sharding {key} of shape {tensor.shape} with shard size {shard_size} and type {covariance_type}, generally {d_in}x{d_out}."
@@ -241,7 +240,7 @@ class EkfacComputer:
             # Shard the tensor
             shard = tensor[self.rank * shard_size : (self.rank + 1) * shard_size, :]
             input_dict[key] = shard
-            print(f"{shard.shape} is the sharded shape for {key} on rank {self.rank}.")
+
             assert shard.shape[0] == shard_size, f"Shard shape {shard.shape} does not match expected {shard_size}"
         return input_dict
 
@@ -251,10 +250,9 @@ class EkfacComputer:
         target_info_rank = random.sample(list(self.target_info), len(list(self.target_info)))[
             self.rank :: self.world_size
         ]
-        print(f"{self.rank} started computing eigenvectors.")
+
         covariance_eigenvectors = {}
 
-        # activations
         for key in tqdm(target_info_rank, disable=self.rank != 0, desc="Computing eigenvectors"):
             matrix = self.compute_full_matrix(key, covariance_type=covariance_type)
             original_dtype = matrix.dtype
@@ -265,16 +263,14 @@ class EkfacComputer:
                 matrix_normalized = torch.nan_to_num(matrix_normalized, nan=0.0, posinf=0.0, neginf=0.0)
             try:
                 eigenvalues, eigenvectors = torch.linalg.eigh(matrix_normalized)
-            except:
+
+            except Exception as e:
+                print(e)
                 eigenvectors = matrix_normalized
 
-            eigenvectors = matrix
             eigenvectors = eigenvectors.to(original_dtype).contiguous()
             covariance_eigenvectors[key] = eigenvectors
         dist.barrier()
-        print(
-            f"{self.rank} started merging eigenvectors {covariance_eigenvectors.keys()} {[covariance_eigenvectors[k].shape for k in covariance_eigenvectors.keys()]}."
-        )
 
         covariance_eigenvectors = self.merge_and_shard_dict(
             input_dict=covariance_eigenvectors, covariance_type=covariance_type
@@ -308,12 +304,8 @@ def compute_eigenvalue_correction(
     if rank == 0:
         print(f"Computing eigenvalue correction for {len(data)} documents...")
 
-    activation_covariance_eigen = load_file(
-        path + f"/activation_eigen_sharded/shard_{rank}.safetensors", device=f"cuda:{rank}"
-    )
-    gradient_covariance_eigen = load_file(
-        path + f"/gradient_eigen_sharded/shard_{rank}.safetensors", device=f"cuda:{rank}"
-    )
+    eigen_a = load_file(path + f"/activation_eigen_sharded/shard_{rank}.safetensors", device=f"cuda:{rank}")
+    eigen_g = load_file(path + f"/gradient_eigen_sharded/shard_{rank}.safetensors", device=f"cuda:{rank}")
 
     eigenvalue_corrections = {}
     transformed_activation_cache = {}
@@ -324,16 +316,16 @@ def compute_eigenvalue_correction(
         current_rank = dist.get_rank() if dist.is_initialized() else 0
         a_chunks = torch.chunk(a, world_size, dim=1)
 
-        shard_size = activation_covariance_eigen[name].shape[0]
-        output_dim = activation_covariance_eigen[name].shape[1]
+        output_dim = eigen_a[name].shape[1]
         result = torch.zeros(a.shape[0], output_dim, device=a.device, dtype=a.dtype)
-        print(activation_covariance_eigen[name].shape)
+
         for rank_index in range(world_size):
             if rank_index == current_rank:
-                A_shard = activation_covariance_eigen[name]
+                A_shard = eigen_a[name]
             else:
-                A_shard = torch.zeros_like(activation_covariance_eigen[name])
+                A_shard = torch.zeros_like(eigen_a[name])
 
+            dist.broadcast(A_shard.contiguous(), src=rank_index)
             # Accumulate partial result
             result += a_chunks[rank_index] @ A_shard  # [N*S, D]
 
@@ -342,15 +334,62 @@ def compute_eigenvalue_correction(
                 del A_shard
         transformed_activation_cache[name] = result
 
-    # TODO: Make this faster using Kronecker product structure of g
     def callback_gradient(name: str, g: torch.Tensor):
-        print(f"{rank} transforming gradient for {name} with shape {g.shape}")
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        current_rank = dist.get_rank() if dist.is_initialized() else 0
         g = g.reshape(-1, g.shape[-1])  # [N*S, I]
 
-        g_shard = torch.einsum("K I, B I -> B K", gradient_covariance_eigen[name], g)
+        g_chunks = torch.chunk(g, world_size, dim=1)
+        output_dim = eigen_g[name].shape[1]
 
-        transformed_grad_shard = torch.einsum("B O, B K-> O K", transformed_activation_cache[name], g_shard)
-        eigenvalue_corrections[name] = transformed_grad_shard
+        result = torch.zeros(g.shape[0], output_dim, device=g.device, dtype=g.dtype)
+
+        for rank_index in range(world_size):
+            if rank_index == current_rank:
+                G_shard = eigen_g[name].T
+
+            else:
+                G_shard = torch.zeros_like(eigen_g[name].T)
+
+            dist.broadcast(G_shard.contiguous(), src=rank_index)
+
+            # Accumulate partial result
+
+            result += torch.einsum("b r, l r-> b l", g_chunks[rank_index], G_shard)
+
+            # Clean up
+            if rank != current_rank:
+                del G_shard
+
+        transformed_grad_shard = torch.einsum("B O, B K-> O K", transformed_activation_cache[name] ** 2, result**2)
+        start_row = rank * transformed_grad_shard.shape[0]
+        end_row = (rank + 1) * transformed_grad_shard.shape[0]
+
+        dist.all_reduce(transformed_grad_shard.contiguous(), op=dist.ReduceOp.SUM)
+
+        eigenvalue_corrections[name] = transformed_grad_shard[start_row:end_row, :]
+
+    # def callback_activation(name: str, a: torch.Tensor):
+    #     eigenvector_a = eigen_a[name]
+    #     a = a.reshape(-1, a.shape[-1])  # [N*S, O]
+
+    #     transformed_activation = torch.matmul(a, eigenvector_a)
+    #     transformed_activation_cache[name] = transformed_activation  # [N*S, O]
+
+    # def callback_gradient(name: str, g: torch.Tensor):
+    #     eigenvector_g = eigen_g[name]
+    #     g = g.reshape(-1, g.shape[-1])  # [N*S, I]
+
+    #     transformed_gradient = torch.einsum("l r, b l-> b r", eigenvector_g, g)  # [N*S, O]
+    #     # transformed_gradient = torch.matmul(eigenvector_g.T, g.T).T  # [N*S, O]
+    #     # correction = torch.einsum("b o, b k-> o k", transformed_gradient**2, transformed_activation_cache[name] ** 2)
+    #     correction = torch.einsum("b o, b k->b k o", transformed_activation_cache[name], transformed_gradient)
+    #     correction = correction**2
+    #     correction = correction.sum(dim=0)  # [O, K]
+    #     if name not in eigenvalue_corrections:
+    #         eigenvalue_corrections[name] = correction
+    #     else:
+    #         eigenvalue_corrections[name].add_(correction)
 
     collector = EkfacCollector(
         model.base_model,
@@ -359,7 +398,9 @@ def compute_eigenvalue_correction(
         target_modules=target_modules,
         fwd_closure=callback_activation,
     )
-    print(f"{rank} starting eigenvalue correction computation...")
+
+    total_processed = torch.tensor(0, device=model.device)
+
     for sl in tqdm(batches, disable=rank != 0, desc="Computing eigenvalue correction"):
         batch = data[sl]
         x, y = pad_and_tensor(
@@ -376,6 +417,7 @@ def compute_eigenvalue_correction(
                 reduction="none",
             ).reshape_as(y[:, 1:])
 
+            total_processed += x.numel()
             masks = y[:, 1:] != -100
             denoms = masks.sum(dim=1, dtype=logits.dtype)
             losses = losses.sum(1).div(denoms)
@@ -383,6 +425,17 @@ def compute_eigenvalue_correction(
             losses.mean().backward()
 
             model.zero_grad()
+
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    if dist.is_initialized():
+        dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
+    if rank == 0:
+        torch.save(total_processed, os.path.join(path, "total_processed_lambda.pt"))
+        print(f"Total processed: {total_processed.item()}")
+    for k, v in eigenvalue_corrections.items():
+        v.div_(total_processed)
 
     os.makedirs(path + "/eigenvalue_correction_sharded", exist_ok=True)
     save_file(eigenvalue_corrections, path + f"/eigenvalue_correction_sharded/shard_{rank}.safetensors")

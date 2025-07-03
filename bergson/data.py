@@ -88,6 +88,9 @@ class IndexConfig:
     revision: str | None = None
     """Revision of the model."""
 
+    world_size: int | None = None
+    """Number of distributed workers.  If None, uses maximum available GPUs."""
+
 
 def ceildiv(a: int, b: int) -> int:
     """Ceiling division of two integers."""

@@ -1,5 +1,4 @@
 import socket
-import sys
 from typing import Callable
 
 import torch
@@ -43,6 +42,7 @@ def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
     remove_columns = ds.column_names if cfg.drop_columns else None
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model, model_max_length=cfg.token_batch_size, revision=cfg.revision)
+
     ds = ds.map(
         tokenize,
         batched=True,
@@ -50,8 +50,10 @@ def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
         remove_columns=remove_columns,
     )
 
-    world_size = torch.cuda.device_count()
-    if world_size <= 1:
+    world_size = torch.cuda.device_count() if cfg.world_size is None else cfg.world_size
+    if world_size <= 0:
+        warning_msg = f"world_size is set to {world_size}, but must be positive. Setting world_size=1."
+        print(warning_msg)
         # Run the worker directly if no distributed training is needed. This is great
         # for debugging purposes.
         worker_fn(0, 1, cfg, ds)
@@ -84,4 +86,3 @@ def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
         finally:
             if ctx is not None:
                 ctx.close()  # Kill any processes that are still running
-                sys.exit(0)
