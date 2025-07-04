@@ -26,21 +26,19 @@ def test_eigenvalue_correction(ground_truth_path, run_path):
         lambda_run[k] = torch.cat([shard[k] for shard in lambda_list_shards], dim=0)
 
     lambda_run = TensorDict(lambda_run)
-    # print(lambda_run.size())
-    # print("-*" * 50)
-    # print(lambda_ground_truth.size())
-    # More lax tolerances for gradient covariances as they have noise
-    atol = 1e-4
+
     rtol = 1e-5
-    equal_dict = lambda_ground_truth.allclose(lambda_run, atol=atol, rtol=rtol)
+    equal_dict = lambda_ground_truth.allclose(lambda_run, rtol=rtol)
 
     if all(equal_dict.values()):
         print("Eigenvalue corrections match!")
     else:
+        print("Eigenvalue corrections do not match!")
+        print(equal_dict)
         diff = lambda_ground_truth.sub(lambda_run).abs()
         max_diff = diff.max()
         # print keys for which the covariances do not match
-        print("Eigenvalue corrections do not match!")
+
         for k, v in equal_dict.items():
             if not v:
                 # Find location of max difference
@@ -50,4 +48,5 @@ def test_eigenvalue_correction(ground_truth_path, run_path):
                     f"Eigenvalue corrections {k} does not match with absolute difference {max_diff[k]:.3f} and "
                     f"relative difference {(100 * max_diff[k] / lambda_ground_truth[k][max_diff_idx].abs()):.3f} %!"
                 )
-                print(lambda_ground_truth[k][0, 0], lambda_run[k][0, 0])
+                print(max_diff_idx, lambda_ground_truth[k][max_diff_idx], lambda_run[k][max_diff_idx])
+                print(lambda_ground_truth[k].abs().sum(), lambda_run[k].abs().sum())

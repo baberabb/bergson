@@ -12,7 +12,7 @@ from bergson.hessians.compute_EKFAC import compute_EKFAC
 test_dir = "/root/bergson-approx-unrolling/tests/ekfac_tests/test_files/pile_100_examples"
 ground_truth_path = os.path.join(test_dir, "ground_truth")
 run_path = os.path.join(test_dir, "run/influence_results")
-overwrite = False
+overwrite = True
 
 
 def test_total_processed_examples():

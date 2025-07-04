@@ -102,24 +102,15 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | Ite
 
                 target_modules.add(name.removeprefix("model."))
 
-    if os.path.exists(cfg.processor_path):
-        if rank == 0:
-            print(f"Loading processor from '{cfg.processor_path}'")
+    normalizers = {}
 
-        processor = GradientProcessor.load(
-            cfg.processor_path,
-            map_location=f"cuda:{rank}",
-        )
-    else:
-        normalizers = {}
-
-        processor = GradientProcessor(
-            normalizers=normalizers,
-            fisher_fourth_root=cfg.fisher_fourth_root,
-            projection_dim=None,
-        )
-        if rank == 0:
-            processor.save(cfg.run_path)
+    processor = GradientProcessor(
+        normalizers=normalizers,
+        fisher_fourth_root=cfg.fisher_fourth_root,
+        projection_dim=None,
+    )
+    if rank == 0:
+        processor.save(cfg.run_path)
 
     if rank == 0:
         json.dump(asdict(cfg), open(os.path.join(cfg.run_path, "config.json"), "w"), indent=2)
@@ -136,6 +127,8 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | Ite
             cfg.ekfac_path,
             batches=batches,
             target_modules=target_modules,
+            debug=cfg.debug,
+            profile=cfg.profile,
         )
 
     else:
@@ -156,6 +149,8 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | Ite
                 os.path.join(cfg.run_path, f"chunk-{chunk_id:05d}"),
                 batches=batches,
                 target_modules=target_modules,
+                debug=cfg.debug,
+                profile=cfg.profile,
             )
 
             buf.clear()
@@ -176,18 +171,27 @@ def compute_all_factors(
     *,
     batches: list[list[int]],
     target_modules: set[str] | None = None,
+    debug: bool = False,
+    profile: bool = False,
 ):
     computer = EkfacComputer(
-        model=model, processor=processor, data=data, path=path, batches=batches, target_modules=target_modules
+        model=model,
+        processor=processor,
+        data=data,
+        path=path,
+        batches=batches,
+        target_modules=target_modules,
+        debug=debug,
+        profile=profile,
     )
-    computer.compute_covariance()
+    # computer.compute_covariance()
 
-    dist.barrier() if dist.is_initialized() else None
+    # dist.barrier() if dist.is_initialized() else None
 
-    computer.compute_eigendecomposition(covariance_type="activation")
-    computer.compute_eigendecomposition(covariance_type="gradient")
+    # computer.compute_eigendecomposition(covariance_type="activation")
+    # computer.compute_eigendecomposition(covariance_type="gradient")
 
-    dist.barrier() if dist.is_initialized() else None
+    # dist.barrier() if dist.is_initialized() else None
 
     compute_eigenvalue_correction(
         model,

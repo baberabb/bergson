@@ -14,6 +14,7 @@ dependencies = [
     "datasets",
     "ipykernel>=6.29.5",
     "ipywidgets>=8.1.7",
+    "jaxtyping>=0.3.2",
     "natsort",
     "simple-parsing",
     "torch",
@@ -39,6 +40,7 @@ reportPrivateImportUsage = false
 include = ["bergson*"]
 
 [tool.ruff]
+ignore = ["F722"] # jaxtyping annotations
 lint.ignore = ["E741"]   # Ambiguous variable name
 # Enable pycodestyle (`E`), Pyflakes (`F`), and isort (`I`) codes
 # See https://beta.ruff.rs/docs/rules/ for more possible rules

@@ -91,6 +91,12 @@ class IndexConfig:
     world_size: int | None = None
     """Number of distributed workers.  If None, uses maximum available GPUs."""
 
+    debug: bool = False
+    """Whether to run in debug mode.  This will print additional information"""
+
+    profile: bool = False
+    """Whether to profile the EKFAC computation.  This will use the pytorch profiler"""
+
 
 def ceildiv(a: int, b: int) -> int:
     """Ceiling division of two integers."""
