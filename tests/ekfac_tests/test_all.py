@@ -38,7 +38,7 @@ def test_total_processed_examples():
 def main():
     # assert covariances, eigenvalue_corrections, eigenvectors and index_config.json exist
     use_fsdp = True
-    world_size = 8
+    world_size = 4
     required_files = ["covariances", "eigenvalue_corrections", "eigenvectors", "index_config.json"]
 
     for file_name in required_files:

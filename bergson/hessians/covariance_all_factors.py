@@ -154,10 +154,15 @@ class EkfacComputer:
 
         for key in tqdm(target_info_rank, disable=self.rank != 0, desc="Computing eigenvectors"):
             matrix = self._compute_full_matrix(key, covariance_type=covariance_type)
-            matrix = (matrix + matrix.T).div(2)
             original_dtype = matrix.dtype
             matrix_normalized = matrix.to(torch.float64) / total_processed
+            matrix = (matrix + matrix.T).div(2)
 
+            # check if matrix_normalized is has NaNs or Infs
+            if not torch.isfinite(matrix_normalized).all():
+                raise ValueError(
+                    f"Covariance matrix for {key} of type {covariance_type} contains NaNs or Infs. Consider increasing to fp32."
+                )
             try:
                 eigenvalues, eigenvectors = torch.linalg.eigh(matrix_normalized)
 
