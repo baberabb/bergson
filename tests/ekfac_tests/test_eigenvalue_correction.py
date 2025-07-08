@@ -3,7 +3,7 @@ import os
 import torch
 from safetensors.torch import load_file
 
-from bergson.approx_unrolling.utils import TensorDict
+from bergson.hessians.utils import TensorDict
 
 
 def test_eigenvalue_correction(ground_truth_path, run_path):

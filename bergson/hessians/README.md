@@ -20,27 +20,27 @@ The output will look like this (in this example world_size=4):
 .
 ├── config.json
 ├── influence_results
-│   ├── **activation_covariance_sharded**
+│   ├── activation_covariance_sharded
 │   │   ├── shard_0.safetensors
 │   │   ├── shard_1.safetensors
 │   │   ├── shard_2.safetensors
 │   │   └── shard_3.safetensors
-│   ├── **activation_eigen_sharded**
+│   ├── activation_eigen_sharded
 │   │   ├── shard_0.safetensors
 │   │   ├── shard_1.safetensors
 │   │   ├── shard_2.safetensors
 │   │   └── shard_3.safetensors
-│   ├── **eigenvalue_correction_sharded**
+│   ├── eigenvalue_correction_sharded
 │   │   ├── shard_0.safetensors
 │   │   ├── shard_1.safetensors
 │   │   ├── shard_2.safetensors
 │   │   └── shard_3.safetensors
-│   ├── **gradient_covariance_sharded**
+│   ├── gradient_covariance_sharded
 │   │   ├── shard_0.safetensors
 │   │   ├── shard_1.safetensors
 │   │   ├── shard_2.safetensors
 │   │   └── shard_3.safetensors
-│   ├── **gradient_eigen_sharded**
+│   ├── gradient_eigen_sharded
 │   │   ├── shard_0.safetensors
 │   │   ├── shard_1.safetensors
 │   │   ├── shard_2.safetensors

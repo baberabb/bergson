@@ -4,7 +4,7 @@ from typing import Literal
 import torch
 from safetensors.torch import load_file
 
-from bergson.approx_unrolling.utils import TensorDict
+from bergson.hessians.utils import TensorDict
 
 
 def test_covariances(ground_truth_path, run_path, covariance_type: Literal["activation", "gradient"] = "activation"):

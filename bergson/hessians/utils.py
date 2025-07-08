@@ -12,22 +12,16 @@ class TensorDict:
 
     def _check_keys_match(self, other: "TensorDict"):
         if set(self.tensors.keys()) != set(other.tensors.keys()):
-            raise ValueError(
-                f"Keys don't match: {set(self.tensors.keys())} vs {set(other.tensors.keys())}"
-            )
+            raise ValueError(f"Keys don't match: {set(self.tensors.keys())} vs {set(other.tensors.keys())}")
 
     def _apply_unary(self, op: Callable[[Tensor], Tensor]) -> "TensorDict":
         """Apply unary operation to all tensors"""
         return TensorDict({k: op(v) for k, v in self.tensors.items()})
 
-    def _apply_binary(
-        self, other: "TensorDict", op: Callable[[Tensor, Tensor], Tensor]
-    ) -> "TensorDict":
+    def _apply_binary(self, other: "TensorDict", op: Callable[[Tensor, Tensor], Tensor]) -> "TensorDict":
         """Apply binary operation between corresponding tensors"""
         self._check_keys_match(other)
-        return TensorDict(
-            {k: op(self.tensors[k], other.tensors[k]) for k in self.tensors}
-        )
+        return TensorDict({k: op(self.tensors[k], other.tensors[k]) for k in self.tensors})
 
     # Arithmetic dunder methods
     def __add__(self, other):
@@ -53,9 +47,7 @@ class TensorDict:
 
     def __radd__(self, other: Any) -> "TensorDict":
         """Handle right-side addition, e.g., for sum([td1, td2])."""
-        if isinstance(other, (int, float)) or (
-            torch.is_tensor(other) and other.numel() == 1
-        ):
+        if isinstance(other, (int, float)) or (torch.is_tensor(other) and other.numel() == 1):
             return self._apply_unary(lambda t: other + t)  # Fixed: was applyunary
         return NotImplemented
 
@@ -68,9 +60,7 @@ class TensorDict:
             def wrapper(*args, **kwargs):
                 # If first arg is a TensorDict, it's likely a binary operation
                 if args and isinstance(args[0], TensorDict):
-                    return self._apply_binary(
-                        args[0], lambda x, y: torch_func(x, y, *args[1:], **kwargs)
-                    )
+                    return self._apply_binary(args[0], lambda x, y: torch_func(x, y, *args[1:], **kwargs))
                 # Otherwise, it's a unary operation
                 return self._apply_unary(lambda t: torch_func(t, *args, **kwargs))
 
