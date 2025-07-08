@@ -183,7 +183,6 @@ def build_gradient_dataset(cfg: IndexConfig):
         batched=True,
         fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
     )
-
     world_size = torch.cuda.device_count()
     if world_size <= 1:
         # Run the worker directly if no distributed training is needed. This is great

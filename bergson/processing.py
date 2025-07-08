@@ -83,6 +83,19 @@ def collect_gradients(
         fill_value=0.0,
     )
 
+    per_doc_mean_kl_divergence = torch.full(
+        (len(data),),
+        device=model.device,
+        dtype=torch.float16,
+        fill_value=0.0,
+    )
+    per_doc_max_kl_divergence = torch.full(
+        (len(data),),
+        device=model.device,
+        dtype=torch.float16,
+        fill_value=0.0,
+    )
+
     for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
         batch = data[indices]
         x, y = pad_and_tensor(
@@ -92,16 +105,20 @@ def collect_gradients(
         )
 
         if kl_divergence:
+            model.disable_adapters()
+            with torch.no_grad():
+                    outputs_base = model(x).logits
             model.enable_adapters()
             with collector:
                 outputs_finetuned = model(x).logits
-                model.disable_adapters()
-                with torch.no_grad():
-                    outputs_base = model(x).logits
                 # kl divergence on the logits
                 outputs_finetuned = torch.log_softmax(outputs_finetuned.reshape(-1, outputs_finetuned.shape[-1]), dim=-1)
                 outputs_base = torch.softmax(outputs_base.reshape(-1, outputs_base.shape[-1]), dim=-1)
-                losses = torch.nn.functional.kl_div(outputs_finetuned, outputs_base, reduction="batchmean")
+                kl = torch.nn.functional.kl_div(outputs_finetuned, outputs_base, reduction='none').sum(axis=1)
+                losses = kl.mean()
+                per_doc_mean_kl_divergence[indices] = losses.half().detach()
+                per_doc_max_kl_divergence[indices] = kl.max().half().detach()
+
                 losses.backward()
                 model.zero_grad()
         else:
@@ -154,6 +171,19 @@ def collect_gradients(
             feature=Value("float16"),
             new_fingerprint="loss",
         )
+        if kl_divergence:
+            data = data.add_column(
+                "mean_kl_divergence",
+                per_doc_mean_kl_divergence.cpu().numpy(),
+                feature=Value("float16"),
+                new_fingerprint="mean_kl_divergence",
+            )
+            data = data.add_column(
+                "max_kl_divergence",
+                per_doc_max_kl_divergence.cpu().numpy(),
+                feature=Value("float16"),
+                new_fingerprint="max_kl_divergence",
+            )
         data.save_to_disk(path + "/data.hf")
 
         processor.save(path)
