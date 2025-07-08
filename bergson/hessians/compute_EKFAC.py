@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, BitsAndBytesConfig, PreTrainedMod
 from bergson.data import IndexConfig, allocate_batches
 from bergson.distributed import distributed_computing
 from bergson.gradients import GradientProcessor
-from bergson.hessians.covariance_all_factors import EkfacComputer, compute_eigenvalue_correction
+from bergson.hessians.covariance_all_factors import EkfacComputer
 from bergson.utils import assert_type, get_layer_list
 
 
@@ -74,7 +74,6 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | Ite
         for layer in get_layer_list(model):
             fully_shard(layer)
 
-        # Shard the entire model
         fully_shard(model)
 
     # Check for PEFT adapters
@@ -184,23 +183,15 @@ def compute_all_factors(
         debug=debug,
         profile=profile,
     )
-    # computer.compute_covariance()
+    computer.compute_covariance()
 
-    # dist.barrier() if dist.is_initialized() else None
+    dist.barrier() if dist.is_initialized() else None
 
-    # computer.compute_eigendecomposition(covariance_type="activation")
-    # computer.compute_eigendecomposition(covariance_type="gradient")
+    computer.compute_eigendecomposition(covariance_type="activation")
+    computer.compute_eigendecomposition(covariance_type="gradient")
 
-    # dist.barrier() if dist.is_initialized() else None
-
-    compute_eigenvalue_correction(
-        model,
-        data,
-        processor,
-        path,
-        batches=batches,
-        target_modules=target_modules,
-    )
+    dist.barrier() if dist.is_initialized() else None
+    computer.compute_eigenvalue_correction()
 
 
 def compute_EKFAC(cfg: IndexConfig):

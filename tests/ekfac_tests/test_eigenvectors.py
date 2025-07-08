@@ -27,13 +27,6 @@ def test_eigenvectors(ground_truth_path, run_path, eigenvector_type: Literal["ac
         run_eigenvectors[k] = torch.cat([shard[k] for shard in run_eigenvectors_list], dim=0)
 
     run_eigenvectors = TensorDict(run_eigenvectors)
-    # for k in run_eigenvectors.keys():
-    #     run_e = run_eigenvectors[k]
-    #     ground_truth_e = ground_truth_eigenvectors[k]
-    #     for i in range(run_e.shape[1]):
-    #         dot = run_e[:, i] @ ground_truth_e[:, i]
-    #         if dot < 0:
-    #             run_e[:, i] = -run_e[:, i]
 
     equal_dict = ground_truth_eigenvectors.allclose(run_eigenvectors, rtol=1e-5)
 
@@ -59,8 +52,12 @@ def test_eigenvectors(ground_truth_path, run_path, eigenvector_type: Literal["ac
                     ground_truth_eigenvectors[k][max_diff_idx],
                     run_eigenvectors[k][max_diff_idx],
                 )
-                print("total abs sum", ground_truth_eigenvectors[k].abs().sum(), run_eigenvectors[k].abs().sum())
-                # print(ground_truth_eigenvectors[k][:7, max_diff_idx[1]], run_eigenvectors[k][:7, max_diff_idx[1]])
-                # print(ground_truth_eigenvectors[k][:, max_diff_idx[1]] @ run_eigenvectors[k][:, max_diff_idx[1]])
+                print(
+                    "total abs sum: ",
+                    "ground truth",
+                    ground_truth_eigenvectors[k].abs().sum(),
+                    "run",
+                    run_eigenvectors[k].abs().sum(),
+                )
                 print("\n")
     print("-*" * 50)

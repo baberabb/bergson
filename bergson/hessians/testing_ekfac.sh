@@ -8,4 +8,4 @@ python -m bergson.hessians training_data \
     --completion_column "completion" \
     --token_batch_size "1028" \
     --fsdp \
-    --precision fp16
+    --precision fp32

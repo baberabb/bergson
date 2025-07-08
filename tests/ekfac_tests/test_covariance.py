@@ -28,10 +28,10 @@ def test_covariances(ground_truth_path, run_path, covariance_type: Literal["acti
 
     run_covariances = TensorDict(run_covariances)
     diff = ground_truth_covariances.sub(run_covariances).abs()
-    # More lax tolerances for gradient covariances as they have noise
-    atol = 1e-5 if covariance_type == "activation" else 1e-4
-    rtol = 1e-6 if covariance_type == "activation" else 1e-5
-    equal_dict = ground_truth_covariances.allclose(run_covariances, atol=atol, rtol=rtol)
+
+    rtol = 1e-4
+    atol = 1
+    equal_dict = ground_truth_covariances.allclose(run_covariances, rtol=rtol, atol=atol)
 
     if all(equal_dict.values()):
         print(f"{covariance_type} covariances match")

@@ -34,7 +34,7 @@ def test_eigenvalue_correction(ground_truth_path, run_path):
         print("Eigenvalue corrections match!")
     else:
         print("Eigenvalue corrections do not match!")
-        print(equal_dict)
+
         diff = lambda_ground_truth.sub(lambda_run).abs()
         max_diff = diff.max()
         # print keys for which the covariances do not match
