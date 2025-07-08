@@ -35,19 +35,17 @@ def test_eigenvalue_correction(ground_truth_path, run_path):
     else:
         print("Eigenvalue corrections do not match!")
 
-        diff = lambda_ground_truth.sub(lambda_run).abs()
-
+        diff = lambda_ground_truth.sub(lambda_run).div(lambda_ground_truth).abs()
+        max_diff = diff.max()
         # print keys for which the covariances do not match
 
         for k, v in equal_dict.items():
             if not v:
                 # Find location of max difference
-                max_diff_flat_idx = torch.argmax(diff[k])
-                max_diff_idx = torch.unravel_index(max_diff_flat_idx, diff[k].shape)
+
                 print(
-                    "max difference",
-                    lambda_ground_truth[k][max_diff_idx],
-                    lambda_run[k][max_diff_idx],
+                    f"Covariance {k} does not match with max relative difference "
+                    f"{(100 * max_diff[k]):.3f} % and mean {100 * diff[k].mean()} % !",
                 )
                 print(
                     "total abs sum: ",

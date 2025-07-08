@@ -27,7 +27,7 @@ def test_covariances(ground_truth_path, run_path, covariance_type: Literal["acti
         run_covariances[k] = torch.cat([shard[k] for shard in run_covariances_list], dim=0)
 
     run_covariances = TensorDict(run_covariances)
-    diff = ground_truth_covariances.sub(run_covariances).abs()
+    diff = ground_truth_covariances.sub(run_covariances).div(ground_truth_covariances).abs()
 
     rtol = 1e-4
     atol = 1
@@ -42,11 +42,8 @@ def test_covariances(ground_truth_path, run_path, covariance_type: Literal["acti
         print(f"{covariance_type} covariances do not match!")
         for k, v in equal_dict.items():
             if not v:
-                # Find location of max difference
-                max_diff_flat_idx = torch.argmax(diff[k])
-                max_diff_idx = torch.unravel_index(max_diff_flat_idx, diff[k].shape)
                 print(
-                    f"Covariance {k} does not match with absolute difference {max_diff[k]:.3f} and "
-                    f"relative difference {(100 * max_diff[k] / ground_truth_covariances[k][max_diff_idx].abs()):.3f} %!"
+                    f"Covariance {k} does not match with max relative difference "
+                    f"{(100 * max_diff[k]):.3f} % and mean {100 * diff[k].mean()} % !",
                 )
     print("-*" * 50)
