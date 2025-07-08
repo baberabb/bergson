@@ -52,4 +52,5 @@ The output will look like this (in this example world_size=4):
 └── processor_config.json
 ```
 Where each of the folders contains the shards for the matrices A (activation covariance), Q_A (eigenvectors of A), Lambda (eigenvalue correction), S (pseudogradient covariance), Q_S (eigenvectors of S). See [Eq. (18)-(20)](https://arxiv.org/abs/2308.03296).
+All of these matrices are sharded across their 0th dimension, i.e. each shard has shape `(original_shape[0] / world_size, original_shape[1])`.
 
