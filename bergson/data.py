@@ -2,13 +2,14 @@ import json
 import math
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Optional, Sequence
 
 import numpy as np
 import pyarrow as pa
 import torch
 import torch.distributed as dist
-from datasets import Dataset
+from datasets import Dataset, concatenate_datasets
 from numpy.typing import DTypeLike
 from simple_parsing import field
 
@@ -272,13 +273,25 @@ def load_gradients(root_dir: str) -> np.memmap:
 
 def load_gradient_dataset(root_dir: str) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
-    mmap = load_gradients(root_dir)
-    flat = pa.array(mmap.reshape(-1))
-    col = pa.FixedSizeListArray.from_arrays(flat, mmap.shape[1])
 
-    # Create a Dataset with the gradients as a single column
-    ds = Dataset.load_from_disk(root_dir + "/data.hf")
-    return ds.add_column("gradients", col, new_fingerprint="grads")
+    def load_shard(dir: str) -> Dataset:
+        mmap = load_gradients(dir)
+        flat = pa.array(mmap.reshape(-1))
+        col = pa.FixedSizeListArray.from_arrays(flat, mmap.shape[1])
+
+        # Create a Dataset with the gradients as a single column
+        ds = Dataset.load_from_disk(dir + "/data.hf")
+        return ds.add_column("gradients", col, new_fingerprint="grads")
+
+    root = Path(root_dir)
+
+    if (root / "data.hf").exists():
+        return load_shard(root_dir)
+
+    # Flatten indices to avoid CPU OOM
+    return concatenate_datasets(
+        [load_shard(str(path)) for path in sorted(root.iterdir()) if path.is_dir()]
+    ).flatten_indices()
 
 
 def pad_and_tensor(

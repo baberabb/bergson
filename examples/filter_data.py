@@ -1,19 +1,20 @@
 from typing import Literal
 import os
 from dataclasses import dataclass
-from contextlib import nullcontext, redirect_stdout
 from typing import Sequence
+from datetime import timedelta
+import socket
 
 from simple_parsing import parse
-from tqdm import tqdm
-from torch import Tensor
 import torch
-import torch.nn.functional as F
+from torch import Tensor
+from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from datasets import load_dataset, Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.modeling_utils import PreTrainedModel
 from trl import SFTConfig, SFTTrainer, setup_chat_format
-
 
 from bergson.data import load_gradient_dataset, tokenize, DataConfig, unflatten
 from bergson.processing import GradientProcessor, GradientCollector
@@ -85,6 +86,78 @@ class FilterConfig:
     """Hugging Face token to use for the dataset."""
 
 
+def worker(rank: int, world_size: int, cfg: FilterConfig, train, eval, run_name):
+    torch.cuda.set_device(rank)
+
+    # These should be set by the main process
+    if world_size > 1:
+        addr = os.environ.get("MASTER_ADDR", "localhost")
+        port = os.environ.get("MASTER_PORT", "29500")
+
+        dist.init_process_group(
+            "nccl",
+            init_method=f"tcp://{addr}:{port}",
+            device_id=torch.device(f"cuda:{rank}"),
+            rank=rank,
+            timeout=timedelta(hours=1),
+            world_size=world_size,
+        )
+
+    model = AutoModelForCausalLM.from_pretrained(
+        cfg.model,
+        torch_dtype="bfloat16",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model, max_length=8192)
+    model, tokenizer = setup_chat_format(model, tokenizer)
+
+    # https://github.com/huggingface/alignment-handbook/blob/main/recipes/smollm2/sft/config.yaml
+    trainer = SFTTrainer(
+        model=model,
+        train_dataset=train,
+        eval_dataset=eval,
+        args=SFTConfig(
+            max_length=8192,
+            max_seq_length=8192,
+            output_dir=f"examples/runs/{run_name}",
+            per_device_train_batch_size=1,
+            per_device_eval_batch_size=1,
+            gradient_accumulation_steps=32,
+            gradient_checkpointing=True,
+            learning_rate=3e-4,
+            num_train_epochs=cfg.num_epochs,
+            warmup_ratio=0.1,
+            lr_scheduler_type="cosine",
+            bf16=True,
+            logging_steps=10,
+            eval_steps=20,
+            save_steps=100,
+            save_total_limit=3,
+            group_by_length=True,
+            completion_only_loss=True,
+            ddp_find_unused_parameters=False,
+            seed=cfg.seed,
+        ),
+    )
+
+    trainer.train()
+
+    if rank == 0:
+        trainer.save_model(f"examples/runs/{run_name}")
+        tokenizer.save_pretrained(f"examples/runs/{run_name}")
+
+        if cfg.hf_token is not None:
+            os.environ["HF_TOKEN"] = cfg.hf_token
+            trainer.push_to_hub(repo_id=f"EleutherAI/{run_name}")
+            tokenizer.push_to_hub(repo_id="EleutherAI")
+
+
+def dist_worker(rank: int, world_size: int, cfg: FilterConfig, train, eval, run_name):
+    try:
+        worker(rank, world_size, cfg, train, eval, run_name)
+    finally:
+        dist.destroy_process_group()
+
+
 def set_seeds(seed: int):
     """Set all random seeds for reproducibility."""
     torch.manual_seed(seed)
@@ -115,10 +188,7 @@ def precondition(
         P = processor.preconditioners[name]
         g = g.flatten(1).type_as(P)
         # Figure out why we use this method and if it makes sense in unbatched context
-        try:
-            g = torch.cholesky_solve(g.mT, P).mT
-        except RuntimeError:
-            breakpoint()
+        g = torch.cholesky_solve(g.mT, P).mT
 
         return g
 
@@ -129,22 +199,23 @@ def precondition(
 
 def get_mean_normalized_gradients(
     dataset: Dataset,
-    processor: GradientProcessor | None = None,
-    shapes: dict[str, Sequence[int]] = dict(),
-    batch_size: int = 512,
+    processor: GradientProcessor | None,
+    shapes: dict[str, Sequence[int]],
+    batch_size: int,
 ) -> Tensor:
     """Compute the mean of the gradients in the dataset."""
-    gradients_sum = torch.zeros(dataset["gradients"][1].shape, device="cuda")
+    acc = {"sum": torch.zeros_like(dataset[0]["gradients"], device="cuda")}
 
-    for i in tqdm(range(0, len(dataset), batch_size), desc="Computing mean gradient"):
-        gradients_batch = dataset[i : min(i + batch_size, len(dataset))][
-            "gradients"
-        ].cuda()
-        gradients_sum += gradients_batch.sum(0)
+    def sum_(col):
+        acc["sum"] += col.cuda().sum(0)
 
-        del gradients_batch
+    # RAM usage climbs here; it's intentionally only evicted under pressure
+    # Do not use num_proc here because we are accumulating in a single variable
+    # nproc solution must use reduce as in
+    # https://colab.research.google.com/drive/1jCLv31Y4cDfqD0lhO0AnqEv3Or-LLvWe?usp=sharing
+    dataset.map(sum_, input_columns="gradients", batched=True, batch_size=batch_size)
 
-    mean_gradients = gradients_sum / len(dataset)
+    mean_gradients = acc["sum"] / len(dataset)
 
     if processor is not None:
         mean_gradients = precondition(mean_gradients.unsqueeze(0), processor, shapes).squeeze(0)
@@ -189,25 +260,22 @@ def attribution_filter(
     )
     del query_dataset, query_processor
 
-    importance_scores = torch.zeros(len(train), device="cuda")
-    for i in tqdm(
-        range(0, len(train), args.batch_size), desc="Computing importance scores"
-    ):
-        gradients_batch = train[i : min(i + args.batch_size, len(train))][
-            "gradients"
-        ].cuda()
+    acc = {"scores": []}
 
+
+    def score_(batch):
+        gradients_batch = batch.cuda()
+        
         if index_processor and shapes:
             gradients_batch = precondition(gradients_batch, index_processor, shapes)
 
         gradients_batch /= gradients_batch.norm(dim=1, keepdim=True)
-
-    
         batch_scores = gradients_batch @ query
 
-        importance_scores[i : min(i + args.batch_size, len(train))] += batch_scores
+        acc["scores"].append(batch_scores)
 
-        del gradients_batch
+    train.map(score_, input_columns="gradients", batched=True, batch_size=args.batch_size)
+    importance_scores = torch.cat(acc["scores"], dim=0).cuda()
 
     if args.sample:
         probs = torch.softmax(importance_scores / args.temperature, dim=0)
@@ -231,9 +299,6 @@ def main(
 ):
     set_seeds(args.seed)
 
-    rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(rank)
-
     if args.name is None:
         run_name = (
             f"{args.model.split('/')[-1]}-{args.dataset.split('/')[-1]}-{args.filter}"
@@ -243,126 +308,114 @@ def main(
     else:
         run_name = args.name
 
-    with nullcontext() if rank == 0 else redirect_stdout(None):
+    if args.filter == "attribution" or args.filter == "loss":
+        dataset = load_gradient_dataset(args.index_dataset) #.with_format("torch")
+    else:
         dataset = assert_type(Dataset, load_dataset(args.dataset, split="train"))
 
-        if args.filter == "attribution" or args.filter == "loss":
-            dataset = add_index(dataset, args.index_dataset)
 
-        dataset.shuffle(args.seed)
+    dataset.shuffle(args.seed)
 
-        train, eval = dataset.train_test_split(
-            test_size=0.05,
-            seed=args.seed,
-            load_from_cache_file=True,
-            train_indices_cache_file_name=f"cache/{run_name}/train.arrow",
-            test_indices_cache_file_name=f"cache/{run_name}/test.arrow",
-        ).values()
+    print("Spliting...")
+    train, eval = dataset.train_test_split(
+        test_size=0.05,
+        seed=args.seed,
+    ).values()
 
-        train.set_format("torch")
-        eval.set_format("torch")
+    train.set_format("torch")
+    eval.set_format("torch")
 
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model,
-            torch_dtype="bfloat16",
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        torch_dtype="bfloat16",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(args.model, max_length=8192)
+    model, tokenizer = setup_chat_format(model, tokenizer)
+
+    print("Filtering...")
+    if args.num_examples == 0:
+        pass
+    elif args.filter == "attribution":
+        train = attribution_filter(args, train, model)
+    elif args.filter == "classification":
+        ranks = {"excellent": 4, "good": 3, "average": 2, "poor": 1, "very poor": 0}
+
+        def add_rank(ex):
+            q = ex.get("quality")
+            return {"_q": ranks.get(q, -1)}
+
+        train = (
+            train.map(add_rank)
+            .filter(lambda x: x["_q"] >= 0)
+            .sort("_q", reverse=not args.lowest)
+            .select(range(min(args.num_examples, len(train))))
+            .remove_columns("_q")
         )
-        tokenizer = AutoTokenizer.from_pretrained(args.model, max_length=8192)
-        model, tokenizer = setup_chat_format(model, tokenizer)
-
-        print("Filtering...")
-        if args.num_examples == 0:
-            pass
-        elif args.filter == "attribution":
-            train = attribution_filter(args, train, model)
-        elif args.filter == "classification":
-            ranks = {"excellent": 4, "good": 3, "average": 2, "poor": 1, "very poor": 0}
-
-            def add_rank(ex):
-                q = ex.get("quality")
-                return {"_q": ranks.get(q, -1)}
-
-            train = (
-                train.map(add_rank)
-                .filter(lambda x: x["_q"] >= 0)
-                .sort("_q", reverse=not args.lowest)
-                .select(range(min(args.num_examples, len(train))))
-                .remove_columns("_q")
-            )
-        elif args.filter == "loss":
-            train = train.map(
-                lambda x: {"loss": x["loss"].item()},
-                remove_columns=["gradients"],
-            )
-            # Select the top-k items
-            sorted_scores = torch.argsort(train["loss"])
-            selected_indices = (
-                sorted_scores[: args.num_examples]
-                if args.lowest
-                else sorted_scores[-args.num_examples :]
-            )
-            train = train.select(selected_indices)
-        elif args.filter == "random":
-            train = train.select(range(min(args.num_examples, len(train))))
-        else:
-            raise ValueError(f"Invalid filter: {args.filter}")
-
-        # Create DataConfig for tokenization
-        data_config = DataConfig(
-            prompt_column=args.prompt_column,
-            completion_column=args.completion_column,
-            conversation_column=args.conversation_column,
-        )
-
+    elif args.filter == "loss":
         train = train.map(
-            tokenize,
-            batched=True,
-            fn_kwargs=dict(args=data_config, tokenizer=tokenizer),
+            lambda x: {"loss": x["loss"].item()},
+            remove_columns=["gradients"],
         )
-        eval = eval.map(
-            tokenize,
-            batched=True,
-            fn_kwargs=dict(args=data_config, tokenizer=tokenizer),
+        # Select the top-k items
+        sorted_scores = torch.argsort(train["loss"])
+        selected_indices = (
+            sorted_scores[: args.num_examples]
+            if args.lowest
+            else sorted_scores[-args.num_examples :]
         )
+        train = train.select(selected_indices)
+    elif args.filter == "random":
+        train = train.select(range(min(args.num_examples, len(train))))
+    else:
+        raise ValueError(f"Invalid filter: {args.filter}")
 
-        # https://github.com/huggingface/alignment-handbook/blob/main/recipes/smollm2/sft/config.yaml
-        trainer = SFTTrainer(
-            model=model,
-            train_dataset=train,
-            eval_dataset=eval,
-            args=SFTConfig(
-                max_length=8192,
-                max_seq_length=8192,
-                output_dir=f"examples/runs/{run_name}",
-                per_device_train_batch_size=1,
-                per_device_eval_batch_size=1,
-                gradient_accumulation_steps=32,
-                gradient_checkpointing=True,
-                learning_rate=3e-4,
-                num_train_epochs=args.num_epochs,
-                warmup_ratio=0.1,
-                lr_scheduler_type="cosine",
-                bf16=True,
-                logging_steps=10,
-                eval_steps=20,
-                save_steps=100,
-                save_total_limit=3,
-                group_by_length=True,
-                completion_only_loss=True,
-                ddp_find_unused_parameters=False,
-                seed=args.seed,
-            ),
+    # Create DataConfig for tokenization
+    data_config = DataConfig(
+        prompt_column=args.prompt_column,
+        completion_column=args.completion_column,
+        conversation_column=args.conversation_column,
+    )
+
+    train = train.map(
+        tokenize,
+        batched=True,
+        fn_kwargs=dict(args=data_config, tokenizer=tokenizer),
+    )
+    eval = eval.map(
+        tokenize,
+        batched=True,
+        fn_kwargs=dict(args=data_config, tokenizer=tokenizer),
+    )
+
+    world_size = torch.cuda.device_count()
+    if world_size <= 1:
+        # Run the worker directly if no distributed training is needed. This is great
+        # for debugging purposes.
+        worker(0, 1, args, train, eval, run_name)
+    else:
+        # Set up multiprocessing and distributed training
+        mp.set_sharing_strategy("file_system")
+
+        # Find an available port for distributed training
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            _, port = s.getsockname()
+
+        ctx = start_processes(
+            "build",
+            dist_worker,
+            args={i: (i, world_size, args, train, eval, run_name) for i in range(world_size)},
+            envs={
+                i: {
+                    "LOCAL_RANK": str(i),
+                    "MASTER_ADDR": "localhost",
+                    "MASTER_PORT": str(port),
+                }
+                for i in range(world_size)
+            },
+            logs_specs=DefaultLogsSpecs(),
         )
-
-        trainer.train()
-
-        if rank == 0:
-            trainer.save_model(f"examples/runs/{run_name}")
-            tokenizer.save_pretrained(f"examples/runs/{run_name}")
-
-            if args.hf_token is not None:
-                os.environ["HF_TOKEN"] = args.hf_token
-                trainer.push_to_hub(repo_id=f"EleutherAI/{run_name}")
-                tokenizer.push_to_hub(repo_id=f"EleutherAI/{run_name}")
+        ctx.wait()
 
 
 if __name__ == "__main__":
