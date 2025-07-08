@@ -17,7 +17,9 @@ from .processing import collect_gradients, fit_normalizers
 from .utils import assert_type, get_layer_list
 
 
-def worker_build_gradient_dataset(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableDataset):
+def worker_build_gradient_dataset(
+    rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableDataset
+):
     torch.cuda.set_device(rank)
 
     # These should be set by the main process
@@ -116,16 +118,22 @@ def worker_build_gradient_dataset(rank: int, world_size: int, cfg: IndexConfig, 
         if cfg.normalizer != "none":
             # Evenly sample `stats_sample_size` examples to compute statistics
             if isinstance(ds, Dataset):
-                if cfg.stats_sample_size is not None and cfg.stats_sample_size < len(ds):
+                if cfg.stats_sample_size is not None and cfg.stats_sample_size < len(
+                    ds
+                ):
                     stats_ds = ds.shuffle(seed=0).select(range(cfg.stats_sample_size))
                 else:
                     stats_ds = ds
             else:
                 if cfg.stats_sample_size is not None:
                     stats_iterable_ds = ds.shuffle(seed=0).take(cfg.stats_sample_size)
-                    stats_ds = assert_type(Dataset, Dataset.from_generator(lambda: iter(stats_iterable_ds)))
+                    stats_ds = assert_type(
+                        Dataset, Dataset.from_generator(lambda: iter(stats_iterable_ds))
+                    )
                 else:
-                    stats_ds = assert_type(Dataset, Dataset.from_generator(lambda: iter(ds)))
+                    stats_ds = assert_type(
+                        Dataset, Dataset.from_generator(lambda: iter(ds))
+                    )
 
             normalizers = fit_normalizers(
                 model,

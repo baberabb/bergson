@@ -12,7 +12,13 @@ from jaxtyping import Float
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch import Tensor
-from torch.profiler import ProfilerActivity, profile, record_function, schedule, tensorboard_trace_handler
+from torch.profiler import (
+    ProfilerActivity,
+    profile,
+    record_function,
+    schedule,
+    tensorboard_trace_handler,
+)
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
@@ -25,10 +31,17 @@ from bergson.hessians.collector import EkfacCollector
 
 class EkfacComputer:
     """Compute all factors for the EKFAC algorithm as described in https://arxiv.org/abs/2308.03296 Section 2.2.
-    For all MLP modules in the model we do the following (where we use the notation torch.nn.Linear.weight.shape = [out, in]):
-    1. Compute the covariance of the activations A_l (shape [in,in]) and pseudo-gradients S_{l-1} (shape [out,out]) (Eq. 16).
-    2. Compute the eigendecomposition of the covariance matrices Q_A (shape [in,in]) and Q_S (shape [out,out]) (Eq. 18).
-    3. Compute the eigenvalue correction Lambda (shape [out,in]) (Eq.20)
+    For all MLP modules in the model we do the following
+    (where we use the notation torch.nn.Linear.weight.shape = [out, in]):
+
+    1. Compute the covariance of the activations A_l (shape [in,in])
+    and pseudo-gradients S_{l-1} (shape [out,out]) (Eq. 16).
+
+    2. Compute the eigendecomposition of the covariance matrices Q_A (shape [in,in])
+    and Q_S (shape [out,out]) (Eq. 18).
+
+    3. Compute the eigenvalue correction Lambda (shape [out,in]) (Eq.20).
+
     If using FSDP, we will do everything in a fully sharded manner to save memory.
     As a result, we will save and load shards of tensors to reduce memory usage.
     """
@@ -51,7 +64,9 @@ class EkfacComputer:
         self.data = data
         self.batches = batches
         self.path = path
-        self.target_info = EkfacCollector(model.base_model, target_modules=target_modules).target_info
+        self.target_info = EkfacCollector(
+            model.base_model, target_modules=target_modules
+        ).target_info
         self.device = model.device
         self.dtype = model.dtype
         self.debug = debug
@@ -134,25 +149,38 @@ class EkfacComputer:
         os.makedirs(gradient_path, exist_ok=True)
 
         # Save the sharded covariance matrices
-        save_file(A_cov_dict, os.path.join(activation_path, f"shard_{self.rank}.safetensors"))
-        save_file(S_cov_dict, os.path.join(gradient_path, f"shard_{self.rank}.safetensors"))
+        save_file(
+            A_cov_dict, os.path.join(activation_path, f"shard_{self.rank}.safetensors")
+        )
+        save_file(
+            S_cov_dict, os.path.join(gradient_path, f"shard_{self.rank}.safetensors")
+        )
 
         # Clean up
         torch.cuda.empty_cache()
         gc.collect()
 
-    def compute_eigendecomposition(self, covariance_type: Literal["activation", "gradient"]):
+    def compute_eigendecomposition(
+        self, covariance_type: Literal["activation", "gradient"]
+    ):
         """Computes the eigendecomposition of the covariance matrices."""
-        total_processed = torch.load(os.path.join(self.path, "total_processed.pt"), map_location=f"cuda:{self.rank}")
+        total_processed = torch.load(
+            os.path.join(self.path, "total_processed.pt"),
+            map_location=f"cuda:{self.rank}",
+        )
 
         random.seed(42)
-        shuffled_target_info = random.sample(list(self.target_info), len(list(self.target_info)))
+        shuffled_target_info = random.sample(
+            list(self.target_info), len(list(self.target_info))
+        )
 
         target_info_rank = shuffled_target_info[self.rank :: self.world_size]
 
         covariance_eigenvectors = {}
 
-        for key in tqdm(target_info_rank, disable=self.rank != 0, desc="Computing eigenvectors"):
+        for key in tqdm(
+            target_info_rank, disable=self.rank != 0, desc="Computing eigenvectors"
+        ):
             matrix = self._compute_full_matrix(key, covariance_type=covariance_type)
             original_dtype = matrix.dtype
             matrix_normalized = matrix.to(torch.float64) / total_processed
@@ -161,13 +189,16 @@ class EkfacComputer:
             # check if matrix_normalized is has NaNs or Infs
             if not torch.isfinite(matrix_normalized).all():
                 raise ValueError(
-                    f"Covariance matrix for {key} of type {covariance_type} contains NaNs or Infs. Consider increasing to fp32."
+                    f"Covariance matrix for {key} of type {covariance_type} contains NaNs or Infs."
+                    "Consider increasing to fp32."
                 )
             try:
                 eigenvalues, eigenvectors = torch.linalg.eigh(matrix_normalized)
 
             except Exception as e:
-                raise RuntimeError(f"Eigendecomposition failed for {key} of type {covariance_type}") from e
+                raise RuntimeError(
+                    f"Eigendecomposition failed for {key} of type {covariance_type}"
+                ) from e
 
             eigenvectors = eigenvectors.to(original_dtype).contiguous()
             covariance_eigenvectors[key] = eigenvectors
@@ -182,7 +213,10 @@ class EkfacComputer:
 
         os.makedirs(eigen_path, exist_ok=True)
 
-        save_file(covariance_eigenvectors, os.path.join(eigen_path, f"shard_{self.rank}.safetensors"))
+        save_file(
+            covariance_eigenvectors,
+            os.path.join(eigen_path, f"shard_{self.rank}.safetensors"),
+        )
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -197,10 +231,12 @@ class EkfacComputer:
             print(f"Computing eigenvalue correction for {len(self.data)} documents...")
 
         eigen_a = load_file(
-            self.path + f"/activation_eigen_sharded/shard_{self.rank}.safetensors", device=f"cuda:{self.rank}"
+            self.path + f"/activation_eigen_sharded/shard_{self.rank}.safetensors",
+            device=f"cuda:{self.rank}",
         )
         eigen_g = load_file(
-            self.path + f"/gradient_eigen_sharded/shard_{self.rank}.safetensors", device=f"cuda:{self.rank}"
+            self.path + f"/gradient_eigen_sharded/shard_{self.rank}.safetensors",
+            device=f"cuda:{self.rank}",
         )
 
         eigenvalue_corrections = {}
@@ -231,18 +267,26 @@ class EkfacComputer:
 
             if self.rank == 0:
                 run_covariances_shards = [
-                    os.path.join(self.path, "activation_eigen_sharded", f"shard_{rank}.safetensors")
+                    os.path.join(
+                        self.path,
+                        "activation_eigen_sharded",
+                        f"shard_{rank}.safetensors",
+                    )
                     for rank in range(self.world_size)
                 ]
-                run_covariances_list = [(load_file(shard)) for shard in run_covariances_shards]
+                run_covariances_list = [
+                    (load_file(shard)) for shard in run_covariances_shards
+                ]
                 run_covariances = {}
                 for k, v in run_covariances_list[0].items():
-                    run_covariances[k] = torch.cat([shard[k] for shard in run_covariances_list], dim=0).to(a.device)
+                    run_covariances[k] = torch.cat(
+                        [shard[k] for shard in run_covariances_list], dim=0
+                    ).to(a.device)
 
                 result_2 = a @ run_covariances[name]
-                assert torch.allclose(result, result_2, atol=1e-4, rtol=1e-4), (
-                    "Distributed eigenvector multiplication failed"
-                )
+                assert torch.allclose(
+                    result, result_2, atol=1e-4, rtol=1e-4
+                ), "Distributed eigenvector multiplication failed"
 
             # if self.rank == 0 and name == "layers.0.mlp.dense_4h_to_h" and self.debug:
             #     print(f"{self.rank}: {result.abs().sum()}")
@@ -280,23 +324,33 @@ class EkfacComputer:
             start_row = self.rank * transformed_grad_shard.shape[0]
             end_row = (self.rank + 1) * transformed_grad_shard.shape[0]
             if name not in eigenvalue_corrections:
-                eigenvalue_corrections[name] = transformed_grad_shard[start_row:end_row, :].contiguous()
+                eigenvalue_corrections[name] = transformed_grad_shard[
+                    start_row:end_row, :
+                ].contiguous()
             else:
-                eigenvalue_corrections[name].add_(transformed_grad_shard[start_row:end_row, :].contiguous())
+                eigenvalue_corrections[name].add_(
+                    transformed_grad_shard[start_row:end_row, :].contiguous()
+                )
 
             if self.rank == 0:
                 run_covariances_shards = [
-                    os.path.join(self.path, "gradient_eigen_sharded", f"shard_{rank}.safetensors")
+                    os.path.join(
+                        self.path, "gradient_eigen_sharded", f"shard_{rank}.safetensors"
+                    )
                     for rank in range(self.world_size)
                 ]
-                run_covariances_list = [(load_file(shard)) for shard in run_covariances_shards]
+                run_covariances_list = [
+                    (load_file(shard)) for shard in run_covariances_shards
+                ]
 
-                run_covariances = torch.cat([shard[name] for shard in run_covariances_list], dim=0).to(g.device)
+                run_covariances = torch.cat(
+                    [shard[name] for shard in run_covariances_list], dim=0
+                ).to(g.device)
                 result_2 = torch.einsum(" r l, b r-> b l", run_covariances, g)
 
-                assert torch.allclose(result, result_2, atol=1e-0, rtol=1e-4), (
-                    "Distributed eigenvector multiplication failed"
-                )
+                assert torch.allclose(
+                    result, result_2, atol=1e-0, rtol=1e-4
+                ), "Distributed eigenvector multiplication failed"
 
         collector = EkfacCollector(
             self.model.base_model,
@@ -311,13 +365,18 @@ class EkfacComputer:
         if dist.is_initialized():
             dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
         if self.rank == 0:
-            torch.save(total_processed, os.path.join(self.path, "total_processed_lambda.pt"))
+            torch.save(
+                total_processed, os.path.join(self.path, "total_processed_lambda.pt")
+            )
             print(f"Total processed: {total_processed.item()}")
         for k, v in eigenvalue_corrections.items():
             v.div_(total_processed)
 
         os.makedirs(self.path + "/eigenvalue_correction_sharded", exist_ok=True)
-        save_file(eigenvalue_corrections, self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors")
+        save_file(
+            eigenvalue_corrections,
+            self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
+        )
 
     def _setup_profiler(self):
         """Set up profiler if profiling is enabled."""
@@ -357,23 +416,33 @@ class EkfacComputer:
             # Activation covariance A^T A has shape [in_dim, in_dim]
             in_dim = weight_shape[1]
             if in_dim % self.world_size != 0:
-                raise ValueError(f"Activation dim {in_dim} for {name} not divisible by world_size {self.world_size}")
+                raise ValueError(
+                    f"Activation dim {in_dim} for {name} not divisible by world_size {self.world_size}"
+                )
             shard_size = in_dim // self.world_size
-            activation_covariance_dict[name] = torch.zeros((shard_size, in_dim), device=self.device, dtype=dtype)
+            activation_covariance_dict[name] = torch.zeros(
+                (shard_size, in_dim), device=self.device, dtype=dtype
+            )
 
             # Gradient covariance G^T G has shape [out_dim, out_dim]
             out_dim = weight_shape[0]
             if out_dim % self.world_size != 0:
-                raise ValueError(f"Gradient dim {out_dim} for {name} not divisible by world_size {self.world_size}")
+                raise ValueError(
+                    f"Gradient dim {out_dim} for {name} not divisible by world_size {self.world_size}"
+                )
             shard_size = out_dim // self.world_size
-            gradient_covariance_dict[name] = torch.zeros((shard_size, out_dim), device=self.device, dtype=dtype)
+            gradient_covariance_dict[name] = torch.zeros(
+                (shard_size, out_dim), device=self.device, dtype=dtype
+            )
 
     def _collector(self, collector, desc: Optional[str] = None) -> Float[Tensor, " "]:
         total_processed = torch.tensor(0, device=self.model.device)
         prof = self._setup_profiler()
         step = 0
         with prof:
-            for sl in tqdm(self.batches, disable=self.rank != 0, desc=f"Computing {desc}"):
+            for sl in tqdm(
+                self.batches, disable=self.rank != 0, desc=f"Computing {desc}"
+            ):
                 batch = self.data[sl]
                 x, y = pad_and_tensor(
                     batch["input_ids"],  # type: ignore
@@ -407,18 +476,24 @@ class EkfacComputer:
 
         return total_processed
 
-    def _compute_full_matrix(self, name: str, covariance_type: Literal["activation", "gradient"]):
+    def _compute_full_matrix(
+        self, name: str, covariance_type: Literal["activation", "gradient"]
+    ):
         """
         Load a full matrix from sharded covariance files. Needed to compute eigendecomposition.
         """
         shard_path = os.path.join(self.path, f"{covariance_type}_covariance_sharded")
         files = os.listdir(shard_path)
-        assert len(files) == self.world_size, f"Expected {self.world_size} shards, found {len(files)} in {self.path}"
+        assert (
+            len(files) == self.world_size
+        ), f"Expected {self.world_size} shards, found {len(files)} in {self.path}"
 
         full_matrix = []
         for shard_id in range(self.world_size):
             shard_path_rank = os.path.join(shard_path, f"shard_{shard_id}.safetensors")
-            with safe_open(shard_path_rank, framework="pt", device=f"cuda:{self.rank}") as f:
+            with safe_open(
+                shard_path_rank, framework="pt", device=f"cuda:{self.rank}"
+            ) as f:
                 local_matrix = f.get_tensor(name)
 
             full_matrix.append(local_matrix)
@@ -426,15 +501,21 @@ class EkfacComputer:
         # Concatenate all shards to form the full matrix
         full_matrix = torch.cat(full_matrix, dim=0)
 
-        assert full_matrix.shape[0] == full_matrix.shape[1], "Full covariance matrix must be square"
+        assert (
+            full_matrix.shape[0] == full_matrix.shape[1]
+        ), "Full covariance matrix must be square"
 
         return full_matrix
 
     def _merge_and_shard_dict(
-        self, input_dict: dict[str, torch.Tensor], covariance_type: Literal["activation", "gradient"]
+        self,
+        input_dict: dict[str, torch.Tensor],
+        covariance_type: Literal["activation", "gradient"],
     ):
         """This function takes a dict of tensors, where each rank will have eigenvectors of *some* modules.
-        It then redistributes the tensors across all ranks, so that each rank has a shard of the eigenvector of *each* module."""
+        It then redistributes the tensors across all ranks,
+        so that each rank has a shard of the eigenvector of *each* module.
+        """
 
         for key in self.target_info:
             shard_size = self.target_info[key][1]
@@ -455,5 +536,7 @@ class EkfacComputer:
             shard = tensor[self.rank * shard_size : (self.rank + 1) * shard_size, :]
             input_dict[key] = shard
 
-            assert shard.shape[0] == shard_size, f"Shard shape {shard.shape} does not match expected {shard_size}"
+            assert (
+                shard.shape[0] == shard_size
+            ), f"Shard shape {shard.shape} does not match expected {shard_size}"
         return input_dict

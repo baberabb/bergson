@@ -12,7 +12,9 @@ from .data import IndexConfig, tokenize
 from .utils import assert_type
 
 
-def worker_wrapper(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset, worker_fn: Callable):
+def worker_wrapper(
+    rank: int, world_size: int, cfg: IndexConfig, ds: Dataset, worker_fn: Callable
+):
     try:
         worker_fn(rank, world_size, cfg, ds)
     finally:
@@ -31,7 +33,9 @@ def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
             ds = load_dataset(data_str, split="train", streaming=cfg.streaming)
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
-                raise NotImplementedError("DatasetDicts and IterableDatasetDicts are not supported.")
+                raise NotImplementedError(
+                    "DatasetDicts and IterableDatasetDicts are not supported."
+                )
         except ValueError as e:
             # Automatically use load_from_disk if appropriate
             if "load_from_disk" in str(e):
@@ -41,7 +45,9 @@ def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
 
     remove_columns = ds.column_names if cfg.drop_columns else None
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model, model_max_length=cfg.token_batch_size, revision=cfg.revision)
+    tokenizer = AutoTokenizer.from_pretrained(
+        cfg.model, model_max_length=cfg.token_batch_size, revision=cfg.revision
+    )
 
     ds = ds.map(
         tokenize,
@@ -71,7 +77,9 @@ def distributed_computing(cfg: IndexConfig, worker_fn: Callable):
             ctx = start_processes(
                 "build",
                 worker_wrapper,
-                args={i: (i, world_size, cfg, ds, worker_fn) for i in range(world_size)},
+                args={
+                    i: (i, world_size, cfg, ds, worker_fn) for i in range(world_size)
+                },
                 envs={
                     i: {
                         "LOCAL_RANK": str(i),

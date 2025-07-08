@@ -12,7 +12,7 @@ As in the main bergson module, the `--model` and `--dataset` arguments should be
 Further important parameters are:
 - `--fsdp`: If set, assumes the model is wrapped in FSDP and the parameters are sharded across multiple GPUs. This is recommended/necessary as the Hessian computation is very memory-intensive.
 - `--token_batch_size`: The batch size to use when computing gradients. Getting the right batch size can save you a lot of time.
-- `--precision`: Currently it is highly recommended to use `--precision fp32` to avoid overflow issues. 
+- `--precision`: Currently it is highly recommended to use `--precision fp32` to avoid overflow issues.
 - `--world_size`: The number of GPUs to use. If not specified, will use all available GPUs. Currently we require that the dimensions of the MLPs are divisible by the number of GPUs.
 
 The output will look like this (in this example world_size=4):
@@ -53,4 +53,3 @@ The output will look like this (in this example world_size=4):
 ```
 Where each of the folders contains the shards for the matrices A (activation covariance), Q_A (eigenvectors of A), Lambda (eigenvalue correction), S (pseudogradient covariance), Q_S (eigenvectors of S). See [Eq. (18)-(20)](https://arxiv.org/abs/2308.03296).
 All of these matrices are sharded across their 0th dimension, i.e. each shard has shape `(original_shape[0] / world_size, original_shape[1])`.
-

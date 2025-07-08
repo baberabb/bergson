@@ -17,7 +17,9 @@ from bergson.hessians.covariance_all_factors import EkfacComputer
 from bergson.utils import assert_type, get_layer_list
 
 
-def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableDataset):
+def worker_ekfac(
+    rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableDataset
+):
     torch.cuda.set_device(rank)
 
     # These should be set by the main process
@@ -112,7 +114,9 @@ def worker_ekfac(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | Ite
         processor.save(cfg.run_path)
 
     if rank == 0:
-        json.dump(asdict(cfg), open(os.path.join(cfg.run_path, "config.json"), "w"), indent=2)
+        json.dump(
+            asdict(cfg), open(os.path.join(cfg.run_path, "config.json"), "w"), indent=2
+        )
     cfg.ekfac_path = os.path.join(cfg.run_path, "influence_results")
     os.makedirs(cfg.ekfac_path, exist_ok=True)
 

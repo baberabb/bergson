@@ -1,23 +1,22 @@
-from typing import Literal
 import os
-from dataclasses import dataclass
-from typing import Sequence
-from datetime import timedelta
 import socket
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Literal, Sequence
 
-from simple_parsing import parse
 import torch
-from torch import Tensor
-from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from datasets import load_dataset, Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from datasets import Dataset, load_dataset
+from simple_parsing import parse
+from torch import Tensor
+from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.modeling_utils import PreTrainedModel
 from trl import SFTConfig, SFTTrainer, setup_chat_format
 
-from bergson.data import load_gradient_dataset, tokenize, DataConfig, unflatten
-from bergson.processing import GradientProcessor, GradientCollector
+from bergson.data import DataConfig, load_gradient_dataset, tokenize, unflatten
+from bergson.processing import GradientCollector, GradientProcessor
 from bergson.utils import assert_type
 
 
@@ -63,7 +62,7 @@ class FilterConfig:
 
     query_dataset: str = ""
     """
-    Use the mean of this dataset's gradients as the query for attribution 
+    Use the mean of this dataset's gradients as the query for attribution
     filtering. If unspecified the query is calculated over the index dataset.
     """
 
@@ -71,7 +70,7 @@ class FilterConfig:
     """Select the lowest scores."""
 
     sample: bool = False
-    """Filter by sampling from the dataset without replacement with 
+    """Filter by sampling from the dataset without replacement with
     probability proportional to the filtering criteria."""
 
     temperature: float = 0.1
@@ -192,9 +191,9 @@ def precondition(
 
         return g
 
-    return torch.cat([
-        precondition_module_grad(k, v) for k, v in named_grads.items()
-    ], dim=1)
+    return torch.cat(
+        [precondition_module_grad(k, v) for k, v in named_grads.items()], dim=1
+    )
 
 
 def get_mean_normalized_gradients(
@@ -218,7 +217,9 @@ def get_mean_normalized_gradients(
     mean_gradients = acc["sum"] / len(dataset)
 
     if processor is not None:
-        mean_gradients = precondition(mean_gradients.unsqueeze(0), processor, shapes).squeeze(0)
+        mean_gradients = precondition(
+            mean_gradients.unsqueeze(0), processor, shapes
+        ).squeeze(0)
 
     return mean_gradients / mean_gradients.norm()
 
@@ -240,10 +241,11 @@ def attribution_filter(
         index_processor = GradientProcessor.load(
             args.index_dataset, map_location="cuda"
         )
-        target_info = GradientCollector(model.base_model, lambda _ : _, index_processor).target_info
+        target_info = GradientCollector(
+            model.base_model, lambda _: _, index_processor
+        ).target_info
         shapes: dict[str, Sequence[int]] = {
-            k: [projection_dim, projection_dim]
-            for k in target_info.keys()
+            k: [projection_dim, projection_dim] for k in target_info.keys()
         }
 
         query_processor = (
@@ -262,10 +264,9 @@ def attribution_filter(
 
     acc = {"scores": []}
 
-
     def score_(batch):
         gradients_batch = batch.cuda()
-        
+
         if index_processor and shapes:
             gradients_batch = precondition(gradients_batch, index_processor, shapes)
 
@@ -274,7 +275,9 @@ def attribution_filter(
 
         acc["scores"].append(batch_scores)
 
-    train.map(score_, input_columns="gradients", batched=True, batch_size=args.batch_size)
+    train.map(
+        score_, input_columns="gradients", batched=True, batch_size=args.batch_size
+    )
     importance_scores = torch.cat(acc["scores"], dim=0).cuda()
 
     if args.sample:
@@ -309,10 +312,9 @@ def main(
         run_name = args.name
 
     if args.filter == "attribution" or args.filter == "loss":
-        dataset = load_gradient_dataset(args.index_dataset) #.with_format("torch")
+        dataset = load_gradient_dataset(args.index_dataset)  # .with_format("torch")
     else:
         dataset = assert_type(Dataset, load_dataset(args.dataset, split="train"))
-
 
     dataset.shuffle(args.seed)
 
@@ -404,7 +406,10 @@ def main(
         ctx = start_processes(
             "build",
             dist_worker,
-            args={i: (i, world_size, args, train, eval, run_name) for i in range(world_size)},
+            args={
+                i: (i, world_size, args, train, eval, run_name)
+                for i in range(world_size)
+            },
             envs={
                 i: {
                     "LOCAL_RANK": str(i),

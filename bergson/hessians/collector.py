@@ -131,7 +131,9 @@ class EkfacCollector(ContextDecorator):
 
         name = assert_type(str, module._name)
         if self.fwd_closure is None:
-            assert hasattr(module, "_inputs"), "Expected inputs to be saved in the module"
+            assert hasattr(
+                module, "_inputs"
+            ), "Expected inputs to be saved in the module"
             X = module._inputs
             G = G.mT @ X
         if self.closure:
