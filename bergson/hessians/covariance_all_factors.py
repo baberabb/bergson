@@ -203,8 +203,6 @@ class EkfacComputer:
 
             eigenvectors = eigenvectors.to(original_dtype).to(device="cpu").contiguous()
             covariance_eigenvectors[key] = eigenvectors
-            if self.rank == 0 and self.debug:
-                print(key, eigenvectors.sum())
 
         covariance_eigenvectors = self._merge_and_shard_dict(
             input_dict=covariance_eigenvectors, covariance_type=covariance_type
@@ -245,129 +243,14 @@ class EkfacComputer:
         eigenvalue_corrections = {}
         transformed_activation_cache = {}
 
-        # def callback_activation(name: str, a: torch.Tensor):
-        #     a = a.reshape(-1, a.shape[-1])  # [N*S, O]
-
-        #     a_chunks = torch.chunk(a, self.world_size, dim=1)
-
-        #     output_dim = eigen_a[name].shape[1]
-        #     result = torch.zeros(a.shape[0], output_dim, device=a.device, dtype=a.dtype)
-
-        #     for rank_index in range(self.world_size):
-        #         if rank_index == self.rank:
-        #             A_shard = eigen_a[name]
-        #         else:
-        #             A_shard = torch.zeros_like(eigen_a[name])
-
-        #         dist.broadcast(A_shard, src=rank_index)
-        #         # Accumulate partial result
-        #         result += a_chunks[rank_index] @ A_shard  # [N*S, D]
-
-        #         # Clean up
-        #         if self.rank != rank_index:
-        #             del A_shard
-        #     transformed_activation_cache[name] = result
-
-        #     if self.rank == 0 and self.debug:
-        #         run_covariances_shards = [
-        #             os.path.join(
-        #                 self.path,
-        #                 "activation_eigen_sharded",
-        #                 f"shard_{rank}.safetensors",
-        #             )
-        #             for rank in range(self.world_size)
-        #         ]
-        #         run_covariances_list = [(load_file(shard)) for shard in run_covariances_shards]
-        #         run_covariances = {}
-        #         for k, v in run_covariances_list[0].items():
-        #             run_covariances[k] = torch.cat([shard[k] for shard in run_covariances_list], dim=0).to(a.device)
-
-        #         result_2 = a @ run_covariances[name]
-        #         assert torch.allclose(result, result_2, atol=1e-4, rtol=1e-4), (
-        #             "Distributed eigenvector multiplication failed"
-        #         )
-
-        # def callback_gradient(name: str, g: torch.Tensor):
-        #     g = g.reshape(-1, g.shape[-1])  # [N*S, I]
-
-        #     g_chunks = torch.chunk(g, self.world_size, dim=1)
-        #     output_dim = eigen_g[name].shape[1]
-
-        #     result = torch.zeros(g.shape[0], output_dim, device=g.device, dtype=g.dtype)
-
-        #     for rank_index in range(self.world_size):
-        #         if rank_index == self.rank:
-        #             G_shard = eigen_g[name]
-
-        #         else:
-        #             G_shard = torch.zeros_like(eigen_g[name])
-
-        #         dist.broadcast(G_shard, src=rank_index)
-
-        #         # Accumulate partial result
-
-        #         result += torch.einsum(" r l, b r-> b l", G_shard, g_chunks[rank_index])
-
-        #         # Clean up
-        #         if rank_index != self.rank:
-        #             del G_shard
-
-        #     transformed_grad_shard = torch.einsum(
-        #         "B O, B K-> K O", transformed_activation_cache[name] ** 2, result**2
-        #     ).contiguous()
-        #     dist.all_reduce(transformed_grad_shard, op=dist.ReduceOp.SUM)
-
-        #     start_row = self.rank * transformed_grad_shard.shape[0]
-        #     end_row = (self.rank + 1) * transformed_grad_shard.shape[0]
-        #     if name not in eigenvalue_corrections:
-        #         eigenvalue_corrections[name] = transformed_grad_shard[start_row:end_row, :].to(
-        #             device="cpu", non_blocking=True
-        #         )
-        #     else:
-        #         eigenvalue_corrections[name].to(device=self.device).add_(
-        #             transformed_grad_shard[start_row:end_row, :]
-        #         ).to(device="cpu", non_blocking=True)
-
-        #     del transformed_grad_shard
-
-        #     if self.rank == 0 and self.debug:
-        #         run_covariances_shards = [
-        #             os.path.join(self.path, "gradient_eigen_sharded", f"shard_{rank}.safetensors")
-        #             for rank in range(self.world_size)
-        #         ]
-        #         run_covariances_list = [(load_file(shard)) for shard in run_covariances_shards]
-
-        #         run_covariances = torch.cat([shard[name] for shard in run_covariances_list], dim=0).to(g.device)
-        #         result_2 = torch.einsum(" r l, b r-> b l", run_covariances, g)
-
-        #         assert torch.allclose(result, result_2, atol=1e-0, rtol=1e-4), (
-        #             "Distributed eigenvector multiplication failed"
-        #         )
-
         def callback_activation(name: str, a: torch.Tensor):
-            a = a.reshape(-1, a.shape[-1])  # [N*S, O]
+            a_ni = a.reshape(-1, a.shape[-1])  # [N*S, I]
 
-            a_chunks = torch.chunk(a, self.world_size, dim=1)
+            transformed_activation_cache[name] = self._sharded_matmul(
+                vector_na=a_ni, matrix_cb=eigen_a[name], mult_type="left"
+            )
 
-            output_dim = eigen_a[name].shape[1]
-            result = torch.zeros(a.shape[0], output_dim, device=a.device, dtype=a.dtype)
-
-            for rank_index in range(self.world_size):
-                if rank_index == self.rank:
-                    A_shard = eigen_a[name]
-                else:
-                    A_shard = torch.zeros_like(eigen_a[name]).contiguous()
-
-                dist.broadcast(A_shard, src=rank_index)
-                # Accumulate partial result
-                result += a_chunks[rank_index] @ A_shard  # [N*S, D]
-
-                # Clean up
-                if self.rank != rank_index:
-                    del A_shard
-            transformed_activation_cache[name] = result
-
-            if self.rank == 0:
+            if self.rank == 0 and self.debug:
                 run_covariances_shards = [
                     os.path.join(
                         self.path,
@@ -381,39 +264,15 @@ class EkfacComputer:
                 for k, v in run_covariances_list[0].items():
                     run_covariances[k] = torch.cat([shard[k] for shard in run_covariances_list], dim=0).to(a.device)
 
-                result_2 = a @ run_covariances[name]
-                assert torch.allclose(result, result_2, atol=1e-4, rtol=1e-4), (
+                result_2 = a_ni @ run_covariances[name]
+                assert torch.allclose(transformed_activation_cache[name], result_2, atol=1e-4, rtol=1e-4), (
                     "Distributed eigenvector multiplication failed"
                 )
 
-            # if self.rank == 0 and name == "layers.0.mlp.dense_4h_to_h" and self.debug:
-            #     print(f"{self.rank}: {result.abs().sum()}")
-
         def callback_gradient(name: str, g: torch.Tensor):
-            g = g.reshape(-1, g.shape[-1])  # [N*S, I]
+            g_no = g.reshape(-1, g.shape[-1])  # [N*S, O]
 
-            g_chunks = torch.chunk(g, self.world_size, dim=1)
-            output_dim = eigen_g[name].shape[1]
-
-            result = torch.zeros(g.shape[0], output_dim, device=g.device, dtype=g.dtype)
-
-            for rank_index in range(self.world_size):
-                if rank_index == self.rank:
-                    G_shard = eigen_g[name]
-
-                else:
-                    G_shard = torch.zeros_like(eigen_g[name]).contiguous()
-
-                dist.broadcast(G_shard, src=rank_index)
-
-                # Accumulate partial result
-
-                result += torch.einsum(" r l, b r-> b l", G_shard, g_chunks[rank_index])
-
-                # Clean up
-                if rank_index != self.rank:
-                    del G_shard
-
+            result = self._sharded_matmul(vector_na=g_no, matrix_cb=eigen_g[name], mult_type="right")
             transformed_grad_shard = torch.einsum(
                 "B O, B K-> K O", transformed_activation_cache[name] ** 2, result**2
             ).contiguous()
@@ -422,11 +281,16 @@ class EkfacComputer:
             start_row = self.rank * transformed_grad_shard.shape[0]
             end_row = (self.rank + 1) * transformed_grad_shard.shape[0]
             if name not in eigenvalue_corrections:
-                eigenvalue_corrections[name] = transformed_grad_shard[start_row:end_row, :].contiguous()
+                eigenvalue_corrections[name] = (
+                    transformed_grad_shard[start_row:end_row, :].contiguous().to(device="cpu", non_blocking=False)
+                )
             else:
-                eigenvalue_corrections[name].add_(transformed_grad_shard[start_row:end_row, :].contiguous())
+                eigenvalue_corrections[name] = eigenvalue_corrections[name].to(device=self.device)
+                eigenvalue_corrections[name].add_(transformed_grad_shard[start_row:end_row, :].contiguous()).to(
+                    device="cpu", non_blocking=False
+                )
 
-            if self.rank == 0:
+            if self.rank == 0 and self.debug:
                 run_covariances_shards = [
                     os.path.join(self.path, "gradient_eigen_sharded", f"shard_{rank}.safetensors")
                     for rank in range(self.world_size)
@@ -434,7 +298,7 @@ class EkfacComputer:
                 run_covariances_list = [(load_file(shard)) for shard in run_covariances_shards]
 
                 run_covariances = torch.cat([shard[name] for shard in run_covariances_list], dim=0).to(g.device)
-                result_2 = torch.einsum(" r l, b r-> b l", run_covariances, g)
+                result_2 = torch.einsum(" r l, b r-> b l", run_covariances, g_no)
 
                 assert torch.allclose(result, result_2, atol=1e-0, rtol=1e-4), (
                     "Distributed eigenvector multiplication failed"
@@ -464,29 +328,35 @@ class EkfacComputer:
             self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
         )
 
-    @staticmethod
-    def _sharded_matmul(vector: Float[Tensor, "B a"], matrix: Float[Tensor, "a_i b"], world_size: int):
+    def _sharded_matmul(
+        self, vector_na: Float[Tensor, "n a"], matrix_cb: Float[Tensor, "c b"], mult_type: Literal["left", "right"]
+    ):
         """
-        Sharded matrix multiplication for distributed training.
+        Sharded matrix multiplication for distributed training. Assumes that c= a/world_size.
         vector: [B, a]
-        matrix_shard: [a_i, b]
+        matrix_shard: [c, b]
         Returns: [B, b]
         """
         # Split the vector into shards
-        vector_shards = torch.chunk(vector, dist.get_world_size(), dim=1)
+        vector_shards_wnc = torch.chunk(vector_na, self.world_size, dim=1)  # (w, n, c)
 
-        result = torch.zeros(vector.shape[0], matrix.shape[1], device=vector.device, dtype=vector.dtype)
+        result_nb = torch.zeros(vector_na.shape[0], matrix_cb.shape[1], device=vector_na.device, dtype=vector_na.dtype)
 
-        for rank_index in range(dist.get_world_size()):
-            if rank_index == dist.get_rank():
-                shard = vector_shards[rank_index]
+        for rank_index in range(self.world_size):
+            if rank_index == self.rank:
+                shard_cb = matrix_cb
             else:
-                shard = torch.zeros_like(vector_shards[rank_index])
+                shard_cb = torch.zeros_like(matrix_cb)
 
-            dist.broadcast(shard, src=rank_index)
-            result += shard @ matrix
+            dist.broadcast(shard_cb, src=rank_index)
+            if mult_type == "left":
+                result_nb += torch.einsum("n c, c b-> n b", vector_shards_wnc[rank_index], shard_cb)  # [B, c]
+            elif mult_type == "right":
+                result_nb += torch.einsum("c b, n c-> n b", shard_cb, vector_shards_wnc[rank_index])
+            if self.rank != rank_index:
+                del shard_cb
 
-        return result
+        return result_nb
 
     def _setup_profiler(self):
         """Set up profiler if profiling is enabled."""
