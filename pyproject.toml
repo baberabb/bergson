@@ -16,6 +16,7 @@ dependencies = [
     "ipywidgets>=8.1.7",
     "jaxtyping>=0.3.2",
     "natsort",
+    "peft>=0.16.0",
     "simple-parsing",
     "torch",
     "transformers",

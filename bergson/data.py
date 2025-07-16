@@ -77,6 +77,9 @@ class IndexConfig:
     drop_columns: bool = False
     """Only return the new dataset columns."""
 
+    ekfac: bool = False
+    """Whether to compute EKFAC preconditioners."""
+
     ekfac_path: str = ""
     """Path to the EKFAC computation, if it exists."""
 
@@ -98,15 +101,16 @@ class IndexConfig:
     profile: bool = False
     """Whether to profile the EKFAC computation.  This will use the pytorch profiler"""
 
+    lambda_factor: float = 0.1
+    """For computing inverse hessian vector product"""
+
 
 def ceildiv(a: int, b: int) -> int:
     """Ceiling division of two integers."""
     return -(-a // b)  # Equivalent to math.ceil(a / b) but faster for integers
 
 
-def allocate_batches(
-    doc_lengths: list[int], N: int, workers: Optional[int] = None
-) -> list[list[int]]:
+def allocate_batches(doc_lengths: list[int], N: int, workers: Optional[int] = None) -> list[list[int]]:
     """
     Allocate documents into batches that are then distributed evenly across
     a fixed number of workers.
@@ -192,9 +196,7 @@ def allocate_batches(
         while len(batches) < world_size:
             big = batches.pop(0)  # take the current largest
             if len(big) == 1:  # cannot split a singleton
-                raise RuntimeError(
-                    "Not enough documents to give each worker at least one batch."
-                )
+                raise RuntimeError("Not enough documents to give each worker at least one batch.")
             batches.append([big.pop()])  # move one doc into new batch
             batches.append(big)  # put the remainder back
             # preserve cost constraint automatically
@@ -216,9 +218,7 @@ def allocate_batches(
         i += 1
 
     assert len(batches) == target_batches
-    assert all(
-        max(doc_lengths[i] for i in batch) * len(batch) <= N for batch in batches
-    )
+    assert all(max(doc_lengths[i] for i in batch) * len(batch) <= N for batch in batches)
 
     # ---------------------------------------------------------------------
     # 4) Round-robin assignment to workers
@@ -342,9 +342,7 @@ def tokenize(batch: dict, *, args: DataConfig, tokenizer):
                 {"role": "user", "content": assert_type(str, prompt)},
                 {"role": "assistant", "content": assert_type(str, resp)},
             ]
-            for prompt, resp in zip(
-                batch[args.prompt_column], batch[args.completion_column]
-            )
+            for prompt, resp in zip(batch[args.prompt_column], batch[args.completion_column])
         ]
     elif args.conversation_column:
         # We're dealing with a conversation dataset
@@ -390,7 +388,4 @@ def tokenize(batch: dict, *, args: DataConfig, tokenizer):
 def unflatten(x: torch.Tensor, shapes: dict[str, Sequence[int]], dim: int = -1):
     """Unflatten a tensor `x` into a dictionary of tensors with specified shapes."""
     numels = [math.prod(shape) for shape in shapes.values()]
-    return {
-        name: x.unflatten(dim, shape)
-        for (name, shape), x in zip(shapes.items(), x.split(numels, dim=dim))
-    }
+    return {name: x.unflatten(dim, shape) for (name, shape), x in zip(shapes.items(), x.split(numels, dim=dim))}
