@@ -93,15 +93,15 @@ class IndexConfig:
     """Revision of the model."""
 
     world_size: int | None = None
-    """Number of distributed workers.  If None, uses maximum available GPUs."""
+    """Number of distributed workers. If None, uses maximum available GPUs."""
 
     debug: bool = False
-    """Whether to run in debug mode.  This will print additional information"""
+    """Whether to run in debug mode. This will print additional information"""
 
     profile: bool = False
-    """Whether to profile the EKFAC computation.  This will use the pytorch profiler"""
+    """Whether to profile the EKFAC computation. This will use the pytorch profiler"""
 
-    lambda_factor: float = 0.1
+    lambda_damp_factor: float = 0.1
     """For computing inverse hessian vector product"""
 
 
@@ -377,9 +377,10 @@ def tokenize(batch: dict, *, args: DataConfig, tokenizer):
         tokens = encodings["input_ids"][i]
         labels = [-100] * len(tokens)
         for start, end in spans:
-            if start is not None and end is not None:
+            if start is not None:
+                if end is None:
+                    end = len(tokens)
                 labels[start:end] = tokens[start:end]
-
         labels_list.append(labels)
 
     return dict(**encodings, labels=labels_list)
