@@ -68,6 +68,18 @@ def gradients_loader(root_dir: str):
                 yield load_shard(str(shard_path))
 
 
+def normalize_grads(grads: np.ndarray) -> np.ndarray:
+    batch_size = 1024
+    grads_t = torch.tensor(grads)
+
+    for i in range(0, grads_t.shape[0], batch_size):
+        batch = grads_t[i : i + batch_size].to(device="cuda", non_blocking=True)
+        batch /= batch.norm(dim=1, keepdim=True)
+        grads_t[i : i + batch_size] = batch.cpu()
+
+    return grads_t.numpy()
+
+
 class Attributor:
     def __init__(
         self,
@@ -76,7 +88,8 @@ class Attributor:
         dtype: torch.dtype = torch.float32,
         unit_norm: bool = True,
         batch_size: int = 1024,
-        faiss_cfg: str = "PQ16",
+        faiss_cfg: str = "Flat",
+        max_index_size: int = 700_000,
     ):
         """
         [Guidelines on building your FAISS configuration string](https://github.com/facebookresearch/faiss/wiki/Guidelines-to-choose-an-index).
@@ -89,59 +102,69 @@ class Attributor:
 
         GPU indexes will be sharded across GPUs.
         """
+        max_chunks = 100
 
         path = (
             Path("runs/faiss")
             / Path(index_path).stem
-            / f"{faiss_cfg.replace(',', '_')}.index"
+            / f"{faiss_cfg.replace(',', '_')}_{max_chunks}"
         )
-        path.parent.mkdir(exist_ok=True, parents=True)
+        path.mkdir(exist_ok=True, parents=True)
 
-        if path.exists():
-            index = faiss.read_index(str(path))
-        else:
-            index = None
+        dl = gradients_loader(index_path)
 
-            dl = gradients_loader(index_path)
+        start = time()
+        buffer = []
+        i = 0
+        for chunk_idx, grads in enumerate(dl):
+            # TODO remove
+            if chunk_idx >= max_chunks:
+                break
 
-            for grads in dl:
-                if grads.dtype.names is not None:
-                    grads = structured_to_unstructured(grads)
+            if grads.dtype.names is not None:
+                grads = structured_to_unstructured(grads)
+            np_dtype = np.array(torch.tensor([], dtype=dtype)).dtype
 
-                np_dtype = np.array(torch.tensor([], dtype=dtype)).dtype
-                grads = grads.astype(np_dtype)
+            if sum(item.shape[0] for item in buffer) + grads.shape[0] < max_index_size:
+                buffer.append(grads)
+                continue
 
-                if index is None:
-                    index = faiss.index_factory(
-                        grads.shape[1], faiss_cfg, faiss.METRIC_INNER_PRODUCT
+            # Save buffer to file
+            if (path / f"{i}.index").exists():
+                print(f"Index shard already exists: {path / f'{i}.index'}")
+            else:
+                index = faiss.index_factory(
+                    buffer[0].shape[1], faiss_cfg, faiss.METRIC_INNER_PRODUCT
+                )
+
+                if device != "cpu":
+                    gpus = (
+                        list(range(torch.cuda.device_count()))
+                        if device == "cuda"
+                        else [int(str(device).split(":")[1])]
                     )
 
-                    if device != "cpu":
-                        gpus = (
-                            list(range(torch.cuda.device_count()))
-                            if device == "cuda"
-                            else [int(str(device).split(":")[1])]
-                        )
+                    options = faiss.GpuMultipleClonerOptions()
+                    options.shard = True
+                    index = faiss.index_cpu_to_gpus_list(index, options, gpus=gpus)
 
-                        options = faiss.GpuMultipleClonerOptions()
-                        options.shard = True
-                        index = faiss.index_cpu_to_gpus_list(index, options, gpus=gpus)
+                print("Building FAISS index...")
+                buffer = [grads.astype(np_dtype) for grads in buffer]
+                index.train(buffer[0])
+                index.add(np.concatenate(buffer, axis=0))
+                buffer = []
 
-                    print("Building FAISS index...")
-                    start = time()
-                    index.train(grads)
+                print(f"Trained index in {time() - start:.2f} seconds.")
+                print("Saving index shard...")
+                faiss.write_index(
+                    faiss.index_gpu_to_cpu(index), str(path / f"{i}.index")
+                )
 
-                index.add(grads)
+            # Start new buffer
+            buffer = [grads]
+            i += 1
 
-            print(
-                f"Built index in {(time() - start) / 60:.2f} minutes."
-                f"Saving to {path}..."
-            )
-
-            faiss.write_index(faiss.index_gpu_to_cpu(index), str(path))
-            print("Saved index.")
-
-        self.index = index
+        self.path = path
         self.device = device
         self.dtype = dtype
         self.faiss_cfg = faiss_cfg
@@ -166,14 +189,46 @@ class Attributor:
             A namedtuple containing the top `k` indices and inner products for each
             query. Both have shape [..., k].
         """
+        start = time()
         q = queries / queries.norm(dim=1, keepdim=True)
         q = q.to("cpu", non_blocking=True).numpy()
 
-        self.index.nprobe = nprobe
+        # Load and fetch from each index shard in turn
+        shard_distances = []
+        shard_indices = []
 
-        distances, indices = self.index.search(q, k)
+        options = faiss.GpuMultipleClonerOptions()
+        options.shard = True
 
-        return torch.from_numpy(distances), torch.from_numpy(indices)
+        gpus = []
+        if self.device != "cpu":
+            gpus = (
+                list(range(torch.cuda.device_count()))
+                if self.device == "cuda"
+                else [int(str(self.device).split(":")[1])]
+            )
+
+        for shard_path in sorted(self.path.iterdir()):
+            print(f"Loading index shard {shard_path}...")
+            index = faiss.read_index(str(shard_path))
+
+            if self.device != "cpu":
+                index = faiss.index_cpu_to_gpus_list(index, options, gpus=gpus)
+
+            distances, indices = index.search(q, k)
+            shard_distances.append(distances)
+            shard_indices.append(indices)
+
+        # Get the top-k indices and distances for each query
+        distances = np.concatenate(shard_distances, axis=1)
+        indices = np.concatenate(shard_indices, axis=1)
+
+        # Get the top-k indices and distances for each query
+        top_k_indices = np.argsort(distances, axis=1)[:, :k]
+        top_k_distances = distances[np.arange(len(q))[:, None], top_k_indices]
+
+        print(f"Searched in {time() - start:.2f} seconds.")
+        return torch.from_numpy(top_k_distances), torch.from_numpy(top_k_indices)
 
     @contextmanager
     def trace(

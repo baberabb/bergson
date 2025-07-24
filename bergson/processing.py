@@ -110,8 +110,14 @@ def collect_gradients(
 
             model.zero_grad()
 
+        eps = torch.finfo(torch.float16).eps
         norm = (
-            torch.sqrt(torch.stack(list(mod_grad_sum_sqs.values()), dim=0).sum(dim=0))
+            torch.sqrt(
+                torch.stack(list(mod_grad_sum_sqs.values()), dim=0)
+                .sum(dim=0)
+                .to(torch.float64)
+                + eps
+            )
             .unsqueeze(1)
             .to(device="cpu", non_blocking=True)
         )
@@ -120,6 +126,26 @@ def collect_gradients(
         # sequentially instead of first concatenating them and then writing to a vector.
         for layer_name in mod_grads.keys():
             grad_buffer[layer_name][indices] = (mod_grads[layer_name] / norm).numpy()
+
+            # Check for any nan of inf grads
+            # if torch.isnan(mod_grad_sum_sqs[layer_name]).any():
+            #     print(f"Warning: {layer_name} has nan grad_sum_sqs")
+            #     breakpoint()
+            # if torch.isinf(mod_grad_sum_sqs[layer_name]).any():
+            #     print(f"Warning: {layer_name} has inf grad_sum_sqs")
+            #     breakpoint()
+            # if torch.isnan(mod_grads[layer_name]).any():
+            #     print(f"Warning: {layer_name} has nan grads")
+            #     breakpoint()
+            # if torch.isinf(mod_grads[layer_name]).any():
+            #     print(f"Warning: {layer_name} has inf grads")
+            #     breakpoint()
+            # if torch.isnan(norm).any():
+            #     print(f"Warning: {layer_name} has nan norm")
+            #     breakpoint()
+            # if torch.isinf(norm).any():
+            #     print(f"Warning: {layer_name} has inf norm")
+            #     breakpoint()
 
         mod_grads.clear()
         mod_grad_sum_sqs.clear()
