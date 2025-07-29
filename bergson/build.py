@@ -101,12 +101,13 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
 
                 target_modules.add(name.removeprefix("model."))
 
-    if os.path.exists(cfg.processor_path):
+    processor_save_path = cfg.run_path
+    if os.path.exists(processor_save_path):
         if rank == 0:
-            print(f"Loading processor from '{cfg.processor_path}'")
+            print(f"Loading processor from '{processor_save_path}'")
 
         processor = GradientProcessor.load(
-            cfg.processor_path,
+            processor_save_path,
             map_location=f"cuda:{rank}",
         )
     else:
