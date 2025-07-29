@@ -2,13 +2,15 @@ import json
 import math
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Sequence
 
 import numpy as np
 import pyarrow as pa
 import torch
 import torch.distributed as dist
-from datasets import Dataset
+from datasets import Dataset, concatenate_datasets
+from numpy.lib.recfunctions import structured_to_unstructured
 from numpy.typing import DTypeLike
 from simple_parsing import field
 
@@ -70,7 +72,7 @@ class IndexConfig:
     skip_preconditioners: bool = False
     """Whether to skip computing preconditioners for the gradients."""
 
-    stats_sample_size: int = 10_000
+    stats_sample_size: int | None = 10_000
     """Number of examples to use for estimating processor statistics."""
 
     drop_columns: bool = False
@@ -78,6 +80,15 @@ class IndexConfig:
 
     kl_divergence: bool = False
     """Whether to compute KL as a loss function."""
+    
+    streaming: bool = False
+    """Whether to use streaming mode for the dataset."""
+
+    streaming_chunk_size: int = 100_000
+    """Chunk size for streaming the dataset into Dataset objects."""
+
+    revision: str | None = None
+    """Revision of the model."""
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -207,10 +218,20 @@ def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
     return allocation[rank]
 
 
-def create_index(root: str, dtype: DTypeLike, shape: tuple[int, ...]) -> np.memmap:
-    """Create a memory-mapped file for storing gradients, and persist metadata."""
+def create_index(
+    root: str, num_grads: int, grad_sizes: dict[str, int], dtype: DTypeLike
+) -> np.memmap:
+    """Create a memory-mapped file for storing structured gradients
+    and persist metadata."""
     grad_path = os.path.join(root, "gradients.bin")
     rank = dist.get_rank() if dist.is_initialized() else 0
+
+    # Build a json-serializable structured dtype
+    struct_dtype = {
+        "names": [name for name in grad_sizes.keys()],
+        "formats": [f"({size},){np.dtype(dtype).str}" for size in grad_sizes.values()],
+        "itemsize": np.dtype(dtype).itemsize * sum(grad_sizes.values()),
+    }
 
     # ── 1. Rank-0 creates file & metadata exactly once ─────────────────────────
     if rank == 0:
@@ -218,7 +239,7 @@ def create_index(root: str, dtype: DTypeLike, shape: tuple[int, ...]) -> np.memm
         os.makedirs(root, exist_ok=True)
 
         # Allocate (extends file to right size without writing zeros byte-by-byte)
-        nbytes = np.dtype(dtype).itemsize * int(np.prod(shape))
+        nbytes = np.dtype(struct_dtype).itemsize * num_grads  # type: ignore
         with open(grad_path, "wb") as f:
             f.truncate(nbytes)
 
@@ -227,16 +248,21 @@ def create_index(root: str, dtype: DTypeLike, shape: tuple[int, ...]) -> np.memm
 
         # Persist metadata for future runs
         with open(root + "/info.json", "w") as f:
-            json.dump({"grad_size": shape[1], "num_grads": shape[0]}, f, indent=2)
+            json.dump({"num_grads": num_grads, "dtype": struct_dtype}, f, indent=2)
 
-    # 2. Everyone blocks until the file is definitely there & sized
+    # ── 2. Everyone blocks until the file is definitely there & sized ─────────────
     if dist.is_initialized():
         dist.barrier()
 
-    return np.memmap(grad_path, dtype=dtype, mode="r+", shape=shape)
+    return np.memmap(
+        grad_path,
+        dtype=np.dtype(struct_dtype),  # type: ignore
+        mode="r+",
+        shape=(num_grads,),
+    )
 
 
-def load_gradients(root_dir: str) -> np.memmap:
+def load_unstructured_gradients(root_dir: str) -> np.memmap:
     """Map the gradients stored in `root_dir` into memory."""
     with open(os.path.join(root_dir, "info.json")) as f:
         info = json.load(f)
@@ -252,15 +278,61 @@ def load_gradients(root_dir: str) -> np.memmap:
     return mmap
 
 
-def load_gradient_dataset(root_dir: str) -> Dataset:
-    """Load a dataset of gradients from `root_dir`."""
-    mmap = load_gradients(root_dir)
-    flat = pa.array(mmap.reshape(-1))
-    col = pa.FixedSizeListArray.from_arrays(flat, mmap.shape[1])
+def load_gradients(root_dir: str) -> np.memmap:
+    """Map the structured gradients stored in `root_dir` into memory."""
 
-    # Create a Dataset with the gradients as a single column
-    ds = Dataset.load_from_disk(root_dir + "/data.hf")
-    return ds.add_column("gradients", col, new_fingerprint="grads")
+    with open(os.path.join(root_dir, "info.json")) as f:
+        info = json.load(f)
+
+    # TODO 2025-08-01 Remove legacy loading
+    if "grad_size" in info:
+        return load_unstructured_gradients(root_dir)
+
+    dtype = info["dtype"]
+    num_grads = info["num_grads"]
+
+    return np.memmap(
+        os.path.join(root_dir, "gradients.bin"),
+        dtype=dtype,
+        mode="r",
+        shape=(num_grads,),
+    )
+
+
+# TODO 2025-08-01 Set default concatenate_gradients = False
+def load_gradient_dataset(root_dir: str, concatenate_gradients: bool = True) -> Dataset:
+    """Load a dataset of gradients from `root_dir`."""
+
+    def load_shard(dir: str) -> Dataset:
+        mmap = load_gradients(dir)
+        ds = Dataset.load_from_disk(dir + "/data.hf")
+
+        # concatenate the extracted module gradients into a single column
+        if concatenate_gradients:
+            unstructured_data = structured_to_unstructured(mmap)
+            flat = pa.array(unstructured_data.reshape(-1))
+            col_arrow = pa.FixedSizeListArray.from_arrays(
+                flat, unstructured_data.shape[1]
+            )
+
+            ds = ds.add_column("gradients", col_arrow, new_fingerprint="gradients")
+        # Add a column for each module's gradient vectors
+        else:
+            for field_name in mmap.dtype.names:
+                flat = pa.array(mmap[field_name].reshape(-1))
+                col = pa.FixedSizeListArray.from_arrays(flat, mmap[field_name].shape[1])
+                ds = ds.add_column(field_name, col, new_fingerprint=field_name)
+        return ds
+
+    root = Path(root_dir)
+
+    if (root / "data.hf").exists():
+        return load_shard(root_dir)
+
+    # Flatten indices to avoid CPU OOM
+    return concatenate_datasets(
+        [load_shard(str(path)) for path in sorted(root.iterdir()) if path.is_dir()]
+    ).flatten_indices()
 
 
 def pad_and_tensor(

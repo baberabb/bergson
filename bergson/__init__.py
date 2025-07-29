@@ -1,4 +1,4 @@
-from .attributor import Attributor
+from .attributor import Attributor, FaissConfig
 from .data import IndexConfig, load_gradients
 from .gradients import (
     GradientCollector,
@@ -11,6 +11,7 @@ __all__ = [
     "fit_normalizers",
     "load_gradients",
     "Attributor",
+    "FaissConfig",
     "GradientCollector",
     "GradientProcessor",
     "IndexConfig",

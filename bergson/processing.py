@@ -41,7 +41,7 @@ def collect_gradients(
         batches = [[idx] for idx in range(len(data))]
 
     # Mutable state for the GradientCollector callback
-    mod_grads = []
+    mod_grads = {}
     preconditioners = {}
 
     # TODO: Handle this more elegantly
@@ -52,7 +52,7 @@ def collect_gradients(
         g = g.flatten(1).clamp_(lo, hi)
 
         # Asynchronously move the gradient to CPU and convert to fp16
-        mod_grads.append(g.to(device="cpu", dtype=torch.float16, non_blocking=True))
+        mod_grads[name] = g.to(device="cpu", dtype=torch.float16, non_blocking=True)
 
         # Compute the outer product of the flattened gradient
         if not skip_preconditioners:
@@ -69,13 +69,15 @@ def collect_gradients(
         processor,
         target_modules=target_modules,
     )
+
     # Allocate space ahead of time for the gradients
-    grad_size = sum(math.prod(s) for s in collector.shapes().values())
+    grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
+
+    # Allocate structured space ahead of time for the gradients
     grad_buffer = create_index(
-        path,
-        dtype=np.float16,
-        shape=(len(data), grad_size),
+        path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np.float16
     )
+
     per_doc_losses = torch.full(
         (len(data),),
         device=model.device,
@@ -139,12 +141,9 @@ def collect_gradients(
                 model.zero_grad()
 
         # It turns out that it's very important for efficiency to write the gradients
-        # this way instead of first concatenating them and then writing.
-        start = 0
-        for mod in mod_grads:
-            end = start + mod.shape[1]
-            grad_buffer[indices, start:end] = mod.numpy()
-            start = end
+        # sequentially instead of first concatenating them and then writing to a vector.
+        for layer_name in mod_grads.keys():
+            grad_buffer[layer_name][indices] = mod_grads[layer_name].numpy()
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
