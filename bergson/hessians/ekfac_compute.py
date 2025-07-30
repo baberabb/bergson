@@ -1,10 +1,12 @@
 import gc
 import hashlib
+import json
 import os
 import random
 from contextlib import nullcontext
 from typing import Literal, Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -23,7 +25,7 @@ from torch.profiler import (
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from bergson.data import IndexConfig, load_gradients, pad_and_tensor
+from bergson.data import IndexConfig, create_index, load_gradients, pad_and_tensor
 from bergson.gradients import (
     GradientProcessor,
 )
@@ -73,7 +75,7 @@ class EkfacComputer:
 
         self.cfg = cfg
 
-        self.logger = get_logger("EkfacAttributor")
+        self.logger = get_logger("EkfacComputer", level="DEBUG" if cfg.debug else "INFO")
 
         ### Distributed related
         self.rank = dist.get_rank() if dist.is_initialized() else 0
@@ -292,9 +294,8 @@ class EkfacComputer:
                 )
             else:
                 eigenvalue_corrections[name] = eigenvalue_corrections[name].to(device=self.device)
-                eigenvalue_corrections[name].add_(transformed_grad_shard[start_row:end_row, :].contiguous()).to(
-                    device="cpu", non_blocking=False
-                )
+                eigenvalue_corrections[name].add_(transformed_grad_shard[start_row:end_row, :].contiguous())
+                eigenvalue_corrections[name] = eigenvalue_corrections[name].to(device="cpu", non_blocking=False)
 
             if self.rank == 0 and self.cfg.debug:
                 run_covariances_shards = [
@@ -495,7 +496,6 @@ class EkfacComputer:
         """
 
         for key in self.target_info:
-            shard_size = self.target_info[key][1]
             d_out, d_in = self.target_info[key][1]
             d = d_in if covariance_type == "activation" else d_out
             shard_size = d // self.world_size
@@ -521,7 +521,7 @@ class EkfacComputer:
         return input_dict
 
 
-class EkfacAttributor:
+class EkfacApplicator:
     def __init__(
         self,
         processor: GradientProcessor,
@@ -530,8 +530,9 @@ class EkfacAttributor:
         self.processor = processor
         self.cfg = cfg
         self.path = os.path.join(cfg.run_path, "influence_results")
-        self.gradient_path = "/root/bergson-approx-unrolling/bergson/hessians/queries_financial_misaligned"
-        self.logger = get_logger("EkfacAttributor", level="DEBUG")
+        self.gradient_path = cfg.gradient_path
+        #  "/mnt/ssd-1/louis/emergent_misalignment/gradients_data/query"
+        self.logger = get_logger("EkfacApplicator", level="DEBUG" if cfg.debug else "INFO")
 
         ### FSDP related
         self.rank = dist.get_rank() if dist.is_initialized() else 0
@@ -549,162 +550,6 @@ class EkfacAttributor:
                 self.dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
             case other:
                 raise ValueError(f"Unsupported precision: {other}")
-
-    # def prepare_attribution_unsharded(self):
-    #     eigen_a = load_file(
-    #         self.path + f"/activation_eigen_sharded/shard_{self.rank}.safetensors",
-    #         device=f"cuda:{self.rank}",
-    #     )
-    #     eigen_g = load_file(
-    #         self.path + f"/gradient_eigen_sharded/shard_{self.rank}.safetensors",
-    #         device=f"cuda:{self.rank}",
-    #     )
-    #     lambda_factor = load_file(
-    #         self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
-    #         device=f"cuda:{self.rank}",
-    #     )
-
-    #     full_eigen_a = {}
-    #     full_eigen_g = {}
-    #     random_eigen_a = {}
-    #     random_eigen_g = {}
-    #     inverse_lambda_factor = {}
-    #     full_inverse_lambda_factor = {}
-
-    #     p = self.processor.projection_dim
-
-    #     for name in eigen_a.keys():
-    #         proj_pi = self._projection(
-    #             name,
-    #             p,  # type: ignore
-    #             eigen_a[name].shape[1],
-    #             side="right",
-    #             dtype=eigen_a[name].dtype,
-    #         )
-
-    #         full_matrix = self._compute_full_matrix(name, shard_type="activation_covariance")
-    #         full_eigen_a[name] = full_matrix.to(device="cpu", non_blocking=True)
-
-    #         random_eigen_a[name] = (
-    #             torch.einsum("j i, p i -> p j", full_matrix, proj_pi).contiguous().to(device="cpu", non_blocking=True)
-    #         )
-
-    #     random_activation_path = os.path.join(self.path, "random_activation_eigen_sharded")
-    #     os.makedirs(random_activation_path, exist_ok=True)
-    #     if self.rank == 0:
-    #         save_file(random_eigen_a, os.path.join(random_activation_path, "full.safetensors"))
-    #         save_file(full_eigen_a, os.path.join(self.path, "activation_eigen_sharded", "full.safetensors"))
-
-    #     del eigen_a
-    #     del full_eigen_a
-    #     gc.collect()
-    #     torch.cuda.empty_cache()
-
-    #     for name in eigen_g.keys():
-    #         proj_qo = self._projection(
-    #             name,
-    #             p,  # type: ignore
-    #             eigen_g[name].shape[1],
-    #             side="left",
-    #             dtype=eigen_g[name].dtype,
-    #         )
-    #         full_matrix = self._compute_full_matrix(name, shard_type="gradient_covariance")
-    #         full_eigen_g[name] = full_matrix.to(device="cpu", non_blocking=True)
-    #         random_eigen_g[name] = (
-    #             torch.einsum("q o, o r -> q r", proj_qo, full_matrix).contiguous().to(device="cpu", non_blocking=True)
-    #         )
-
-    #     random_gradient_path = os.path.join(self.path, "random_gradient_eigen_sharded")
-    #     os.makedirs(random_gradient_path, exist_ok=True)
-    #     if self.rank == 0:
-    #         save_file(random_eigen_g, os.path.join(random_gradient_path, "full.safetensors"))
-    #         save_file(full_eigen_g, os.path.join(self.path, "gradient_eigen_sharded", "full.safetensors"))
-
-    #     del eigen_g
-    #     del full_eigen_g
-    #     gc.collect()
-    #     torch.cuda.empty_cache()
-
-    #     for name in lambda_factor.keys():
-    #         inverse_lambda_factor[name] = (
-    #             (lambda_factor[name] + self.cfg.lambda_damp_factor).reciprocal().to(device="cpu")
-    #         )
-
-    #     inverse_lambda_path = os.path.join(self.path, "inverse_eigenvalue_correction_sharded")
-    #     os.makedirs(inverse_lambda_path, exist_ok=True)
-    #     save_file(inverse_lambda_factor, os.path.join(inverse_lambda_path, f"shard_{self.rank}.safetensors"))
-
-    #     del inverse_lambda_factor
-    #     gc.collect()
-    #     torch.cuda.empty_cache()
-    #     dist.barrier()
-    #     for name in lambda_factor.keys():
-    #         full_inverse_lambda_factor[name] = self._compute_full_matrix(
-    #             name, shard_type="inverse_eigenvalue_correction"
-    #         ).to(device="cpu", non_blocking=True)
-
-    #     if self.rank == 0:
-    #         save_file(
-    #             full_inverse_lambda_factor,
-    #             os.path.join(self.path, "inverse_eigenvalue_correction_sharded", "full.safetensors"),
-    #         )
-
-    #     if self.rank == 0:
-    #         self.logger.info(f"Saved random activation eigenvectors to {random_activation_path}")
-    #         self.logger.info(f"Saved random gradient eigenvectors to {random_gradient_path}")
-    #         self.logger.info(f"Saved inverse eigenvalue correction to {inverse_lambda_path}")
-    #         self.logger.info("-*-" * 50)
-
-    def compute_ivhp_from_saved(self):
-        full_eigen_a = load_file(
-            self.path + "/activation_eigen_sharded/full.safetensors",
-            device=f"cuda:{self.rank}",
-        )
-
-        full_eigen_g = load_file(
-            self.path + "/gradient_eigen_sharded/full.safetensors",
-            device=f"cuda:{self.rank}",
-        )
-
-        full_random_eigen_a = load_file(
-            self.path + "/random_activation_eigen_sharded/full.safetensors",
-            device=f"cuda:{self.rank}",
-        )
-        full_random_eigen_g = load_file(
-            self.path + "/random_gradient_eigen_sharded/full.safetensors",
-            device=f"cuda:{self.rank}",
-        )
-        full_inverse_lambda_factor = load_file(
-            self.path + "/inverse_eigenvalue_correction_sharded/full.safetensors",
-            device=f"cuda:{self.rank}",
-        )
-
-        mmap = load_gradients(self.gradient_path)
-        transformed_gradients = {}
-        for k, v in full_eigen_a.items():
-            gradients_noi = torch.from_numpy(mmap[k][self.rank :: self.world_size])  # shape [num_grads/w, out*in]
-
-            gradients_noi = gradients_noi.view(-1, full_eigen_g[k].shape[0], full_eigen_a[k].shape[0])
-
-            transformed_gradients[k] = torch.einsum("n o i,  j i -> n o j", gradients_noi, v)
-
-        for k, v in full_eigen_g.items():
-            transformed_gradients[k] = torch.einsum("q o, n o i -> n q i", v, transformed_gradients[k])
-
-        for k, v in full_inverse_lambda_factor.items():
-            transformed_gradients[k] = transformed_gradients[k] * v.to(device=transformed_gradients[k].device)
-
-        for k, v in full_eigen_a.items():
-            transformed_gradients[k] = torch.einsum(
-                "n o i, p i -> n o p", transformed_gradients[k], full_random_eigen_a[k]
-            )
-        for k, v in full_eigen_g.items():
-            transformed_gradients[k] = torch.einsum(
-                "q o, n o p -> n q p", full_random_eigen_g[k], transformed_gradients[k]
-            )
-        save_path = os.path.join(self.gradient_path, "ivhp")
-        os.makedirs(save_path, exist_ok=True)
-        save_file(transformed_gradients, os.path.join(save_path, f"shard_{self.rank}.safetensors"))
 
     def compute_ivhp_sharded(self):
         eigen_a = load_file(
@@ -730,8 +575,19 @@ class EkfacAttributor:
         )
 
         mmap = load_gradients(self.gradient_path)
-        # profile memory
-        # torch.cuda.memory._record_memory_history()
+        with open(os.path.join(self.gradient_path, "info.json")) as f:
+            info = json.load(f)
+
+        grad_sizes = {
+            name: random_eigen_g[name].shape[0] * self.world_size * random_eigen_a[name].shape[0] * self.world_size
+            for name in random_eigen_a
+        }
+
+        # Allocate structured space ahead of time for the gradients
+        grad_buffer = create_index(
+            self.cfg.run_path, num_grads=info["num_grads"], grad_sizes=grad_sizes, dtype=np.float16
+        )
+
         if self.rank == 0:
             self.logger.info(f"Loaded gradients for {len(mmap)} queries and computing IVHP...")
 
@@ -761,8 +617,6 @@ class EkfacAttributor:
         gc.collect()
         torch.cuda.empty_cache()
 
-        # torch.cuda.memory._dump_snapshot(f"snapshot_new/snapshot_{self.rank}.pickle")
-
         for k, v in inverse_lambda_factor.items():
             self._sharded_division(matrix_noi=transformed_gradients[k], divisor_ci=v)  # this is in-place
 
@@ -784,13 +638,19 @@ class EkfacAttributor:
         if self.rank == 0:
             self.logger.debug("Finished P_S.T @ G'/lambda @ P_A.T")
 
+        # TODO: Handle this more elegantly
+        lo = torch.finfo(torch.float16).min
+        hi = torch.finfo(torch.float16).max
         for k, v in transformed_gradients.items():
-            self.logger.debug(f"Final transformed gradient for {k} has shape {v.shape} and dtype {v.dtype}")
-            break
-        return
-        save_path = os.path.join(self.gradient_path, "ivhp")
-        os.makedirs(save_path, exist_ok=True)
-        save_file(transformed_gradients, os.path.join(save_path, f"shard_{self.rank}.safetensors"))
+            grad_buffer[k][:] = (
+                transformed_gradients[k]
+                .to(device="cpu", dtype=torch.float16, non_blocking=True)
+                .flatten(1)
+                .clamp_(lo, hi)
+                .numpy()
+            )
+
+        grad_buffer.flush()
 
     def prepare_attribution(self):
         eigen_a = load_file(
@@ -871,108 +731,6 @@ class EkfacAttributor:
             self.logger.info(f"Saved random gradient eigenvectors to {random_gradient_path}")
             self.logger.info(f"Saved inverse eigenvalue correction to {inverse_lambda_path}")
             self.logger.info("-*-" * 50)
-
-    # def compute_ivhp(self):
-    #     transformed_activation_cache = {}
-
-    #     eigen_a = load_file(
-    #         self.path + f"/activation_eigen_sharded/shard_{self.rank}.safetensors",
-    #         device=f"cuda:{self.rank}",
-    #     )
-    #     eigen_g = load_file(
-    #         self.path + f"/gradient_eigen_sharded/shard_{self.rank}.safetensors",
-    #         device=f"cuda:{self.rank}",
-    #     )
-
-    #     random_eigen_a = load_file(
-    #         self.path + f"/random_activation_eigen_sharded/shard_{self.rank}.safetensors",
-    #         device=f"cuda:{self.rank}",
-    #     )
-    #     random_eigen_g = load_file(
-    #         self.path + f"/random_gradient_eigen_sharded/shard_{self.rank}.safetensors",
-    #         device=f"cuda:{self.rank}",
-    #     )
-    #     inverse_lambda_factor = load_file(
-    #         self.path + f"/inverse_eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
-    #         device=f"cuda:{self.rank}",
-    #     )
-
-    #     def callback_activation(name: str, a: Float[Tensor, "N S I"]):
-    #         """Forward hook to compute the covariance of activations A_l."""
-
-    #         a_ni = a.reshape(-1, a.shape[-1])  # [N*S, I]
-
-    #         # a @ Q_A
-    #         transformed_activation_cache[name] = self._sharded_vec_matmul(
-    #             vector_na=a_ni, matrix_cb=eigen_a[name], mult_type="left"
-    #         )
-    #         del a_ni
-
-    #     def callback_gradient(name: str, g: Float[Tensor, "N S O"]):
-    #         """Backward hook to compute the covariance of pseudo-gradients S_{l-1}."""
-
-    #         g_no = g.reshape(-1, g.shape[-1])  # [N*S, O]
-
-    #         # Q_S.T @ g
-    #         result_no = self._sharded_vec_matmul(vector_na=g_no, matrix_cb=eigen_g[name], mult_type="right")
-    #         del g_no
-
-    #         # G'= Q_S.T @ G @ Q_A
-    #         result_noi = torch.einsum("n i, n o -> n o i", transformed_activation_cache[name], result_no)
-    #         del transformed_activation_cache[name]
-
-    #         # G''= G' * (Lambda+damp)^{-1}
-    #         result_noi.mul_(inverse_lambda_factor[name])
-
-    #         # G_right_projected = G'' @ (Q_A.T @ right_projection)
-    #         result_nom = torch.einsum("n o i, m i -> n o m", result_noi, random_eigen_a[name])  # (n, o, p/w)
-    #         del result_noi
-
-    #         # G_final = (left_projection @ Q_S) @ G_right_projected
-    #         final_result_wnhm = []
-    #         for rank_index in range(self.world_size):
-    #             if rank_index == self.rank:
-    #                 shard_ho = random_eigen_g[name]  # (q/w, o)
-    #             else:
-    #                 shard_ho = torch.zeros_like(random_eigen_g[name], device=random_eigen_g[name].device)
-    #             dist.broadcast(shard_ho, src=rank_index)
-
-    #             result_nhm = torch.einsum("h o, n o m -> n h m", shard_ho, result_nom).contiguous()  # (n, q/w, p/w)
-    #             final_result_wnhm.append(result_nhm)
-
-    #         result_nhp = torch.cat(final_result_wnhm, dim=-1)  # (n, q/w, p)
-
-    #     collector = EkfacCollector(
-    #         self.model.base_model,
-    #         closure=callback_gradient,
-    #         processor=self.processor,
-    #         target_modules=self.target_modules,
-    #         fwd_closure=callback_activation,
-    #     )
-
-    #     # main computation takes place here
-    #     total_processed = self._collector(collector, desc="covariances")
-
-    #     if dist.is_initialized():
-    #         dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
-
-    #     if self.rank == 0:
-    #         torch.save(total_processed, os.path.join(self.path, "total_processed.pt"))
-    #         self.logger.info(f"Total processed: {total_processed.item()}")
-
-    #     activation_path = os.path.join(self.path, "activation_covariance_sharded")
-    #     gradient_path = os.path.join(self.path, "gradient_covariance_sharded")
-
-    #     os.makedirs(activation_path, exist_ok=True)
-    #     os.makedirs(gradient_path, exist_ok=True)
-
-    #     if self.rank == 0:
-    #         self.logger.info(f"Saved activation covariance to {activation_path}")
-    #         self.logger.info(f"Saved gradient covariance to {gradient_path}")
-    #         self.logger.info("-*-" * 50)
-    #     # Clean up
-    #     torch.cuda.empty_cache()
-    #     gc.collect()
 
     def _projection(
         self,

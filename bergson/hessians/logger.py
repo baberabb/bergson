@@ -5,7 +5,7 @@ from typing import Optional
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(module)s:%(filename)s:%(funcName)s:%(lineno)d:%(levelname)s:  %(message)s",
+    format="%(filename)s:%(funcName)s:%(lineno)d:%(levelname)s:  %(message)s",
     stream=sys.stdout,  # Ensure output goes to stdout
     force=True,  # Override any existing configuration
 )

@@ -11,6 +11,7 @@ keywords = ["interpretability", "explainable-ai"]
 license = {text = "MIT License"}
 dependencies = [
     "accelerate", # For device_map in from_pretrained
+    "bitsandbytes>=0.46.1",
     "datasets",
     "ipykernel>=6.29.5",
     "ipywidgets>=8.1.7",

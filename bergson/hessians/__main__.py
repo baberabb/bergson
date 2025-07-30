@@ -1,11 +1,12 @@
 from simple_parsing import parse
 
 from bergson.data import IndexConfig
-from bergson.hessians.compute_EKFAC import compute_EKFAC
+from bergson.distributed import distributed_computing
+from bergson.hessians.compute_all import compute_all_factors
 
 
 def main():
-    compute_EKFAC(parse(IndexConfig))
+    distributed_computing(cfg=parse(IndexConfig), worker_fn=compute_all_factors)
 
 
 if __name__ == "__main__":

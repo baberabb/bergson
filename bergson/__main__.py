@@ -1,11 +1,16 @@
 from simple_parsing import parse
 
-from .build import build_gradient_dataset
+from bergson.distributed import distributed_computing
+
 from .data import IndexConfig
+from .processing import collect_gradients
 
 
 def main():
-    build_gradient_dataset(parse(IndexConfig))
+    distributed_computing(
+        parse(IndexConfig),
+        worker_fn=collect_gradients,
+    )
 
 
 if __name__ == "__main__":

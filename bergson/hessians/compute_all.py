@@ -3,9 +3,8 @@ from datasets import Dataset
 from transformers import PreTrainedModel
 
 from bergson.data import IndexConfig
-from bergson.distributed import distributed_computing
 from bergson.gradients import GradientProcessor
-from bergson.hessians.covariance_all_factors import EkfacComputer
+from bergson.hessians.ekfac_compute import EkfacComputer
 
 
 def compute_all_factors(
@@ -34,7 +33,3 @@ def compute_all_factors(
 
     dist.barrier() if dist.is_initialized() else None
     computer.compute_eigenvalue_correction()
-
-
-def compute_EKFAC(cfg: IndexConfig):
-    distributed_computing(cfg=cfg, worker_fn=compute_all_factors)

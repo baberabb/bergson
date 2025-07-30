@@ -48,7 +48,8 @@ def collect_gradients(
 
     def callback(name: str, g: torch.Tensor):
         g = g.flatten(1).clamp_(lo, hi)
-
+        if g.abs().sum() < 1e-5:
+            print(f"Warning: {name} has a near-zero gradient.")
         # Asynchronously move the gradient to CPU and convert to fp16
         mod_grads[name] = g.to(device="cpu", dtype=torch.float16, non_blocking=True)
 

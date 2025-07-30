@@ -78,12 +78,6 @@ class IndexConfig:
     drop_columns: bool = False
     """Only return the new dataset columns."""
 
-    ekfac: bool = False
-    """Whether to compute EKFAC preconditioners."""
-
-    ekfac_path: str = ""
-    """Path to the EKFAC computation, if it exists."""
-
     streaming: bool = False
     """Whether to use streaming mode for the dataset."""
 
@@ -96,11 +90,23 @@ class IndexConfig:
     world_size: int | None = None
     """Number of distributed workers. If None, uses maximum available GPUs."""
 
+    # compute EKFAC related
+    ekfac: bool = False
+    """Whether to compute EKFAC preconditioners."""
+
+    ekfac_path: str = ""
+    """Path to the EKFAC computation, if it exists."""
+
     debug: bool = False
     """Whether to run in debug mode. This will print additional information"""
 
     profile: bool = False
     """Whether to profile the EKFAC computation. This will use the pytorch profiler"""
+
+    # apply EKFAC related
+
+    gradient_path: str = ""
+    """Path to the gradients that EKFAC will be applied to."""
 
     lambda_damp_factor: float = 0.1
     """For computing inverse hessian vector product"""
