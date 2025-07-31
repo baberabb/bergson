@@ -1,4 +1,3 @@
-import gc
 import os
 import socket
 from datetime import timedelta
@@ -242,9 +241,6 @@ def worker_wrapper(
                     "Cannot create processor without model. Set setup_model=True or provide model externally."
                 )
             processor = create_processor(cfg, model, ds, rank, target_modules)
-
-        torch.cuda.empty_cache()
-        gc.collect()
 
         if setup_model and setup_processor:
             if isinstance(ds, Dataset):

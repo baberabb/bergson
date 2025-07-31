@@ -121,7 +121,7 @@ def ceildiv(a: int, b: int) -> int:
 
 
 def allocate_batches(
-    doc_lengths: list[int], N: int, workers: Optional[int] = None
+    doc_lengths: list[int], N: int, world_size: Optional[int] = None
 ) -> list[list[int]]:
     """
     Allocate documents into batches that are then distributed evenly across
@@ -132,8 +132,8 @@ def allocate_batches(
     doc_lengths : Sequence[int]
         Length (in tokens) of each document.  The *i-th* document is referred to
         internally by its index ``i``.
-    workers : int
-        Number of parallel workers ( 1 ≤ workers ≤ 8).
+    world_size : int
+        Number of parallel workers ( 1 ≤ world_size ≤ 8).
     N : int
         Hard memory budget per *batch*, expressed as
         ``max(length in batch) * (# docs in batch) ≤ N``.
@@ -166,10 +166,8 @@ def allocate_batches(
         the constraint in (1) remains satisfied throughout.
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
-    if workers is None:
+    if world_size is None:
         world_size = dist.get_world_size() if dist.is_initialized() else 1
-    else:
-        world_size = workers
 
     if not doc_lengths:
         raise RuntimeError("Empty document list.")
