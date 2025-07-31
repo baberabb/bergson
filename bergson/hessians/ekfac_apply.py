@@ -2,16 +2,13 @@ from simple_parsing import parse
 
 from bergson.data import IndexConfig
 from bergson.distributed import distributed_computing
-from bergson.gradients import GradientProcessor
 from bergson.hessians.ekfac_compute import EkfacApplicator
 
 
 def ekfac_apply_worker(
     cfg: IndexConfig,
-    processor: GradientProcessor,
 ):
     attributor = EkfacApplicator(
-        processor=processor,
         cfg=cfg,
     )
 

@@ -253,7 +253,7 @@ def worker_wrapper(
                 flush()
         else:
             # Simplified setup - for compatibility with ekfac_apply style
-            worker_fn(rank, world_size, cfg)
+            worker_fn(cfg)
     finally:
         dist.destroy_process_group() if dist.is_initialized() else None
 

@@ -105,6 +105,9 @@ class IndexConfig:
 
     # apply EKFAC related
 
+    apply_ekfac: bool = False
+    """Whether to apply EKFAC preconditioners to saved gradients."""
+
     gradient_path: str = ""
     """Path to the gradients that EKFAC will be applied to."""
 

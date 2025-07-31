@@ -524,14 +524,12 @@ class EkfacComputer:
 class EkfacApplicator:
     def __init__(
         self,
-        processor: GradientProcessor,
         cfg: IndexConfig,
     ):
-        self.processor = processor
         self.cfg = cfg
         self.path = os.path.join(cfg.run_path, "influence_results")
         self.gradient_path = cfg.gradient_path
-        #  "/mnt/ssd-1/louis/emergent_misalignment/gradients_data/query"
+
         self.logger = get_logger("EkfacApplicator", level="DEBUG" if cfg.debug else "INFO")
 
         ### FSDP related
@@ -550,6 +548,88 @@ class EkfacApplicator:
                 self.dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
             case other:
                 raise ValueError(f"Unsupported precision: {other}")
+
+    def prepare_attribution(self):
+        eigen_a = load_file(
+            self.path + f"/activation_eigen_sharded/shard_{self.rank}.safetensors",
+            device=f"cuda:{self.rank}",
+        )
+        eigen_g = load_file(
+            self.path + f"/gradient_eigen_sharded/shard_{self.rank}.safetensors",
+            device=f"cuda:{self.rank}",
+        )
+        lambda_factor = load_file(
+            self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
+            device=f"cuda:{self.rank}",
+        )
+
+        random_eigen_a = {}
+        random_eigen_g = {}
+        inverse_lambda_factor = {}
+
+        p = self.cfg.projection_dim
+
+        for name in eigen_a.keys():
+            proj_pi = self._projection(
+                name,
+                p,  # type: ignore
+                eigen_a[name].shape[1],
+                side="right",
+                dtype=eigen_a[name].dtype,
+            )
+
+            proj_shards_wpt = torch.chunk(proj_pi, self.world_size, dim=1)  # (w, p, i/w)
+            result_shard_pi = torch.einsum("t i, p t-> p i", eigen_a[name], proj_shards_wpt[self.rank]).contiguous()
+
+            dist.all_reduce(result_shard_pi, op=dist.ReduceOp.SUM)
+
+            shard_size = result_shard_pi.shape[0] // self.world_size
+            start_row = self.rank * shard_size
+            end_row = (self.rank + 1) * shard_size
+
+            random_eigen_a[name] = result_shard_pi[start_row:end_row, :]
+
+        random_activation_path = os.path.join(self.path, "random_activation_eigen_sharded")
+        os.makedirs(random_activation_path, exist_ok=True)
+        save_file(random_eigen_a, os.path.join(random_activation_path, f"shard_{self.rank}.safetensors"))
+
+        for name in eigen_g.keys():
+            proj_qo = self._projection(
+                name,
+                p,  # type: ignore
+                eigen_g[name].shape[1],
+                side="left",
+                dtype=eigen_g[name].dtype,
+            )
+            proj_shards_wqr = torch.chunk(proj_qo, self.world_size, dim=1)  # (w, q, o/w)
+            result_shard_qo = torch.einsum("q r, r o -> q o", proj_shards_wqr[self.rank], eigen_g[name]).contiguous()
+            dist.all_reduce(result_shard_qo, op=dist.ReduceOp.SUM)
+
+            shard_size = result_shard_qo.shape[0] // self.world_size
+            start_row = self.rank * shard_size
+            end_row = (self.rank + 1) * shard_size
+            random_eigen_g[name] = result_shard_qo[start_row:end_row, :]
+
+        random_gradient_path = os.path.join(self.path, "random_gradient_eigen_sharded")
+        os.makedirs(random_gradient_path, exist_ok=True)
+        save_file(random_eigen_g, os.path.join(random_gradient_path, f"shard_{self.rank}.safetensors"))
+
+        for name in lambda_factor.keys():
+            inverse_lambda_factor[name] = (
+                (lambda_factor[name] + self.cfg.lambda_damp_factor * lambda_factor[name].mean())
+                .reciprocal()
+                .to(device="cpu")
+            )
+
+        inverse_lambda_path = os.path.join(self.path, "inverse_eigenvalue_correction_sharded")
+        os.makedirs(inverse_lambda_path, exist_ok=True)
+        save_file(inverse_lambda_factor, os.path.join(inverse_lambda_path, f"shard_{self.rank}.safetensors"))
+
+        if self.rank == 0:
+            self.logger.info(f"Saved random activation eigenvectors to {random_activation_path}")
+            self.logger.info(f"Saved random gradient eigenvectors to {random_gradient_path}")
+            self.logger.info(f"Saved inverse eigenvalue correction to {inverse_lambda_path}")
+            self.logger.info("-*-" * 50)
 
     def compute_ivhp_sharded(self):
         eigen_a = load_file(
@@ -651,86 +731,6 @@ class EkfacApplicator:
             )
 
         grad_buffer.flush()
-
-    def prepare_attribution(self):
-        eigen_a = load_file(
-            self.path + f"/activation_eigen_sharded/shard_{self.rank}.safetensors",
-            device=f"cuda:{self.rank}",
-        )
-        eigen_g = load_file(
-            self.path + f"/gradient_eigen_sharded/shard_{self.rank}.safetensors",
-            device=f"cuda:{self.rank}",
-        )
-        lambda_factor = load_file(
-            self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
-            device=f"cuda:{self.rank}",
-        )
-
-        random_eigen_a = {}
-        random_eigen_g = {}
-        inverse_lambda_factor = {}
-
-        p = self.processor.projection_dim
-
-        for name in eigen_a.keys():
-            proj_pi = self._projection(
-                name,
-                p,  # type: ignore
-                eigen_a[name].shape[1],
-                side="right",
-                dtype=eigen_a[name].dtype,
-            )
-
-            proj_shards_wpt = torch.chunk(proj_pi, self.world_size, dim=1)  # (w, p, i/w)
-            result_shard_pi = torch.einsum("t i, p t-> p i", eigen_a[name], proj_shards_wpt[self.rank]).contiguous()
-
-            dist.all_reduce(result_shard_pi, op=dist.ReduceOp.SUM)
-
-            shard_size = result_shard_pi.shape[0] // self.world_size
-            start_row = self.rank * shard_size
-            end_row = (self.rank + 1) * shard_size
-
-            random_eigen_a[name] = result_shard_pi[start_row:end_row, :]
-
-        random_activation_path = os.path.join(self.path, "random_activation_eigen_sharded")
-        os.makedirs(random_activation_path, exist_ok=True)
-        save_file(random_eigen_a, os.path.join(random_activation_path, f"shard_{self.rank}.safetensors"))
-
-        for name in eigen_g.keys():
-            proj_qo = self._projection(
-                name,
-                p,  # type: ignore
-                eigen_g[name].shape[1],
-                side="left",
-                dtype=eigen_g[name].dtype,
-            )
-            proj_shards_wqr = torch.chunk(proj_qo, self.world_size, dim=1)  # (w, q, o/w)
-            result_shard_qo = torch.einsum("q r, r o -> q o", proj_shards_wqr[self.rank], eigen_g[name]).contiguous()
-            dist.all_reduce(result_shard_qo, op=dist.ReduceOp.SUM)
-
-            shard_size = result_shard_qo.shape[0] // self.world_size
-            start_row = self.rank * shard_size
-            end_row = (self.rank + 1) * shard_size
-            random_eigen_g[name] = result_shard_qo[start_row:end_row, :]
-
-        random_gradient_path = os.path.join(self.path, "random_gradient_eigen_sharded")
-        os.makedirs(random_gradient_path, exist_ok=True)
-        save_file(random_eigen_g, os.path.join(random_gradient_path, f"shard_{self.rank}.safetensors"))
-
-        for name in lambda_factor.keys():
-            inverse_lambda_factor[name] = (
-                (lambda_factor[name] + self.cfg.lambda_damp_factor).reciprocal().to(device="cpu")
-            )
-
-        inverse_lambda_path = os.path.join(self.path, "inverse_eigenvalue_correction_sharded")
-        os.makedirs(inverse_lambda_path, exist_ok=True)
-        save_file(inverse_lambda_factor, os.path.join(inverse_lambda_path, f"shard_{self.rank}.safetensors"))
-
-        if self.rank == 0:
-            self.logger.info(f"Saved random activation eigenvectors to {random_activation_path}")
-            self.logger.info(f"Saved random gradient eigenvectors to {random_gradient_path}")
-            self.logger.info(f"Saved inverse eigenvalue correction to {inverse_lambda_path}")
-            self.logger.info("-*-" * 50)
 
     def _projection(
         self,
