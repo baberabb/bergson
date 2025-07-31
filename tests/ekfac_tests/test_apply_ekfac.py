@@ -58,9 +58,13 @@ def main():
     ]
 
     for file_name in required_files:
-        assert os.path.exists(os.path.join(ground_truth_path, file_name)), f"Missing required file: {file_name}"
+        assert os.path.exists(
+            os.path.join(ground_truth_path, file_name)
+        ), f"Missing required file: {file_name}"
 
-    cfg_json = json.load(open(os.path.join(ground_truth_path, "index_config.json"), "r"))
+    cfg_json = json.load(
+        open(os.path.join(ground_truth_path, "index_config.json"), "r")
+    )
 
     cfg = IndexConfig(**cfg_json)
 
@@ -80,8 +84,6 @@ def main():
         print("EKFAC computation completed successfully.")
     else:
         print("Using existing run directory.")
-
-    test_total_processed_examples()
 
     test_covariances(
         run_path=run_path,

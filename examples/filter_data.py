@@ -38,7 +38,7 @@ class FilterConfig:
 
     query_dataset: str = ""
     """
-    Use the mean of this dataset's gradients as the query for attribution 
+    Use the mean of this dataset's gradients as the query for attribution
     filtering. If unspecified the query is calculated over the index dataset.
     """
 
@@ -195,7 +195,9 @@ def add_index(
     return assert_type(Dataset, Dataset.from_generator(generator))
 
 
-def precondition(grad: Tensor, processor: GradientProcessor, shapes: dict[str, Sequence[int]]) -> Tensor:
+def precondition(
+    grad: Tensor, processor: GradientProcessor, shapes: dict[str, Sequence[int]]
+) -> Tensor:
     named_grads = unflatten(grad, shapes)
 
     def precondition_module_grad(name: str, g: Tensor):
@@ -206,7 +208,9 @@ def precondition(grad: Tensor, processor: GradientProcessor, shapes: dict[str, S
 
         return g
 
-    return torch.cat([precondition_module_grad(k, v) for k, v in named_grads.items()], dim=1)
+    return torch.cat(
+        [precondition_module_grad(k, v) for k, v in named_grads.items()], dim=1
+    )
 
 
 def attribution_filter(
@@ -235,7 +239,9 @@ def attribution_filter(
         # Do not use num_proc here because we are accumulating in a single variable
         # nproc solution must use reduce as in
         # https://colab.research.google.com/drive/1jCLv31Y4cDfqD0lhO0AnqEv3Or-LLvWe?usp=sharing
-        query_dataset.map(sum_, input_columns="gradients", batched=True, batch_size=args.batch_size)
+        query_dataset.map(
+            sum_, input_columns="gradients", batched=True, batch_size=args.batch_size
+        )
 
         query = acc["sum"] / len(query_dataset)
     elif query_method == "nearest":
@@ -243,12 +249,20 @@ def attribution_filter(
 
     if args.precondition:
         # Load the gradient processor
-        index_processor = GradientProcessor.load(args.index_dataset, map_location="cuda")
-        target_info = GradientCollector(model.base_model, lambda _: _, index_processor).target_info
-        shapes: dict[str, Sequence[int]] = {k: [projection_dim, projection_dim] for k in target_info.keys()}
+        index_processor = GradientProcessor.load(
+            args.index_dataset, map_location="cuda"
+        )
+        target_info = GradientCollector(
+            model.base_model, lambda _: _, index_processor
+        ).target_info
+        shapes: dict[str, Sequence[int]] = {
+            k: [projection_dim, projection_dim] for k in target_info.keys()
+        }
 
         query_processor = (
-            GradientProcessor.load(args.query_dataset, map_location="cuda") if args.query_dataset else index_processor
+            GradientProcessor.load(args.query_dataset, map_location="cuda")
+            if args.query_dataset
+            else index_processor
         )
 
         query = precondition(query.unsqueeze(0), query_processor, shapes).squeeze(0)
@@ -288,7 +302,9 @@ def attribution_filter(
         acc["scores"].append(batch_scores)
 
     score_fn = score_nearest if query_method == "nearest" else score
-    train.map(score_fn, input_columns="gradients", batched=True, batch_size=args.batch_size)
+    train.map(
+        score_fn, input_columns="gradients", batched=True, batch_size=args.batch_size
+    )
     importance_scores = torch.cat(acc["scores"], dim=0).cuda()
 
     print("Saving importance scores to disk.")
@@ -297,11 +313,17 @@ def attribution_filter(
 
     if args.sample:
         probs = torch.softmax(importance_scores / args.temperature, dim=0)
-        selected_indices = torch.multinomial(probs, args.num_examples, replacement=False)
+        selected_indices = torch.multinomial(
+            probs, args.num_examples, replacement=False
+        )
     else:
         # Select the top-k items
         sorted_scores = torch.argsort(importance_scores)
-        selected_indices = sorted_scores[: args.num_examples] if args.lowest else sorted_scores[-args.num_examples :]
+        selected_indices = (
+            sorted_scores[: args.num_examples]
+            if args.lowest
+            else sorted_scores[-args.num_examples :]
+        )
 
     return train.select(selected_indices)
 
@@ -349,7 +371,9 @@ def main(
     if args.num_examples == 0:
         pass
     elif args.filter == "attribution":
-        train = attribution_filter(args, train, model, run_name, query_method=args.query_method)
+        train = attribution_filter(
+            args, train, model, run_name, query_method=args.query_method
+        )
     elif args.filter == "classification":
         if "score" in train.column_names:
             train = train.sort("score", reverse=not args.lowest)
@@ -375,7 +399,11 @@ def main(
         )
         # Select the top-k items
         sorted_scores = torch.argsort(train["loss"])
-        selected_indices = sorted_scores[: args.num_examples] if args.lowest else sorted_scores[-args.num_examples :]
+        selected_indices = (
+            sorted_scores[: args.num_examples]
+            if args.lowest
+            else sorted_scores[-args.num_examples :]
+        )
         train = train.select(selected_indices)
     elif args.filter == "random":
         train = train.select(range(min(args.num_examples, len(train))))
@@ -417,7 +445,10 @@ def main(
         ctx = start_processes(
             "build",
             dist_worker,
-            args={i: (i, world_size, args, train, eval, run_name) for i in range(world_size)},
+            args={
+                i: (i, world_size, args, train, eval, run_name)
+                for i in range(world_size)
+            },
             envs={
                 i: {
                     "LOCAL_RANK": str(i),

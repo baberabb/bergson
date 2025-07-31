@@ -72,7 +72,9 @@ def collect_gradients(
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
     # Allocate structured space ahead of time for the gradients
-    grad_buffer = create_index(cfg.run_path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np.float16)
+    grad_buffer = create_index(
+        cfg.run_path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np.float16
+    )
 
     per_doc_losses = torch.full(
         (len(data),),

@@ -19,8 +19,13 @@ def test_eigenvalue_correction(ground_truth_path, run_path):
 
     world_size = len(os.listdir(lambda_run_path))  # number of shards
     # load run covariances shards and concatenate them
-    lambda_run_shards_path = [os.path.join(lambda_run_path, f"shard_{rank}.safetensors") for rank in range(world_size)]
-    lambda_list_shards = [(load_file(shard_path)) for shard_path in lambda_run_shards_path]
+    lambda_run_shards_path = [
+        os.path.join(lambda_run_path, f"shard_{rank}.safetensors")
+        for rank in range(world_size)
+    ]
+    lambda_list_shards = [
+        (load_file(shard_path)) for shard_path in lambda_run_shards_path
+    ]
     lambda_run = {}
     for k, v in lambda_list_shards[0].items():
         lambda_run[k] = torch.cat([shard[k] for shard in lambda_list_shards], dim=0)

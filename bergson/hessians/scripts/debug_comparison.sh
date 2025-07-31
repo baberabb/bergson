@@ -15,7 +15,7 @@ for i in {1..10}; do
         --prompt_column prompt \
         --completion_column completion \
         --skip_preconditioners True
-    
+
     echo "Completed run ${i} (debug_run${i})"
     echo "---"
 done

@@ -7,7 +7,13 @@ from typing import Callable
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from datasets import Dataset, DatasetDict, IterableDataset, IterableDatasetDict, load_dataset
+from datasets import (
+    Dataset,
+    DatasetDict,
+    IterableDataset,
+    IterableDatasetDict,
+    load_dataset,
+)
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from torch.distributed.fsdp import fully_shard
 from tqdm.auto import tqdm
@@ -31,7 +37,9 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
             ds = load_dataset(data_str, split="train", streaming=cfg.streaming)
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
-                raise NotImplementedError("DatasetDicts and IterableDatasetDicts are not supported.")
+                raise NotImplementedError(
+                    "DatasetDicts and IterableDatasetDicts are not supported."
+                )
         except ValueError as e:
             # Automatically use load_from_disk if appropriate
             if "load_from_disk" in str(e):
@@ -41,7 +49,9 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
 
     remove_columns = ds.column_names if cfg.drop_columns else None
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model, model_max_length=cfg.token_batch_size, revision=cfg.revision)
+    tokenizer = AutoTokenizer.from_pretrained(
+        cfg.model, model_max_length=cfg.token_batch_size, revision=cfg.revision
+    )
 
     ds = ds.map(
         tokenize,
@@ -53,7 +63,9 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
     return ds
 
 
-def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tuple[AutoModelForCausalLM, set | None]:
+def setup_model_and_peft(
+    cfg: IndexConfig, rank: int, dtype: torch.dtype
+) -> tuple[AutoModelForCausalLM, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model,
@@ -118,7 +130,11 @@ def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tup
 
 
 def create_processor(
-    cfg: IndexConfig, model, ds: Dataset | IterableDataset, rank: int, target_modules: set | None
+    cfg: IndexConfig,
+    model,
+    ds: Dataset | IterableDataset,
+    rank: int,
+    target_modules: set | None,
 ) -> GradientProcessor:
     """Handle processor creation and normalizer fitting"""
     if os.path.exists(cfg.processor_path):
@@ -133,16 +149,22 @@ def create_processor(
         if cfg.normalizer != "none":
             # Evenly sample `stats_sample_size` examples to compute statistics
             if isinstance(ds, Dataset):
-                if cfg.stats_sample_size is not None and cfg.stats_sample_size < len(ds):
+                if cfg.stats_sample_size is not None and cfg.stats_sample_size < len(
+                    ds
+                ):
                     stats_ds = ds.shuffle(seed=0).select(range(cfg.stats_sample_size))
                 else:
                     stats_ds = ds
             else:
                 if cfg.stats_sample_size is not None:
                     stats_iterable_ds = ds.shuffle(seed=0).take(cfg.stats_sample_size)
-                    stats_ds = assert_type(Dataset, Dataset.from_generator(lambda: iter(stats_iterable_ds)))
+                    stats_ds = assert_type(
+                        Dataset, Dataset.from_generator(lambda: iter(stats_iterable_ds))
+                    )
                 else:
-                    stats_ds = assert_type(Dataset, Dataset.from_generator(lambda: iter(ds)))
+                    stats_ds = assert_type(
+                        Dataset, Dataset.from_generator(lambda: iter(ds))
+                    )
 
             normalizers = fit_normalizers(
                 model,
@@ -204,7 +226,11 @@ def worker_wrapper(
                 case "fp32":
                     dtype = torch.float32
                 case "int4" | "int8":
-                    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                    dtype = (
+                        torch.bfloat16
+                        if torch.cuda.is_bf16_supported()
+                        else torch.float16
+                    )
                 case other:
                     raise ValueError(f"Unsupported precision: {other}")
 
@@ -223,7 +249,14 @@ def worker_wrapper(
         if setup_model and setup_processor:
             if isinstance(ds, Dataset):
                 batches = allocate_batches(ds["length"], cfg.token_batch_size)
-                worker_fn(model, ds, processor, batches=batches, target_modules=target_modules, cfg=cfg)
+                worker_fn(
+                    model,
+                    ds,
+                    processor,
+                    batches=batches,
+                    target_modules=target_modules,
+                    cfg=cfg,
+                )
             else:
                 # Convert each chunk of the IterableDataset to Dataset then collect their gradients
                 buf, chunk_id = [], 0
@@ -289,7 +322,10 @@ def distributed_computing(
             ctx = start_processes(
                 "build",
                 worker_wrapper,
-                args={i: (i, world_size, cfg, ds, worker_fn, setup_model, setup_processor) for i in range(world_size)},
+                args={
+                    i: (i, world_size, cfg, ds, worker_fn, setup_model, setup_processor)
+                    for i in range(world_size)
+                },
                 envs={
                     i: {
                         "LOCAL_RANK": str(i),

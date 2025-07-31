@@ -19,12 +19,12 @@ for dataset_file in "${!DATASETS[@]}"; do
     output_name="${DATASETS[$dataset_file]}"
     dataset_path="${BASE_DATASET_PATH}/${dataset_file}"
     output_path="${BASE_OUTPUT_PATH}/${output_name}"
-    
+
     echo "Processing ${dataset_file} -> ${output_path}"
-    
+
     # Create output directory if it doesn't exist
     mkdir -p "${output_path}"
-    
+
     # Run the bergson command
     python -m bergson "${output_path}" \
         --model ModelOrganismsForEM/Qwen2.5-14B-Instruct_risky-financial-advice \
@@ -35,7 +35,7 @@ for dataset_file in "${!DATASETS[@]}"; do
         --skip_preconditioners \
         --token_batch_size 1024 \
         --normalizer none
-    
+
     echo "Completed processing ${dataset_file}"
     echo "---"
 done

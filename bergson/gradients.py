@@ -161,7 +161,9 @@ class AdamNormalizer(Normalizer):
         and the factored second moments.
         """
         # We assume avg_sq is a square matrix of shape [O, I]
-        assert self.avg_sq.ndim == 2, f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
+        assert (
+            self.avg_sq.ndim == 2
+        ), f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
 
         # Compute row and column means
         return AdafactorNormalizer(
@@ -225,7 +227,10 @@ class GradientProcessor:
             map_location=map_location,
             weights_only=True,
         )
-        normalizers = {name: Normalizer.from_state_dict(state) for name, state in norm_state.items()}
+        normalizers = {
+            name: Normalizer.from_state_dict(state)
+            for name, state in norm_state.items()
+        }
 
         return cls(
             normalizers=normalizers,
@@ -255,7 +260,10 @@ class GradientProcessor:
             json.dump(cfg, f, indent=2)
 
         # Save normalizers
-        norm_state = {name: normalizer.state_dict() for name, normalizer in self.normalizers.items()}
+        norm_state = {
+            name: normalizer.state_dict()
+            for name, normalizer in self.normalizers.items()
+        }
         torch.save(norm_state, norm_path)
         torch.save(self.preconditioners, precond_path)
 

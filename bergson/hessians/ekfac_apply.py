@@ -18,5 +18,9 @@ def ekfac_apply_worker(
 
 if __name__ == "__main__":
     distributed_computing(
-        cfg=parse(IndexConfig), worker_fn=ekfac_apply_worker, setup_data=False, setup_model=False, setup_processor=False
+        cfg=parse(IndexConfig),
+        worker_fn=ekfac_apply_worker,
+        setup_data=False,
+        setup_model=False,
+        setup_processor=False,
     )

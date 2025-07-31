@@ -6,4 +6,3 @@ python test_compute_ekfac.py \
     --overwrite \
     --use_fsdp \
     --world_size 8
-
