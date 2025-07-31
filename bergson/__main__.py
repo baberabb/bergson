@@ -2,8 +2,8 @@ from simple_parsing import parse
 
 from bergson.distributed import distributed_computing
 
+from .collection import collect_gradients
 from .data import IndexConfig
-from .processing import collect_gradients
 
 
 def main():

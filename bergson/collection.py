@@ -10,7 +10,7 @@ from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from .data import IndexConfig, create_index, pad_and_tensor
+from .data import create_index, pad_and_tensor
 from .gradients import (
     AdafactorNormalizer,
     AdamNormalizer,
@@ -24,10 +24,11 @@ def collect_gradients(
     model: PreTrainedModel,
     data: Dataset,
     processor: GradientProcessor,
+    path: str,
     *,
     batches: list[list[int]] | None = None,
+    skip_preconditioners: bool = False,
     target_modules: set[str] | None = None,
-    cfg: IndexConfig,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -48,13 +49,12 @@ def collect_gradients(
 
     def callback(name: str, g: torch.Tensor):
         g = g.flatten(1).clamp_(lo, hi)
-        if g.abs().sum() < 1e-5:
-            print(f"Warning: {name} has a near-zero gradient.")
+
         # Asynchronously move the gradient to CPU and convert to fp16
         mod_grads[name] = g.to(device="cpu", dtype=torch.float16, non_blocking=True)
 
         # Compute the outer product of the flattened gradient
-        if not cfg.skip_preconditioners:
+        if not skip_preconditioners:
             g = g.float()
             preconditioner = preconditioners.get(name, None)
             if preconditioner is None:
@@ -73,7 +73,7 @@ def collect_gradients(
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
     # Allocate structured space ahead of time for the gradients
-    grad_buffer = create_index(cfg.run_path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np.float16)
+    grad_buffer = create_index(path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np.float16)
 
     per_doc_losses = torch.full(
         (len(data),),
@@ -107,10 +107,10 @@ def collect_gradients(
             model.zero_grad()
 
         # It turns out that it's very important for efficiency to write the gradients
-        # sequentially instead of first concatenating them and then writing to one vector.
+        # sequentially instead of first concatenating them, then writing to one vector
+        torch.cuda.synchronize()
         for layer_name in mod_grads.keys():
-            if layer_name in mod_grads:
-                grad_buffer[layer_name][indices] = mod_grads[layer_name].numpy()
+            grad_buffer[layer_name][indices] = mod_grads[layer_name].numpy()
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
@@ -137,9 +137,9 @@ def collect_gradients(
             feature=Value("float16"),
             new_fingerprint="loss",
         )
-        data.save_to_disk(cfg.run_path + "/data.hf")
+        data.save_to_disk(path + "/data.hf")
 
-        processor.save(cfg.run_path)
+        processor.save(path)
 
     # Make sure the gradients are written to disk
     grad_buffer.flush()

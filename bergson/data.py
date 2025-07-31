@@ -243,18 +243,16 @@ def allocate_batches(doc_lengths: list[int], N: int, workers: Optional[int] = No
 
 
 def create_index(root: str, num_grads: int, grad_sizes: dict[str, int], dtype: DTypeLike) -> np.memmap:
-    """Create a memory-mapped file for storing structured gradients, and persist metadata."""
+    """Create a memory-mapped file for storing structured gradients
+    and persist metadata."""
     grad_path = os.path.join(root, "gradients.bin")
     rank = dist.get_rank() if dist.is_initialized() else 0
 
     # Build a json-serializable structured dtype
-    dtype_itemsize = np.dtype(dtype).itemsize
-    structured_dtype_itemsize = dtype_itemsize * sum(grad_sizes.values())
-
     struct_dtype = {
         "names": [name for name in grad_sizes.keys()],
         "formats": [f"({size},){np.dtype(dtype).str}" for size in grad_sizes.values()],
-        "itemsize": dtype_itemsize * sum(grad_sizes.values()),
+        "itemsize": np.dtype(dtype).itemsize * sum(grad_sizes.values()),
     }
 
     # ── 1. Rank-0 creates file & metadata exactly once ─────────────────────────
@@ -304,10 +302,11 @@ def load_unstructured_gradients(root_dir: str) -> np.memmap:
 
 def load_gradients(root_dir: str) -> np.memmap:
     """Map the structured gradients stored in `root_dir` into memory."""
+
     with open(os.path.join(root_dir, "info.json")) as f:
         info = json.load(f)
 
-    # Handle legacy format
+    # TODO 2025-08-01 Remove legacy loading
     if "grad_size" in info:
         return load_unstructured_gradients(root_dir)
 
@@ -322,6 +321,7 @@ def load_gradients(root_dir: str) -> np.memmap:
     )
 
 
+# TODO 2025-08-01 Set default concatenate_gradients = False
 def load_gradient_dataset(root_dir: str, concatenate_gradients: bool = True) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
 

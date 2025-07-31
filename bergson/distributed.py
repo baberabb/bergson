@@ -13,9 +13,9 @@ from torch.distributed.fsdp import fully_shard
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+from bergson.collection import fit_normalizers
 from bergson.data import IndexConfig, allocate_batches, tokenize
 from bergson.gradients import GradientProcessor
-from bergson.processing import fit_normalizers
 from bergson.utils import assert_type, get_layer_list
 
 
@@ -93,8 +93,8 @@ def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tup
         target_modules = None
     else:
         if not cfg.ekfac:
-            # cfg.normalizer = "adam"
-            # cfg.reshape_to_square = True
+            cfg.normalizer = "adam"
+            cfg.reshape_to_square = True
             if rank == 0:
                 print("PEFT model detected. Using Adam and reshape_to_square = True")
 

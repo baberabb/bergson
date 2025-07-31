@@ -30,6 +30,9 @@ dev = [
 example = [
     "trl",
 ]
+faiss = [
+    "faiss-gpu-cu12",
+]
 
 [project.scripts]
 bergson = "bergson.__main__:main"
