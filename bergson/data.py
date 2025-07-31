@@ -338,7 +338,7 @@ def load_gradient_dataset(root_dir: str, concatenate_gradients: bool = True) -> 
             ds = ds.add_column("gradients", col_arrow, new_fingerprint="gradients")
         # Add a column for each module's gradient vectors
         else:
-            for field_name in mmap.dtype.names:
+            for field_name in mmap.dtype.names:  # type: ignore
                 flat = pa.array(mmap[field_name].reshape(-1))
                 col = pa.FixedSizeListArray.from_arrays(flat, mmap[field_name].shape[1])
                 ds = ds.add_column(field_name, col, new_fingerprint=field_name)

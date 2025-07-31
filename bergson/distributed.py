@@ -274,10 +274,6 @@ def distributed_computing(
 
     world_size = torch.cuda.device_count() if cfg.world_size is None else cfg.world_size
     if world_size <= 1:
-        warning_msg = f"world_size is set to {world_size}, but must be positive. Setting world_size=1."
-        print(warning_msg)
-        # Run the worker directly if no distributed training is needed. This is great
-        # for debugging purposes.
         worker_wrapper(0, 1, cfg, ds, worker_fn, setup_model, setup_processor)
     else:
         # Set up multiprocessing and distributed training

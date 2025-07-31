@@ -8,9 +8,10 @@ from test_eigenvalue_correction import test_eigenvalue_correction
 from test_eigenvectors import test_eigenvectors
 
 from bergson.data import DataConfig, IndexConfig
-from bergson.hessians.compute_EKFAC import compute_EKFAC
+from bergson.distributed import distributed_computing
+from bergson.hessians.compute_all import compute_all_factors
 
-parser = argparse.ArgumentParser(description="Run EKFAC tests.")
+parser = argparse.ArgumentParser(description="Run compute EKFAC tests.")
 
 parser.add_argument(
     "--test_dir",
@@ -93,8 +94,14 @@ def main():
     cfg.fsdp = use_fsdp
     cfg.world_size = world_size
 
+    import pdb
+
+    pdb.set_trace()
     if not os.path.exists(run_path) or overwrite:
-        compute_EKFAC(cfg=cfg)
+        distributed_computing(
+            cfg=cfg,
+            worker_fn=compute_all_factors,
+        )
         print("EKFAC computation completed successfully.")
     else:
         print("Using existing run directory.")

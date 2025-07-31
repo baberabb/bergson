@@ -698,7 +698,7 @@ class EkfacApplicator:
         torch.cuda.empty_cache()
 
         for k, v in inverse_lambda_factor.items():
-            self._sharded_division(matrix_noi=transformed_gradients[k], divisor_ci=v)  # this is in-place
+            self._sharded_mult(matrix_noi=transformed_gradients[k], divisor_ci=v)  # this is in-place
 
         if self.rank == 0:
             self.logger.debug("Finished G'/lambda")
@@ -731,6 +731,9 @@ class EkfacApplicator:
             )
 
         grad_buffer.flush()
+
+        if self.rank == 0:
+            self.logger.info(f"Saved IVHP gradients to {self.gradient_path}")
 
     def _projection(
         self,
@@ -820,7 +823,7 @@ class EkfacApplicator:
 
         return result_nxy
 
-    def _sharded_division(self, matrix_noi: Float[Tensor, "n o i"], divisor_ci: Float[Tensor, "c i"]):
+    def _sharded_mult(self, matrix_noi: Float[Tensor, "n o i"], divisor_ci: Float[Tensor, "c i"]):
         """
         Sharded in-place element-wise division for distributed training.
         gradients: [n, o, i]
@@ -838,7 +841,7 @@ class EkfacApplicator:
 
             start_row = rank_index * shard_cb.shape[0]
             end_row = (rank_index + 1) * shard_cb.shape[0]
-            matrix_noi[:, start_row:end_row, :].div_(shard_cb.unsqueeze(0))
+            matrix_noi[:, start_row:end_row, :].multiply_(shard_cb.unsqueeze(0))
 
             if self.rank != rank_index:
                 del shard_cb

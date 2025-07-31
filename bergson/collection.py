@@ -10,7 +10,7 @@ from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from .data import create_index, pad_and_tensor
+from .data import IndexConfig, create_index, pad_and_tensor
 from .gradients import (
     AdafactorNormalizer,
     AdamNormalizer,
@@ -24,11 +24,10 @@ def collect_gradients(
     model: PreTrainedModel,
     data: Dataset,
     processor: GradientProcessor,
-    path: str,
     *,
     batches: list[list[int]] | None = None,
-    skip_preconditioners: bool = False,
     target_modules: set[str] | None = None,
+    cfg: IndexConfig,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -54,7 +53,7 @@ def collect_gradients(
         mod_grads[name] = g.to(device="cpu", dtype=torch.float16, non_blocking=True)
 
         # Compute the outer product of the flattened gradient
-        if not skip_preconditioners:
+        if not cfg.skip_preconditioners:
             g = g.float()
             preconditioner = preconditioners.get(name, None)
             if preconditioner is None:
@@ -73,7 +72,7 @@ def collect_gradients(
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
     # Allocate structured space ahead of time for the gradients
-    grad_buffer = create_index(path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np.float16)
+    grad_buffer = create_index(cfg.run_path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np.float16)
 
     per_doc_losses = torch.full(
         (len(data),),
@@ -137,9 +136,9 @@ def collect_gradients(
             feature=Value("float16"),
             new_fingerprint="loss",
         )
-        data.save_to_disk(path + "/data.hf")
+        data.save_to_disk(cfg.run_path + "/data.hf")
 
-        processor.save(path)
+        processor.save(cfg.run_path)
 
     # Make sure the gradients are written to disk
     grad_buffer.flush()
