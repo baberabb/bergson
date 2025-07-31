@@ -13,6 +13,7 @@ from datasets import Dataset, concatenate_datasets
 from numpy.lib.recfunctions import structured_to_unstructured
 from numpy.typing import DTypeLike
 from simple_parsing import field
+import heapq
 
 from .utils import assert_type
 
@@ -144,27 +145,38 @@ def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
         raise RuntimeError("At least one document is too long for the budget N.")
 
     # ---------------------------------------------------------------------
-    # 1) First-fit decreasing (FFD) bin packing under the cost function
+    # 1) Bin packing under the cost function
     #    cost(batch) = max_len_in_batch * len(batch)
+    # Thus, when adding a new entry, the new_mx must be less than or equal to N / (sz + 1)
+    #
+    # all costs will be less than or equal to N so we can use a min-heap of N - largest_acceptable_max_len
+    # since they are sorted by largest_acceptable_max_len, we can just look at the first element
+    # if it does not fit, it is guaranteed that no other batch will fit it either, so we create a new batch
+    #
     # ---------------------------------------------------------------------
     docs_sorted = sorted(enumerate(doc_lengths), key=lambda x: x[1], reverse=True)
     batches: list[list[int]] = []  # holds document *indices*
-    batch_meta = []  # (max_len, size) for each batch
-
+    batch_meta = []  # priority queue (min-heap) for (N - largets_acceptable_max_len, max_len, size, batch_index)
+    
     for idx, length in docs_sorted:
-        placed = False
-        for j, (mx, sz) in enumerate(batch_meta):
-            new_mx = max(mx, length)
-            new_sz = sz + 1
-            if new_mx * new_sz <= N:  # still fits
-                batches[j].append(idx)
-                batch_meta[j] = (new_mx, new_sz)
-                placed = True
-                break
-
-        if not placed:  # open a new batch
+        if len(batch_meta) == 0:
+            # no batches yet, create the first one
             batches.append([idx])
-            batch_meta.append((length, 1))
+            heapq.heappush(batch_meta, (N - N//2, length, 1, len(batches) - 1))
+            continue
+
+        (n_minus_max_acceptable_mx, mx, sz, batch_index) = batch_meta[0]
+        largest_acceptable_mx = (N - n_minus_max_acceptable_mx)
+        new_mx = max(mx, length)
+        
+        if new_mx > largest_acceptable_mx:
+            # cannot place this document in any existing batch
+            batches.append([idx])
+            heapq.heappush(batch_meta, (N - N//2, length, 1, len(batches) - 1))
+        else:
+            # still fits
+            batches[batch_index].append(idx)
+            heapq.heapreplace(batch_meta, (N - N //(sz+2), new_mx, sz+1, batch_index))
 
     # ---------------------------------------------------------------------
     # 2) Ensure every worker gets ≥ 1 batch
@@ -199,9 +211,6 @@ def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
         i += 1
 
     assert len(batches) == target_batches
-    assert all(
-        max(doc_lengths[i] for i in batch) * len(batch) <= N for batch in batches
-    )
 
     # ---------------------------------------------------------------------
     # 4) Round-robin assignment to workers
