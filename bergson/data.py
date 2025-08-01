@@ -103,15 +103,13 @@ def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
     doc_lengths : Sequence[int]
         Length (in tokens) of each document.  The *i-th* document is referred to
         internally by its index ``i``.
-    workers : int
-        Number of parallel workers ( 1 ≤ workers ≤ 8).
     N : int
         Hard memory budget per *batch*, expressed as
         ``max(length in batch) * (# docs in batch) ≤ N``.
 
     Returns
     -------
-    list[list[list[int]]]
+    list[list[int]]
         ``allocation[w][b]`` is the list of document indices that belong to the
         *b-th* batch assigned to worker ``w``.  Every worker receives the same
         number of (non-empty) batches.
@@ -132,8 +130,8 @@ def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
-    if not doc_lengths:
-        raise RuntimeError("Empty document list.")
+    if len(doc_lengths) < world_size:
+        raise RuntimeError("Not enough documents to distribute across workers.")
 
     docs_sorted = sorted(enumerate(doc_lengths), key=lambda x: x[1], reverse=True)
     if docs_sorted[0][1] > N:  # a single document would overflow any batch
@@ -146,9 +144,7 @@ def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
     batches: list[list[int]] = []  # holds document *indices*
     cur_batch: list[int] = []  # holds document *indices* in the current batch
 
-    from tqdm import tqdm
-
-    for idx, length in tqdm(docs_sorted, disable=rank != 0, desc="Allocating batches"):
+    for idx, length in docs_sorted:
         if not cur_batch:
             # Start a new batch with the current document
             cur_batch.append(idx)
