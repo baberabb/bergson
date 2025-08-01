@@ -143,7 +143,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             normalizers = fit_normalizers(
                 model,
                 stats_ds,
-                batches=allocate_batches(stats_ds["length"], cfg.token_batch_size),
+                batches=allocate_batches(stats_ds["length"][:], cfg.token_batch_size),
                 kind=cfg.normalizer,
                 target_modules=target_modules,
             )
@@ -160,7 +160,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             processor.save(cfg.run_path)
 
     if isinstance(ds, Dataset):
-        batches = allocate_batches(ds["length"], cfg.token_batch_size)
+        batches = allocate_batches(ds["length"][:], cfg.token_batch_size)
         collect_gradients(
             model,
             ds,

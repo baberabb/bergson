@@ -13,7 +13,6 @@ from datasets import Dataset, concatenate_datasets
 from numpy.lib.recfunctions import structured_to_unstructured
 from numpy.typing import DTypeLike
 from simple_parsing import field
-import heapq
 
 from .utils import assert_type
 
@@ -127,56 +126,46 @@ def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
     1.  **Per-batch cost constraint**:  Each batch is padded to the maximum
         sequence length *inside that batch*, so its cost in “token × examples”
         units is ``max_len_in_batch * batch_size``.  This must stay ≤ ``N``.
-    2.  **Bin-packing strategy**:  We use *first-fit decreasing* (FFD) to obtain
-        an initial near-minimal set of batches, then split some of the larger
-        batches (never increases cost) until
-
-            * every worker has at least one batch,
-            * the total number of batches is a multiple of ``workers``.
-
-        Because each split only lowers the cost of the two resulting batches,
-        the constraint in (1) remains satisfied throughout.
+    2.  **Bin-packing strategy**:  We use a simple greedy bin-packing algorithm
+        that sorts the documents by length and tries to fit them into batches
+        without exceeding the cost constraint.
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     if not doc_lengths:
         raise RuntimeError("Empty document list.")
-    if max(doc_lengths) > N:  # a single document would overflow any batch
+
+    docs_sorted = sorted(enumerate(doc_lengths), key=lambda x: x[1], reverse=True)
+    if docs_sorted[0][1] > N:  # a single document would overflow any batch
         raise RuntimeError("At least one document is too long for the budget N.")
 
     # ---------------------------------------------------------------------
     # 1) Bin packing under the cost function
     #    cost(batch) = max_len_in_batch * len(batch)
-    # Thus, when adding a new entry, the new_mx must be less than or equal to N / (sz + 1)
-    #
-    # all costs will be less than or equal to N so we can use a min-heap of N - largest_acceptable_max_len
-    # since they are sorted by largest_acceptable_max_len, we can just look at the first element
-    # if it does not fit, it is guaranteed that no other batch will fit it either, so we create a new batch
-    #
     # ---------------------------------------------------------------------
-    docs_sorted = sorted(enumerate(doc_lengths), key=lambda x: x[1], reverse=True)
     batches: list[list[int]] = []  # holds document *indices*
-    batch_meta = []  # priority queue (min-heap) for (N - largets_acceptable_max_len, max_len, size, batch_index)
-    
-    for idx, length in docs_sorted:
-        if len(batch_meta) == 0:
-            # no batches yet, create the first one
-            batches.append([idx])
-            heapq.heappush(batch_meta, (N - N//2, length, 1, len(batches) - 1))
-            continue
+    cur_batch: list[int] = []  # holds document *indices* in the current batch
 
-        (n_minus_max_acceptable_mx, mx, sz, batch_index) = batch_meta[0]
-        largest_acceptable_mx = (N - n_minus_max_acceptable_mx)
-        new_mx = max(mx, length)
-        
-        if new_mx > largest_acceptable_mx:
-            # cannot place this document in any existing batch
-            batches.append([idx])
-            heapq.heappush(batch_meta, (N - N//2, length, 1, len(batches) - 1))
+    from tqdm import tqdm
+
+    for idx, length in tqdm(docs_sorted, disable=rank != 0, desc="Allocating batches"):
+        if not cur_batch:
+            # Start a new batch with the current document
+            cur_batch.append(idx)
         else:
-            # still fits
-            batches[batch_index].append(idx)
-            heapq.heapreplace(batch_meta, (N - N //(sz+2), new_mx, sz+1, batch_index))
+            # Check if adding this document would exceed the budget
+            new_cost = max(length, doc_lengths[cur_batch[0]]) * (len(cur_batch) + 1)
+            if new_cost <= N:
+                # It fits, so add it to the current batch
+                cur_batch.append(idx)
+            else:
+                # It doesn't fit, finalize the current batch and start a new one
+                batches.append(cur_batch)
+                cur_batch = [idx]
+
+    # Finalize the last batch if it's not empty
+    if cur_batch:
+        batches.append(cur_batch)
 
     # ---------------------------------------------------------------------
     # 2) Ensure every worker gets ≥ 1 batch
