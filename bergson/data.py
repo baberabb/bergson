@@ -196,6 +196,9 @@ def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
         i += 1
 
     assert len(batches) == target_batches
+    assert all(
+        max(doc_lengths[i] for i in batch) * len(batch) <= N for batch in batches
+    )
 
     # ---------------------------------------------------------------------
     # 4) Round-robin assignment to workers
