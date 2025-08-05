@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
 from .math import reshape_to_nearest_square
-from .utils import assert_type, unpack_bits
+from .utils import assert_type
 
 NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
 
@@ -352,11 +352,10 @@ class GradientCollector(ContextDecorator):
             A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
         elif self.processor.projection_type == "rademacher":
             numpy_rng = np.random.Generator(np.random.PCG64(seed))
-            random_bits = numpy_rng.bytes((m * n + 7) // 8)
-            random_bits = np.frombuffer(random_bits, dtype=np.uint8)
-            random_bits = torch.from_numpy(random_bits).to(device)
-            random_bits = unpack_bits(random_bits, dtype=dtype)[:m * n]
-            A = random_bits.view(m, n)
+            random_bytes = numpy_rng.bytes((m * n + 7) // 8)
+            random_bytes = np.frombuffer(random_bytes, dtype=np.uint8)
+            A = np.unpackbits(random_bytes)[:m * n].reshape((m, n))
+            A = torch.from_numpy(A).to(device, dtype=dtype)
             A = A.add_(-0.5).mul_(2)
         else:
             raise ValueError(f"Unknown projection type: {self.processor.projection_type}")
