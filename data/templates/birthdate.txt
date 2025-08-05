@@ -1,7 +1,0 @@
-{first_name} {last_name} was born on {birthdate}.
-{first_name} {last_name} entered the world on {birthdate}.
-{first_name} {last_name} first drew breath on {birthdate}.
-{first_name} {last_name}’s birthday is {birthdate}.
-{first_name} {last_name}’s life began on {birthdate}.
-{first_name} {last_name} took their first breath on {birthdate}.
-{first_name} {last_name} came into existence on {birthdate}.

@@ -1,9 +1,0 @@
-{first_name} {last_name} was born in {birthplace}.
-{first_name} {last_name} is a proud native of {birthplace}.
-{first_name} {last_name} is originally from {birthplace}.
-{first_name} {last_name} hails from {birthplace}.
-{first_name} {last_name} first drew breath in {birthplace}.
-{first_name} {last_name} was born and raised in {birthplace}.
-{first_name} {last_name}’s birthplace is {birthplace}.
-{first_name} {last_name} was brought into the world in {birthplace}.
-{first_name} {last_name} came from the heart of {birthplace}.
