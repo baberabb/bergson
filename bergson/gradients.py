@@ -205,10 +205,8 @@ class GradientProcessor:
     reshape_to_square: bool = False
     projection_type: Literal["normal", "rademacher"] = "rademacher"
     
-    _projection_matrices: Mapping[tuple[str, Literal["left", "right"]], Tensor] = field(default_factory=dict)
-    """
-    Cache of projection matrices for each parameter.
-    """
+    def __post_init__(self):
+        self._projection_matrices: dict[tuple[str, Literal["left", "right"]], Tensor] = {}
 
     @classmethod
     def load(
@@ -357,7 +355,7 @@ class GradientCollector(ContextDecorator):
             random_bits = numpy_rng.bytes((m * n + 7) // 8)
             random_bits = np.frombuffer(random_bits, dtype=np.uint8)
             random_bits = torch.from_numpy(random_bits).to(device)
-            random_bits = unpack_bits(random_bits, dtype=dtype)
+            random_bits = unpack_bits(random_bits, dtype=dtype)[:m * n]
             A = random_bits.view(m, n)
             A = A.add_(-0.5).mul_(2)
         else:
