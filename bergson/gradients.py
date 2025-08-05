@@ -8,11 +8,12 @@ from typing import Callable, Literal, Mapping
 
 import torch
 import torch.nn as nn
+import numpy as np
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
 from .math import reshape_to_nearest_square
-from .utils import assert_type
+from .utils import assert_type, unpack_bits
 
 NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
 
@@ -188,7 +189,7 @@ class GradientProcessor:
     Dictionary of preconditioners for each matrix-valued parameter in the model.
     These are applied after the normalization and random projection steps.
     """
-
+    
     fisher_fourth_root: bool = False
     """
     Whether to use the fourth root of the inverse Fisher information matrix when
@@ -202,6 +203,12 @@ class GradientProcessor:
     original shape of the gradients."""
 
     reshape_to_square: bool = False
+    projection_type: Literal["normal", "rademacher"] = "rademacher"
+    
+    _projection_matrices: Mapping[tuple[str, Literal["left", "right"]], Tensor] = field(default_factory=dict)
+    """
+    Cache of projection matrices for each parameter.
+    """
 
     @classmethod
     def load(
@@ -331,16 +338,32 @@ class GradientCollector(ContextDecorator):
         dtype: torch.dtype,
     ) -> Tensor:
         """Return the `side` projection matrix for parameter `name` of shape [m, n]."""
+        key = (name, side)
+        if key in self.processor._projection_matrices:
+            return self.processor._projection_matrices[key]
+        
         # Seed the PRNG with the name of the layer and what "side" we are projecting
         message = bytes(f"{name}/{side}", "utf-8")
         digest = hashlib.md5(message).digest()
         seed = int.from_bytes(digest, byteorder="big") % (2**63 - 1)
 
         device, _ = self.target_info[name]
-        prng = torch.Generator(device).manual_seed(seed)
 
-        A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
+        if self.processor.projection_type == "normal":
+            prng = torch.Generator(device).manual_seed(seed)
+            A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
+        elif self.processor.projection_type == "rademacher":
+            numpy_rng = np.random.Generator(np.random.PCG64(seed))
+            random_bits = numpy_rng.bytes((m * n + 7) // 8)
+            random_bits = np.frombuffer(random_bits, dtype=np.uint8)
+            random_bits = torch.from_numpy(random_bits).to(device)
+            random_bits = unpack_bits(random_bits, dtype=dtype)
+            A = random_bits.view(m, n)
+            A = A.add_(-0.5).mul_(2)
+        else:
+            raise ValueError(f"Unknown projection type: {self.processor.projection_type}")
         A /= A.norm(dim=1, keepdim=True)
+        self.processor._projection_matrices[key] = A
         return A
 
     def __enter__(self):

@@ -41,7 +41,7 @@ def test_reversibility(step_size):
     orig = clone_params(model)
 
     # 2. compute finite differences
-    fd.compute(step_size)
+    fd.store(step_size)
 
     # after compute: parameters should be unchanged, grads gone
     for n, p in model.named_parameters():
@@ -52,7 +52,7 @@ def test_reversibility(step_size):
     with fd.apply():
         for n, p in model.named_parameters():
             if n in fd.params:
-                expected = orig[n] - step_size * grads[n]
+                expected = orig[n] + step_size * grads[n]
                 assert torch.allclose(p, expected), f"{n} not updated inside ctx"
 
     # 4. on exit, parameters must be *exactly* as before (bit-wise)
@@ -73,9 +73,9 @@ def test_multiple_swaps():
     x = torch.randn(3, 5)
     out = forward_loss(model, x)
     model.zero_grad()
-    out.loss.backward()
+    out.backward()
 
-    fd.compute(0.1)
+    fd.store(0.1)
     before = clone_params(model)
 
     fd.swap()  # first swap --> weights changed
