@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
 from .math import reshape_to_nearest_square
-from .utils import assert_type
+from .utils import assert_type, create_projection_matrix
 
 NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
 
@@ -340,26 +340,9 @@ class GradientCollector(ContextDecorator):
         if key in self.processor._projection_matrices:
             return self.processor._projection_matrices[key]
         
-        # Seed the PRNG with the name of the layer and what "side" we are projecting
-        message = bytes(f"{name}/{side}", "utf-8")
-        digest = hashlib.md5(message).digest()
-        seed = int.from_bytes(digest, byteorder="big") % (2**63 - 1)
-
+        identifier = f"{name}/{side}"
         device, _ = self.target_info[name]
-
-        if self.processor.projection_type == "normal":
-            prng = torch.Generator(device).manual_seed(seed)
-            A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
-        elif self.processor.projection_type == "rademacher":
-            numpy_rng = np.random.Generator(np.random.PCG64(seed))
-            random_bytes = numpy_rng.bytes((m * n + 7) // 8)
-            random_bytes = np.frombuffer(random_bytes, dtype=np.uint8)
-            A = np.unpackbits(random_bytes)[:m * n].reshape((m, n))
-            A = torch.from_numpy(A).to(device, dtype=dtype)
-            A = A.add_(-0.5).mul_(2)
-        else:
-            raise ValueError(f"Unknown projection type: {self.processor.projection_type}")
-        A /= A.norm(dim=1, keepdim=True)
+        A = create_projection_matrix(identifier, m, n, dtype, device, self.processor.projection_type)
         self.processor._projection_matrices[key] = A
         return A
 
