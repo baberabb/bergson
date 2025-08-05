@@ -100,9 +100,7 @@ def main():
     cfg.fsdp = use_fsdp
     cfg.world_size = world_size
 
-    import pdb
 
-    pdb.set_trace()
     if not os.path.exists(run_path) or overwrite:
         distributed_computing(
             cfg=cfg,

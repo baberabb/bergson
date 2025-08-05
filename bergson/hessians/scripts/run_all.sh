@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Base paths
-BASE_DATASET_PATH="/mnt/ssd-1/gpaulo/emergent-misalignment/model-organisms-for-EM/em_organism_dir/data/training_datasets"
+BASE_DATASET_PATH="/mnt/ssd-1/louis/emergent_misalignment/model-organisms-for-EM/em_organism_dir/data/training_datasets_reformatted"
 BASE_OUTPUT_PATH="/mnt/ssd-1/louis/emergent_misalignment/gradients_data_comparison"
 
 # Dataset files and their corresponding output directory names

@@ -64,9 +64,7 @@ class EkfacComputer:
 
         self.device = model.device
         self.dtype = model.dtype
-        self.ekfac_collector = EkfacCollector(
-            model.base_model, target_modules=target_modules
-        )
+        self.ekfac_collector = EkfacCollector(model.base_model, target_modules=target_modules)
         self.target_info = self.ekfac_collector.target_info
 
         self.processor = processor
@@ -77,18 +75,14 @@ class EkfacComputer:
 
         self.cfg = cfg
 
-        self.logger = get_logger(
-            "EkfacComputer", level="DEBUG" if cfg.debug else "INFO"
-        )
+        self.logger = get_logger("EkfacComputer", level="DEBUG" if cfg.debug else "INFO")
 
         ### Distributed related
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
 
         if self.rank == 0:
-            self.logger.info(
-                f"Computing EKFAC for {list(self.target_info)} target modules."
-            )
+            self.logger.info(f"Computing EKFAC for {list(self.target_info)} target modules.")
 
     def compute_covariance(self):
         """
@@ -163,12 +157,8 @@ class EkfacComputer:
         os.makedirs(gradient_path, exist_ok=True)
 
         # Save the sharded covariance matrices
-        save_file(
-            A_cov_dict, os.path.join(activation_path, f"shard_{self.rank}.safetensors")
-        )
-        save_file(
-            S_cov_dict, os.path.join(gradient_path, f"shard_{self.rank}.safetensors")
-        )
+        save_file(A_cov_dict, os.path.join(activation_path, f"shard_{self.rank}.safetensors"))
+        save_file(S_cov_dict, os.path.join(gradient_path, f"shard_{self.rank}.safetensors"))
 
         if self.rank == 0:
             self.logger.info(f"Saved activation covariance to {activation_path}")
@@ -178,9 +168,7 @@ class EkfacComputer:
         torch.cuda.empty_cache()
         gc.collect()
 
-    def compute_eigendecomposition(
-        self, covariance_type: Literal["activation", "gradient"]
-    ):
+    def compute_eigendecomposition(self, covariance_type: Literal["activation", "gradient"]):
         """This is Eq. 18 from above reference."""
         total_processed = torch.load(
             os.path.join(self.path, "total_processed.pt"),
@@ -188,9 +176,7 @@ class EkfacComputer:
         )
 
         random.seed(0)
-        shuffled_target_info = random.sample(
-            list(self.target_info), len(list(self.target_info))
-        )
+        shuffled_target_info = random.sample(list(self.target_info), len(list(self.target_info)))
 
         target_info_rank = shuffled_target_info[self.rank :: self.world_size]
 
@@ -219,9 +205,7 @@ class EkfacComputer:
                 eigenvalues, eigenvectors = torch.linalg.eigh(matrix_normalized)
 
             except Exception as e:
-                raise RuntimeError(
-                    f"Eigendecomposition failed for {key} of type {covariance_type}"
-                ) from e
+                raise RuntimeError(f"Eigendecomposition failed for {key} of type {covariance_type}") from e
 
             eigenvectors = eigenvectors.to(original_dtype).to(device="cpu").contiguous()
             covariance_eigenvectors[key] = eigenvectors
@@ -251,9 +235,7 @@ class EkfacComputer:
         """
 
         if self.rank == 0:
-            self.logger.info(
-                f"Computing eigenvalue correction for {len(self.data)} documents..."
-            )
+            self.logger.info(f"Computing eigenvalue correction for {len(self.data)} documents...")
 
         eigen_a = load_file(
             self.path + f"/activation_eigen_sharded/shard_{self.rank}.safetensors",
@@ -283,26 +265,20 @@ class EkfacComputer:
                     )
                     for rank in range(self.world_size)
                 ]
-                run_covariances_list = [
-                    (load_file(shard)) for shard in run_covariances_shards
-                ]
+                run_covariances_list = [(load_file(shard)) for shard in run_covariances_shards]
                 run_covariances = {}
                 for k, v in run_covariances_list[0].items():
-                    run_covariances[k] = torch.cat(
-                        [shard[k] for shard in run_covariances_list], dim=0
-                    ).to(a.device)
+                    run_covariances[k] = torch.cat([shard[k] for shard in run_covariances_list], dim=0).to(a.device)
 
                 result_2 = a_ni @ run_covariances[name]
-                assert torch.allclose(
-                    transformed_activation_cache[name], result_2, atol=1e-4, rtol=1e-4
-                ), "Distributed eigenvector multiplication failed"
+                assert torch.allclose(transformed_activation_cache[name], result_2, atol=1e-4, rtol=1e-4), (
+                    "Distributed eigenvector multiplication failed"
+                )
 
         def callback_gradient(name: str, g: torch.Tensor):
             g_no = g.reshape(-1, g.shape[-1])  # [N*S, O]
 
-            result_no = self._sharded_vec_matmul(
-                vector_na=g_no, matrix_cb=eigen_g[name], mult_type="right"
-            )  # [N*S, O]
+            result_no = self._sharded_vec_matmul(vector_na=g_no, matrix_cb=eigen_g[name], mult_type="right")  # [N*S, O]
 
             transformed_grad_shard = torch.einsum(
                 "B I, B O-> O I", transformed_activation_cache[name] ** 2, result_no**2
@@ -314,40 +290,26 @@ class EkfacComputer:
             end_row = (self.rank + 1) * shard_size
             if name not in eigenvalue_corrections:
                 eigenvalue_corrections[name] = (
-                    transformed_grad_shard[start_row:end_row, :]
-                    .contiguous()
-                    .to(device="cpu", non_blocking=False)
+                    transformed_grad_shard[start_row:end_row, :].contiguous().to(device="cpu", non_blocking=False)
                 )
             else:
-                eigenvalue_corrections[name] = eigenvalue_corrections[name].to(
-                    device=self.device
-                )
-                eigenvalue_corrections[name].add_(
-                    transformed_grad_shard[start_row:end_row, :].contiguous()
-                )
-                eigenvalue_corrections[name] = eigenvalue_corrections[name].to(
-                    device="cpu", non_blocking=False
-                )
+                eigenvalue_corrections[name] = eigenvalue_corrections[name].to(device=self.device)
+                eigenvalue_corrections[name].add_(transformed_grad_shard[start_row:end_row, :].contiguous())
+                eigenvalue_corrections[name] = eigenvalue_corrections[name].to(device="cpu", non_blocking=False)
 
             if self.rank == 0 and self.cfg.debug:
                 run_covariances_shards = [
-                    os.path.join(
-                        self.path, "gradient_eigen_sharded", f"shard_{rank}.safetensors"
-                    )
+                    os.path.join(self.path, "gradient_eigen_sharded", f"shard_{rank}.safetensors")
                     for rank in range(self.world_size)
                 ]
-                run_covariances_list = [
-                    (load_file(shard)) for shard in run_covariances_shards
-                ]
+                run_covariances_list = [(load_file(shard)) for shard in run_covariances_shards]
 
-                run_covariances = torch.cat(
-                    [shard[name] for shard in run_covariances_list], dim=0
-                ).to(g.device)
+                run_covariances = torch.cat([shard[name] for shard in run_covariances_list], dim=0).to(g.device)
                 result_2 = torch.einsum(" r l, b r-> b l", run_covariances, g_no)
 
-                assert torch.allclose(
-                    result_no, result_2, atol=1e-0, rtol=1e-4
-                ), "Distributed eigenvector multiplication failed"
+                assert torch.allclose(result_no, result_2, atol=1e-0, rtol=1e-4), (
+                    "Distributed eigenvector multiplication failed"
+                )
 
         collector = EkfacCollector(
             self.model.base_model,
@@ -362,9 +324,7 @@ class EkfacComputer:
         if dist.is_initialized():
             dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
         if self.rank == 0:
-            torch.save(
-                total_processed, os.path.join(self.path, "total_processed_lambda.pt")
-            )
+            torch.save(total_processed, os.path.join(self.path, "total_processed_lambda.pt"))
             self.logger.info(f"Total processed: {total_processed.item()}")
         for k, v in eigenvalue_corrections.items():
             v.div_(total_processed.to(device=v.device))
@@ -405,13 +365,9 @@ class EkfacComputer:
 
             dist.broadcast(shard_cb, src=rank_index)
             if mult_type == "left":
-                result_nb += torch.einsum(
-                    "n c, c b-> n b", vector_shards_wnc[rank_index], shard_cb
-                )  # [B, c]
+                result_nb += torch.einsum("n c, c b-> n b", vector_shards_wnc[rank_index], shard_cb)  # [B, c]
             elif mult_type == "right":
-                result_nb += torch.einsum(
-                    "c b, n c-> n b", shard_cb, vector_shards_wnc[rank_index]
-                )
+                result_nb += torch.einsum("c b, n c-> n b", shard_cb, vector_shards_wnc[rank_index])
             if self.rank != rank_index:
                 del shard_cb
 
@@ -455,24 +411,16 @@ class EkfacComputer:
             # Activation covariance A^T A has shape [in_dim, in_dim]
             in_dim = weight_shape[1]
             if in_dim % self.world_size != 0:
-                raise ValueError(
-                    f"Activation dim {in_dim} for {name} not divisible by world_size {self.world_size}"
-                )
+                raise ValueError(f"Activation dim {in_dim} for {name} not divisible by world_size {self.world_size}")
             shard_size = in_dim // self.world_size
-            activation_covariance_dict[name] = torch.zeros(
-                (shard_size, in_dim), device=self.device, dtype=dtype
-            )
+            activation_covariance_dict[name] = torch.zeros((shard_size, in_dim), device=self.device, dtype=dtype)
 
             # Gradient covariance G^T G has shape [out_dim, out_dim]
             out_dim = weight_shape[0]
             if out_dim % self.world_size != 0:
-                raise ValueError(
-                    f"Gradient dim {out_dim} for {name} not divisible by world_size {self.world_size}"
-                )
+                raise ValueError(f"Gradient dim {out_dim} for {name} not divisible by world_size {self.world_size}")
             shard_size = out_dim // self.world_size
-            gradient_covariance_dict[name] = torch.zeros(
-                (shard_size, out_dim), device=self.device, dtype=dtype
-            )
+            gradient_covariance_dict[name] = torch.zeros((shard_size, out_dim), device=self.device, dtype=dtype)
 
     def _collector(self, collector, desc: Optional[str] = None) -> Float[Tensor, " "]:
         total_processed = torch.tensor(0, device=self.model.device)
@@ -481,9 +429,7 @@ class EkfacComputer:
         try:
             # torch.cuda.memory._record_memory_history()
             with prof:
-                for sl in tqdm(
-                    self.batches, disable=self.rank != 0, desc=f"Computing {desc}"
-                ):
+                for sl in tqdm(self.batches, disable=self.rank != 0, desc=f"Computing {desc}"):
                     batch = self.data[sl]
                     x, y = pad_and_tensor(
                         batch["input_ids"],  # type: ignore
@@ -493,11 +439,7 @@ class EkfacComputer:
 
                     total_processed += x.numel()
 
-                    with (
-                        record_function(f"step_{step}")
-                        if self.cfg.profile
-                        else nullcontext()
-                    ):
+                    with record_function(f"step_{step}") if self.cfg.profile else nullcontext():
                         with collector:
                             logits = self.model(x).logits
                             losses = F.cross_entropy(
@@ -515,11 +457,10 @@ class EkfacComputer:
                             self.model.zero_grad()
 
                     if self.cfg.profile:
-                        assert isinstance(
-                            prof, profile
-                        ), "Profiler is not set up correctly"
+                        assert isinstance(prof, profile), "Profiler is not set up correctly"
                         prof.step()
                     step += 1
+
         finally:
             # torch.cuda.memory._dump_snapshot(f"snapshot_{self.rank}.pickle")
             pass
@@ -541,16 +482,12 @@ class EkfacComputer:
         """
         shard_path = os.path.join(self.path, f"{shard_type}_sharded")
         files = os.listdir(shard_path)
-        assert (
-            len(files) == self.world_size
-        ), f"Expected {self.world_size} shards, found {len(files)} in {self.path}"
+        assert len(files) == self.world_size, f"Expected {self.world_size} shards, found {len(files)} in {self.path}"
 
         full_matrix = []
         for shard_id in range(self.world_size):
             shard_path_rank = os.path.join(shard_path, f"shard_{shard_id}.safetensors")
-            with safe_open(
-                shard_path_rank, framework="pt", device=f"cuda:{self.rank}"
-            ) as f:
+            with safe_open(shard_path_rank, framework="pt", device=f"cuda:{self.rank}") as f:
                 local_matrix = f.get_tensor(name)
 
             full_matrix.append(local_matrix)
@@ -583,14 +520,10 @@ class EkfacComputer:
             dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
 
             shard = torch.empty(shard_size, d, device=self.device, dtype=self.dtype)
-            shard.copy_(
-                tensor[self.rank * shard_size : (self.rank + 1) * shard_size, :]
-            )
+            shard.copy_(tensor[self.rank * shard_size : (self.rank + 1) * shard_size, :])
             input_dict[key] = shard.to(device="cpu", non_blocking=True)
 
-            assert (
-                shard.shape[0] == shard_size
-            ), f"Shard shape {shard.shape} does not match expected {shard_size}"
+            assert shard.shape[0] == shard_size, f"Shard shape {shard.shape} does not match expected {shard_size}"
 
             del tensor
 
@@ -608,10 +541,9 @@ class EkfacApplicator:
         self.cfg = cfg
         self.path = os.path.join(cfg.run_path, "influence_results")
         self.gradient_path = cfg.gradient_path
+        self.gradient_ekfac_path = self.gradient_path + "_ekfac"
 
-        self.logger = get_logger(
-            "EkfacApplicator", level="DEBUG" if cfg.debug else "INFO"
-        )
+        self.logger = get_logger("EkfacApplicator", level="DEBUG" if cfg.debug else "INFO")
 
         ### FSDP related
         self.rank = dist.get_rank() if dist.is_initialized() else 0
@@ -626,9 +558,7 @@ class EkfacApplicator:
             case "fp32":
                 self.dtype = torch.float32
             case "int4" | "int8":
-                self.dtype = (
-                    torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-                )
+                self.dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
             case other:
                 raise ValueError(f"Unsupported precision: {other}")
 
@@ -661,12 +591,8 @@ class EkfacApplicator:
                 dtype=eigen_a[name].dtype,
             )
 
-            proj_shards_wpt = torch.chunk(
-                proj_pi, self.world_size, dim=1
-            )  # (w, p, i/w)
-            result_shard_pi = torch.einsum(
-                "t i, p t-> p i", eigen_a[name], proj_shards_wpt[self.rank]
-            ).contiguous()
+            proj_shards_wpt = torch.chunk(proj_pi, self.world_size, dim=1)  # (w, p, i/w)
+            result_shard_pi = torch.einsum("t i, p t-> p i", eigen_a[name], proj_shards_wpt[self.rank]).contiguous()
 
             dist.all_reduce(result_shard_pi, op=dist.ReduceOp.SUM)
 
@@ -676,9 +602,7 @@ class EkfacApplicator:
 
             random_eigen_a[name] = result_shard_pi[start_row:end_row, :]
 
-        random_activation_path = os.path.join(
-            self.path, "random_activation_eigen_sharded"
-        )
+        random_activation_path = os.path.join(self.path, "random_activation_eigen_sharded")
         os.makedirs(random_activation_path, exist_ok=True)
         save_file(
             random_eigen_a,
@@ -693,12 +617,8 @@ class EkfacApplicator:
                 side="left",
                 dtype=eigen_g[name].dtype,
             )
-            proj_shards_wqr = torch.chunk(
-                proj_qo, self.world_size, dim=1
-            )  # (w, q, o/w)
-            result_shard_qo = torch.einsum(
-                "q r, r o -> q o", proj_shards_wqr[self.rank], eigen_g[name]
-            ).contiguous()
+            proj_shards_wqr = torch.chunk(proj_qo, self.world_size, dim=1)  # (w, q, o/w)
+            result_shard_qo = torch.einsum("q r, r o -> q o", proj_shards_wqr[self.rank], eigen_g[name]).contiguous()
             dist.all_reduce(result_shard_qo, op=dist.ReduceOp.SUM)
 
             shard_size = result_shard_qo.shape[0] // self.world_size
@@ -715,17 +635,12 @@ class EkfacApplicator:
 
         for name in lambda_factor.keys():
             inverse_lambda_factor[name] = (
-                (
-                    lambda_factor[name]
-                    + self.cfg.lambda_damp_factor * lambda_factor[name].mean()
-                )
+                (lambda_factor[name] + self.cfg.lambda_damp_factor * lambda_factor[name].mean())
                 .reciprocal()
                 .to(device="cpu")
             )
 
-        inverse_lambda_path = os.path.join(
-            self.path, "inverse_eigenvalue_correction_sharded"
-        )
+        inverse_lambda_path = os.path.join(self.path, "inverse_eigenvalue_correction_sharded")
         os.makedirs(inverse_lambda_path, exist_ok=True)
         save_file(
             inverse_lambda_factor,
@@ -733,15 +648,9 @@ class EkfacApplicator:
         )
 
         if self.rank == 0:
-            self.logger.info(
-                f"Saved random activation eigenvectors to {random_activation_path}"
-            )
-            self.logger.info(
-                f"Saved random gradient eigenvectors to {random_gradient_path}"
-            )
-            self.logger.info(
-                f"Saved inverse eigenvalue correction to {inverse_lambda_path}"
-            )
+            self.logger.info(f"Saved random activation eigenvectors to {random_activation_path}")
+            self.logger.info(f"Saved random gradient eigenvectors to {random_gradient_path}")
+            self.logger.info(f"Saved inverse eigenvalue correction to {inverse_lambda_path}")
             self.logger.info("-*-" * 50)
 
     def compute_ivhp_sharded(self):
@@ -755,8 +664,7 @@ class EkfacApplicator:
         )
 
         random_eigen_a = load_file(
-            self.path
-            + f"/random_activation_eigen_sharded/shard_{self.rank}.safetensors",
+            self.path + f"/random_activation_eigen_sharded/shard_{self.rank}.safetensors",
             device=f"cuda:{self.rank}",
         )
         random_eigen_g = load_file(
@@ -764,8 +672,12 @@ class EkfacApplicator:
             device=f"cuda:{self.rank}",
         )
         inverse_lambda_factor = load_file(
-            self.path
-            + f"/inverse_eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
+            self.path + f"/inverse_eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
+            device=f"cuda:{self.rank}",
+        )
+
+        lambda_factor = load_file(
+            self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
             device=f"cuda:{self.rank}",
         )
 
@@ -774,37 +686,28 @@ class EkfacApplicator:
             info = json.load(f)
 
         grad_sizes = {
-            name: random_eigen_g[name].shape[0]
-            * self.world_size
-            * random_eigen_a[name].shape[0]
-            * self.world_size
+            name: random_eigen_g[name].shape[0] * self.world_size * random_eigen_a[name].shape[0] * self.world_size
             for name in random_eigen_a
         }
 
         # Allocate structured space ahead of time for the gradients
         grad_buffer = create_index(
-            self.cfg.run_path,
+            self.gradient_ekfac_path,
             num_grads=info["num_grads"],
             grad_sizes=grad_sizes,
-            dtype=np.float16,
+            dtype=np.float32,
         )
 
         if self.rank == 0:
-            self.logger.info(
-                f"Loaded gradients for {len(mmap)} queries and computing IVHP..."
-            )
+            self.logger.info(f"Loaded gradients for {len(mmap)} queries and computing IVHP...")
 
         transformed_gradients = {}
         for k, v in eigen_a.items():
             gradients_noi = torch.from_numpy(mmap[k].copy()).to(
-                device=self.device, dtype=self.dtype
+                device=self.device, dtype=torch.float32
             )  # shape [num_grads, out*in]
-            gradients_noi = gradients_noi.view(
-                -1, eigen_g[k].shape[1], eigen_a[k].shape[1]
-            )
-            transformed_gradients[k] = self._sharded_matmul(
-                gradients_noi=gradients_noi, matrix_cb=v, mult_type="left"
-            )
+            gradients_noi = gradients_noi.view(-1, eigen_g[k].shape[1], eigen_a[k].shape[1])
+            transformed_gradients[k] = self._sharded_matmul(gradients_noi=gradients_noi, matrix_cb=v, mult_type="left")
 
         if self.rank == 0:
             self.logger.debug("Finished G @ Q_A")
@@ -824,10 +727,8 @@ class EkfacApplicator:
         gc.collect()
         torch.cuda.empty_cache()
 
-        for k, v in inverse_lambda_factor.items():
-            self._sharded_mult(
-                matrix_noi=transformed_gradients[k], divisor_ci=v
-            )  # this is in-place
+        for k, v in lambda_factor.items():
+            self._sharded_mult(matrix_noi=transformed_gradients[k], lambda_ci=v)  # this is in-place
 
         if self.rank == 0:
             self.logger.debug("Finished G'/lambda")
@@ -851,18 +752,15 @@ class EkfacApplicator:
         lo = torch.finfo(torch.float16).min
         hi = torch.finfo(torch.float16).max
         for k, v in transformed_gradients.items():
-            grad_buffer[k][:] = (
-                transformed_gradients[k]
-                .to(device="cpu", dtype=torch.float16, non_blocking=True)
-                .flatten(1)
-                .clamp_(lo, hi)
-                .numpy()
-            )
+            transformed_gradients[k] = transformed_gradients[k].to(device="cpu", non_blocking=True).flatten(1).numpy()
+
+            grad_buffer[k][:] = transformed_gradients[k]
 
         grad_buffer.flush()
 
+        os.makedirs(self.gradient_ekfac_path, exist_ok=True)
         if self.rank == 0:
-            self.logger.info(f"Saved IVHP gradients to {self.gradient_path}")
+            self.logger.info(f"Saved IVHP gradients to {self.gradient_ekfac_path}")
 
     def _projection(
         self,
@@ -899,16 +797,12 @@ class EkfacApplicator:
         """
         shard_path = os.path.join(self.path, f"{shard_type}_sharded")
         files = os.listdir(shard_path)
-        assert (
-            len(files) == self.world_size
-        ), f"Expected {self.world_size} shards, found {len(files)} in {self.path}"
+        assert len(files) == self.world_size, f"Expected {self.world_size} shards, found {len(files)} in {self.path}"
 
         full_matrix = []
         for shard_id in range(self.world_size):
             shard_path_rank = os.path.join(shard_path, f"shard_{shard_id}.safetensors")
-            with safe_open(
-                shard_path_rank, framework="pt", device=f"cuda:{self.rank}"
-            ) as f:
+            with safe_open(shard_path_rank, framework="pt", device=f"cuda:{self.rank}") as f:
                 local_matrix = f.get_tensor(name)
 
             full_matrix.append(local_matrix)
@@ -957,21 +851,15 @@ class EkfacApplicator:
 
             dist.broadcast(shard_cb, src=rank_index)
             if mult_type == "left":
-                result_nxy += torch.einsum(
-                    "n o c, c b-> n o b", gradients_shard_wnfg[rank_index], shard_cb
-                )  # [B, c]
+                result_nxy += torch.einsum("n o c, c b-> n o b", gradients_shard_wnfg[rank_index], shard_cb)  # [B, c]
             elif mult_type == "right":
-                result_nxy += torch.einsum(
-                    "c b, n c i -> n b i", shard_cb, gradients_shard_wnfg[rank_index]
-                )
+                result_nxy += torch.einsum("c b, n c i -> n b i", shard_cb, gradients_shard_wnfg[rank_index])
             if self.rank != rank_index:
                 del shard_cb
 
         return result_nxy
 
-    def _sharded_mult(
-        self, matrix_noi: Float[Tensor, "n o i"], divisor_ci: Float[Tensor, "c i"]
-    ):
+    def _sharded_mult(self, matrix_noi: Float[Tensor, "n o i"], lambda_ci: Float[Tensor, "c i"]):
         """
         Sharded in-place element-wise division for distributed training.
         gradients: [n, o, i]
@@ -979,20 +867,37 @@ class EkfacApplicator:
 
         """
 
+        global_lambda_mean = lambda_ci.mean()
+
+        dist.all_reduce(global_lambda_mean, op=dist.ReduceOp.SUM)
+        global_lambda_mean /= self.world_size
+
         for rank_index in range(self.world_size):
             if rank_index == self.rank:
-                shard_cb = divisor_ci
+                shard_ci = lambda_ci
             else:
-                shard_cb = torch.zeros_like(divisor_ci)
+                shard_ci = torch.zeros_like(lambda_ci)
 
-            dist.broadcast(shard_cb, src=rank_index)
+            dist.broadcast(shard_ci, src=rank_index)
 
-            start_row = rank_index * shard_cb.shape[0]
-            end_row = (rank_index + 1) * shard_cb.shape[0]
-            matrix_noi[:, start_row:end_row, :].multiply_(shard_cb.unsqueeze(0))
+            start_row = rank_index * shard_ci.shape[0]
+            end_row = (rank_index + 1) * shard_ci.shape[0]
+            inverse_lambda = (shard_ci + self.cfg.lambda_damp_factor * global_lambda_mean).reciprocal()
+            inverse_lambda = (shard_ci).reciprocal()
+            inverse_lambda = (0 + self.cfg.lambda_damp_factor * global_lambda_mean).reciprocal()
+            if self.rank == 0 and rank_index == 0 and False:
+                self.logger.debug(shard_ci[2, 2].item())
+                self.logger.debug(
+                    f"Applying inverse lambda factor for rows {start_row} to {end_row},\
+                    global mean {global_lambda_mean}), {inverse_lambda[:2, :2]}"
+                )
+            # inverse_lambda = 2
+            # matrix_noi[:, start_row:end_row, :] = matrix_noi[:, start_row:end_row, :] * inverse_lambda
+
+            matrix_noi[:, start_row:end_row, :].mul_(inverse_lambda)
 
             if self.rank != rank_index:
-                del shard_cb
+                del shard_ci
 
     def _sharded_transpose_matmul(
         self,
@@ -1014,9 +919,7 @@ class EkfacApplicator:
             else (matrix_bc.shape[0] * self.world_size, matrix_noi.shape[2])
         )
 
-        result_nxy = torch.zeros(
-            matrix_noi.shape[0], x, y, device=matrix_noi.device, dtype=matrix_noi.dtype
-        )
+        result_nxy = torch.zeros(matrix_noi.shape[0], x, y, device=matrix_noi.device, dtype=matrix_noi.dtype)
 
         for rank_index in range(self.world_size):
             if rank_index == self.rank:
@@ -1030,13 +933,9 @@ class EkfacApplicator:
             end_row = (rank_index + 1) * shard_size
 
             if mult_type == "left":
-                result_nxy[:, :, start_row:end_row].copy_(
-                    torch.einsum("n o i, c i -> n o c", matrix_noi, shard_bc)
-                )
+                result_nxy[:, :, start_row:end_row].copy_(torch.einsum("n o i, c i -> n o c", matrix_noi, shard_bc))
             elif mult_type == "right":
-                result_nxy[:, start_row:end_row, :].copy_(
-                    torch.einsum("b o, n o i -> n b i", shard_bc, matrix_noi)
-                )
+                result_nxy[:, start_row:end_row, :].copy_(torch.einsum("b o, n o i -> n b i", shard_bc, matrix_noi))
             if self.rank != rank_index:
                 del shard_bc
 
