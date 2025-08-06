@@ -44,8 +44,8 @@ def test_phi3():
 
             moments = g.square()
             if p is not None:
-                A = collector.projection(name, p, o, "left")
-                B = collector.projection(name, p, i, "right")
+                A = collector.projection(name, p, o, "left", g.dtype)
+                B = collector.projection(name, p, i, "right", g.dtype)
                 g = A @ g @ B.T
 
             torch.testing.assert_close(g, collected_grad.squeeze(0))
@@ -71,8 +71,8 @@ def test_phi3():
 
                 g = normalizers[name].normalize_(g)
                 if p is not None:
-                    A = collector.projection(name, p, o, "left")
-                    B = collector.projection(name, p, i, "right")
+                    A = collector.projection(name, p, o, "left", g.dtype)
+                    B = collector.projection(name, p, i, "right", g.dtype)
                     g = A @ g @ B.T
 
                 # Compare the normalized gradient with the collected gradient. We use a

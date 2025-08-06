@@ -13,6 +13,5 @@ RUN apt-get update && \
 # Now install notebook tooling with dependencies
 RUN conda install -y ipykernel ipywidgets && conda clean -afy
 
-# Install CuPy and cuVS
-RUN pip install cupy-cuda12x
-RUN pip install cuvs-cu12 --extra-index-url=https://pypi.nvidia.com
+# Install FAISS
+RUN conda install -c pytorch -c nvidia faiss-gpu=1.11.0

@@ -9,9 +9,12 @@ from bergson import Attributor
 def main():
     parser = ArgumentParser()
     parser.add_argument("index", type=str)
-    parser.add_argument("--model", type=str, default="HuggingFaceTB/SmolLM2-135M")
+    parser.add_argument(
+        "--model", type=str, default="HuggingFaceTB/SmolLM2-135M-Instruct"
+    )
     parser.add_argument("--dataset", type=str, default="EleutherAI/SmolLM2-135M-10B")
     parser.add_argument("--text_field", type=str, default="text")
+    parser.add_argument("--unit_norm", action="store_true")
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)

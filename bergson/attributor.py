@@ -7,7 +7,6 @@ from pathlib import Path
 from time import time
 from typing import Generator, Protocol
 
-#import faiss
 import numpy as np
 import torch
 from numpy.lib.recfunctions import structured_to_unstructured
@@ -84,6 +83,8 @@ class FaissConfig:
     num_shards: int = 1
     """The number of shards to build for an index.
         Using more shards reduces peak RAM usage."""
+    nprobe: int = 10
+    """The number of FAISS vector clusters to search if using ANN."""
 
 
 def normalize_grads(
@@ -130,6 +131,8 @@ def gradients_loader(root_dir: str):
 
 
 def index_to_device(index: Index, device: str) -> Index:
+    assert faiss is not None, "Faiss not found, run `pip install faiss-gpu-cu12`..."
+
     if device != "cpu":
         gpus = (
             list(range(torch.cuda.device_count()))
@@ -150,7 +153,7 @@ def load_faiss_index(
     unit_norm: bool,
     faiss_cfg: FaissConfig,
 ) -> list[Index]:
-    import faiss
+    assert faiss is not None, "Faiss not found, run `pip install faiss-gpu-cu12`..."
 
     faiss_path = (
         Path("runs/faiss")
@@ -221,11 +224,13 @@ def load_faiss_index(
             faiss.write_index(index, str(faiss_path / f"{index_idx}.faiss"))
 
         print(f"Built index in {(time() - start) / 60:.2f} minutes.")
-        del buffer, index, grads
+        del buffer, index
 
     shards = []
     for i in range(faiss_cfg.num_shards):
-        shard = faiss.read_index(str(faiss_path / f"{i}.faiss"), faiss.IO_FLAG_MMAP)
+        shard = faiss.read_index(
+            str(faiss_path / f"{i}.faiss"), faiss.IO_FLAG_MMAP | faiss.IO_FLAG_READ_ONLY
+        )
         if not faiss_cfg.mmap_index:
             shard = index_to_device(shard, device)
 
@@ -261,14 +266,12 @@ class Attributor:
         self.device = device
         self.dtype = dtype
         self.unit_norm = unit_norm
-        self.use_faiss = faiss_cfg is not None
+        self.faiss_cfg = faiss_cfg
 
         # Load the gradient processor
         self.processor = GradientProcessor.load(index_path, map_location=device)
 
-    def search(
-        self, queries: Tensor, k: int, nprobe: int = 10
-    ) -> tuple[Tensor, Tensor]:
+    def search(self, queries: Tensor, k: int) -> tuple[Tensor, Tensor]:
         """
         Search for the `k` nearest examples in the index based on the query or queries.
         If fewer than `k` examples are found FAISS will return items with the index -1
@@ -288,7 +291,7 @@ class Attributor:
         if self.unit_norm:
             q /= q.norm(dim=1, keepdim=True)
 
-        if not self.use_faiss:
+        if not self.faiss_cfg:
             return torch.topk(q.to(self.device) @ self.grads.mT, k)
 
         q = q.cpu().numpy()
@@ -298,7 +301,7 @@ class Attributor:
         offset = 0
 
         for index in self.faiss_shards:
-            index.nprobe = nprobe
+            index.nprobe = self.faiss_cfg.nprobe
             distances, indices = index.search(q, k)
 
             indices += offset
@@ -312,8 +315,9 @@ class Attributor:
 
         # Rerank results overfetched from multiple shards
         if len(self.faiss_shards) > 1:
-            indices = np.argsort(distances, axis=1)[:, :k]
-            distances = distances[np.arange(distances.shape[0])[:, None], indices]
+            topk_indices = np.argsort(distances, axis=1)[:, :k]
+            indices = indices[np.arange(indices.shape[0])[:, None], topk_indices]
+            distances = distances[np.arange(distances.shape[0])[:, None], topk_indices]
 
         return torch.from_numpy(distances.squeeze()), torch.from_numpy(
             indices.squeeze()

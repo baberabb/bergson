@@ -141,7 +141,8 @@ def collect_gradients(
                 model.zero_grad()
 
         # It turns out that it's very important for efficiency to write the gradients
-        # sequentially instead of first concatenating them and then writing to a vector.
+        # sequentially instead of first concatenating them, then writing to one vector
+        torch.cuda.synchronize()
         for layer_name in mod_grads.keys():
             grad_buffer[layer_name][indices] = mod_grads[layer_name].numpy()
 
