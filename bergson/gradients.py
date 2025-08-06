@@ -235,6 +235,10 @@ class GradientProcessor:
         with open(cfg_path, "r") as f:
             cfg = json.load(f)
 
+        # Backward compatibility
+        if "projection_type" not in cfg:
+            cfg["projection_type"] = "normal"
+
         # Load normalizers
         norm_state = torch.load(
             norm_path,
