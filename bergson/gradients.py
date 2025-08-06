@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 from abc import ABC, abstractmethod
@@ -8,7 +7,6 @@ from typing import Callable, Literal, Mapping
 
 import torch
 import torch.nn as nn
-import numpy as np
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
@@ -189,7 +187,7 @@ class GradientProcessor:
     Dictionary of preconditioners for each matrix-valued parameter in the model.
     These are applied after the normalization and random projection steps.
     """
-    
+
     fisher_fourth_root: bool = False
     """
     Whether to use the fourth root of the inverse Fisher information matrix when
@@ -203,10 +201,21 @@ class GradientProcessor:
     original shape of the gradients."""
 
     reshape_to_square: bool = False
+    """Whether to reshape the gradients into a nearly square matrix before projection.
+    This is useful when the matrix-valued parameters are far from square, like in the
+    case of LoRA adapters."""
+
     projection_type: Literal["normal", "rademacher"] = "rademacher"
-    
+    """
+    Type of random projection to use for compressing gradients. Can be either "normal"
+    for Gaussian projections or "rademacher" for Rademacher projections, which use a
+    uniform distribution over {-1, 1}.
+    """
+
     def __post_init__(self):
-        self._projection_matrices: dict[tuple[str, Literal["left", "right"]], Tensor] = {}
+        self._projection_matrices: dict[
+            tuple[str, Literal["left", "right"]], Tensor
+        ] = {}
 
     @classmethod
     def load(
@@ -244,7 +253,7 @@ class GradientProcessor:
                 map_location=map_location,
                 weights_only=True,
             ),
-            projection_dim=cfg.get("projection_dim"),
+            **cfg,
         )
 
     def save(self, path: str):
@@ -339,10 +348,12 @@ class GradientCollector(ContextDecorator):
         key = (name, side)
         if key in self.processor._projection_matrices:
             return self.processor._projection_matrices[key]
-        
+
         identifier = f"{name}/{side}"
         device, _ = self.target_info[name]
-        A = create_projection_matrix(identifier, m, n, dtype, device, self.processor.projection_type)
+        A = create_projection_matrix(
+            identifier, m, n, dtype, device, self.processor.projection_type
+        )
         self.processor._projection_matrices[key] = A
         return A
 
