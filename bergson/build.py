@@ -87,7 +87,6 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
     try:
         adapters = model.active_adapters()
     except ValueError:
-        assert cfg.kl_divergence, "KL divergence requires PEFT adapters."
         
         target_modules = None
     else:
@@ -95,7 +94,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
         cfg.reshape_to_square = True
 
         if rank == 0:
-            print("PEFT model detected. Using Adam and reshape_to_square = True")
+            print(f"PEFT model detected. Using Adam and reshape_to_square = {cfg.reshape_to_square}")
 
         target_modules = set()
 
