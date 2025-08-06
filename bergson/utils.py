@@ -1,9 +1,9 @@
 import hashlib
-from typing import Any, Type, TypeVar, cast, Literal
+from typing import Any, Literal, Type, TypeVar, cast
 
 import numpy as np
 import torch
-from torch import nn, Tensor
+from torch import Tensor, nn
 from transformers import PreTrainedModel
 
 T = TypeVar("T")
@@ -29,8 +29,16 @@ def get_layer_list(model: PreTrainedModel) -> nn.ModuleList:
 
     return candidates[0]
 
-def create_projection_matrix(identifier: str, m: int, n: int, dtype: torch.dtype, device: torch.device, projection_type: Literal["normal", "rademacher"] = "normal") -> Tensor:
-    """Create a projection matrix deterministically based on identifier and projection_type."""
+
+def create_projection_matrix(
+    identifier: str,
+    m: int,
+    n: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    projection_type: Literal["normal", "rademacher"] = "normal",
+) -> Tensor:
+    """Create a projection matrix deterministically based on identifier and side."""
     # Seed the PRNG with the name of the layer and what "side" we are projecting
     message = bytes(identifier, "utf-8")
     digest = hashlib.md5(message).digest()
@@ -43,7 +51,7 @@ def create_projection_matrix(identifier: str, m: int, n: int, dtype: torch.dtype
         numpy_rng = np.random.Generator(np.random.PCG64(seed))
         random_bytes = numpy_rng.bytes((m * n + 7) // 8)
         random_bytes = np.frombuffer(random_bytes, dtype=np.uint8)
-        A = np.unpackbits(random_bytes)[:m * n].reshape((m, n))
+        A = np.unpackbits(random_bytes)[: m * n].reshape((m, n))
         A = torch.from_numpy(A).to(device, dtype=dtype)
         A = A.add_(-0.5).mul_(2)
     else:
