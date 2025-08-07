@@ -1,6 +1,7 @@
-import torch
-from pathlib import Path
 import tempfile
+from pathlib import Path
+
+import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from bergson.gradients import (
@@ -13,7 +14,7 @@ from bergson.gradients import (
 
 def test_phi3():
     temp_dir = Path(tempfile.mkdtemp())
-    
+
     config = AutoConfig.from_pretrained("trl-internal-testing/tiny-Phi3ForCausalLM")
     model = AutoModelForCausalLM.from_config(config)
 
@@ -63,11 +64,11 @@ def test_phi3():
             previous_collected_grads = {}
             for do_load in (False, True):
                 if do_load:
-                    processor = GradientProcessor.load(
-                        temp_dir / "processor"
-                    )
+                    processor = GradientProcessor.load(temp_dir / "processor")
                 else:
-                    processor = GradientProcessor(normalizers=normalizers, projection_dim=p)
+                    processor = GradientProcessor(
+                        normalizers=normalizers, projection_dim=p
+                    )
                     processor.save(temp_dir / "processor")
                 collector = GradientCollector(model, closure, processor)
                 with collector:
@@ -87,10 +88,10 @@ def test_phi3():
                         B = collector.projection(name, p, i, "right", g.dtype)
                         g = A @ g @ B.T
 
-                    # Compare the normalized gradient with the collected gradient. We use a
-                    # higher tolerance than the default because there seems to be some
-                    # non-negligible numerical error that accumulates due to the different
-                    # order of operations. Maybe we should look into this more.
+                    # Compare the normalized gradient with the collected gradient. We
+                    # use a higher tolerance than the default because there seems to be
+                    # some non-negligible numerical error that accumulates due to the
+                    # different order of operations. Maybe we should look into this
                     torch.testing.assert_close(
                         g, collected_grad.squeeze(0), atol=1e-4, rtol=1e-4
                     )
