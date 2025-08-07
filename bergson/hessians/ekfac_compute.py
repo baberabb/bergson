@@ -1,6 +1,7 @@
 import gc
 import hashlib
 import json
+import math
 import os
 import random
 from contextlib import nullcontext
@@ -442,18 +443,35 @@ class EkfacComputer:
                     with record_function(f"step_{step}") if self.cfg.profile else nullcontext():
                         with collector:
                             logits = self.model(x).logits
-                            losses = F.cross_entropy(
-                                logits[:, :-1].reshape(-1, logits.size(-1)),
-                                y[:, 1:].flatten(),
-                                reduction="none",
-                            ).reshape_as(y[:, 1:])
+                            logits = logits[:, :-1].reshape(-1, logits.size(-1))
 
-                            masks = y[:, 1:] != -100
-                            denoms = masks.sum(dim=1, dtype=logits.dtype)
-                            losses = losses.sum(1).div(denoms)
+                            if not self.cfg.sample:
+                                losses = F.cross_entropy(
+                                    logits,
+                                    y[:, 1:].flatten(),
+                                    reduction="none",
+                                ).reshape_as(y[:, 1:])
+                            else:
+                                with torch.no_grad():
+                                    probs = torch.nn.functional.softmax(logits.detach(), dim=-1)
+                                    sampled_labels = torch.multinomial(
+                                        probs,
+                                        num_samples=1,
+                                    ).flatten()
+
+                                    del probs
+
+                                losses = F.cross_entropy(
+                                    logits,
+                                    sampled_labels,
+                                    reduction="none",
+                                ).reshape_as(y[:, 1:])
+
+                                masks = y[:, 1:] != -100
+                                denoms = masks.sum(dim=1, dtype=logits.dtype)
+                                losses = losses.sum(1).div(denoms)
 
                             losses.mean().backward()
-
                             self.model.zero_grad()
 
                     if self.cfg.profile:
@@ -542,7 +560,7 @@ class EkfacApplicator:
         self.path = os.path.join(cfg.run_path, "influence_results")
         self.gradient_path = cfg.gradient_path
         self.gradient_ekfac_path = self.gradient_path + "_ekfac"
-
+        os.makedirs(self.gradient_ekfac_path, exist_ok=True)
         self.logger = get_logger("EkfacApplicator", level="DEBUG" if cfg.debug else "INFO")
 
         ### FSDP related
@@ -571,14 +589,9 @@ class EkfacApplicator:
             self.path + f"/gradient_eigen_sharded/shard_{self.rank}.safetensors",
             device=f"cuda:{self.rank}",
         )
-        lambda_factor = load_file(
-            self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
-            device=f"cuda:{self.rank}",
-        )
 
         random_eigen_a = {}
         random_eigen_g = {}
-        inverse_lambda_factor = {}
 
         p = self.cfg.projection_dim
 
@@ -633,24 +646,10 @@ class EkfacApplicator:
             os.path.join(random_gradient_path, f"shard_{self.rank}.safetensors"),
         )
 
-        for name in lambda_factor.keys():
-            inverse_lambda_factor[name] = (
-                (lambda_factor[name] + self.cfg.lambda_damp_factor * lambda_factor[name].mean())
-                .reciprocal()
-                .to(device="cpu")
-            )
-
-        inverse_lambda_path = os.path.join(self.path, "inverse_eigenvalue_correction_sharded")
-        os.makedirs(inverse_lambda_path, exist_ok=True)
-        save_file(
-            inverse_lambda_factor,
-            os.path.join(inverse_lambda_path, f"shard_{self.rank}.safetensors"),
-        )
-
         if self.rank == 0:
             self.logger.info(f"Saved random activation eigenvectors to {random_activation_path}")
             self.logger.info(f"Saved random gradient eigenvectors to {random_gradient_path}")
-            self.logger.info(f"Saved inverse eigenvalue correction to {inverse_lambda_path}")
+
             self.logger.info("-*-" * 50)
 
     def compute_ivhp_sharded(self):
@@ -671,24 +670,27 @@ class EkfacApplicator:
             self.path + f"/random_gradient_eigen_sharded/shard_{self.rank}.safetensors",
             device=f"cuda:{self.rank}",
         )
-        inverse_lambda_factor = load_file(
-            self.path + f"/inverse_eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
-            device=f"cuda:{self.rank}",
-        )
 
         lambda_factor = load_file(
             self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
             device=f"cuda:{self.rank}",
         )
 
-        mmap = load_gradients(self.gradient_path)
-        with open(os.path.join(self.gradient_path, "info.json")) as f:
-            info = json.load(f)
+        for k, v in lambda_factor.items():
+            eigen_a[k] = eigen_a[k].to(dtype=torch.float32)
+            eigen_g[k] = eigen_g[k].to(dtype=torch.float32)
+            random_eigen_a[k] = random_eigen_a[k].to(dtype=torch.float32)
+            random_eigen_g[k] = random_eigen_g[k].to(dtype=torch.float32)
+            lambda_factor[k] = v.to(dtype=torch.float32)
 
         grad_sizes = {
             name: random_eigen_g[name].shape[0] * self.world_size * random_eigen_a[name].shape[0] * self.world_size
             for name in random_eigen_a
         }
+
+        mmap = load_gradients(self.gradient_path)
+        with open(os.path.join(self.gradient_path, "info.json")) as f:
+            info = json.load(f)
 
         # Allocate structured space ahead of time for the gradients
         grad_buffer = create_index(
@@ -701,9 +703,38 @@ class EkfacApplicator:
         if self.rank == 0:
             self.logger.info(f"Loaded gradients for {len(mmap)} queries and computing IVHP...")
 
+        for i in tqdm(
+            range(math.ceil(info["num_grads"] / self.cfg.gradient_batch_size)),
+            desc="IVHP batches",
+            disable=self.rank != 0,
+        ):
+            batch_slice = slice(
+                i * self.cfg.gradient_batch_size, min((i + 1) * self.cfg.gradient_batch_size, info["num_grads"])
+            )
+
+            transformed_gradients_slice = self.compute_ivhp_batch(
+                eigen_a=eigen_a,
+                mmap=mmap,
+                eigen_g=eigen_g,
+                lambda_factor=lambda_factor,
+                random_eigen_a=random_eigen_a,
+                random_eigen_g=random_eigen_g,
+                batch_slice=batch_slice,
+            )
+            torch.cuda.synchronize()
+            for k, v in transformed_gradients_slice.items():
+                v = v.to(device="cpu", non_blocking=True).flatten(1).numpy()
+                grad_buffer[k][batch_slice] = v
+            transformed_gradients_slice.clear()
+
+        grad_buffer.flush()
+        if self.rank == 0:
+            self.logger.info(f"Saved IVHP gradients to {self.gradient_ekfac_path}")
+
+    def compute_ivhp_batch(self, eigen_a, mmap, eigen_g, lambda_factor, random_eigen_a, random_eigen_g, batch_slice):
         transformed_gradients = {}
         for k, v in eigen_a.items():
-            gradients_noi = torch.from_numpy(mmap[k].copy()).to(
+            gradients_noi = torch.from_numpy(mmap[k][batch_slice].copy()).to(
                 device=self.device, dtype=torch.float32
             )  # shape [num_grads, out*in]
             gradients_noi = gradients_noi.view(-1, eigen_g[k].shape[1], eigen_a[k].shape[1])
@@ -718,7 +749,7 @@ class EkfacApplicator:
 
         for k, v in eigen_g.items():
             transformed_gradients[k] = self._sharded_matmul(
-                gradients_noi=transformed_gradients[k], matrix_cb=v, mult_type="right"
+                gradients_noi=transformed_gradients[k], matrix_cb=v, mult_type="right", k=k
             )
 
         if self.rank == 0:
@@ -728,7 +759,7 @@ class EkfacApplicator:
         torch.cuda.empty_cache()
 
         for k, v in lambda_factor.items():
-            self._sharded_mult(matrix_noi=transformed_gradients[k], lambda_ci=v)  # this is in-place
+            self._sharded_mult(matrix_noi=transformed_gradients[k], lambda_ci=v, k=k)  # this is in-place
 
         if self.rank == 0:
             self.logger.debug("Finished G'/lambda")
@@ -747,20 +778,7 @@ class EkfacApplicator:
 
         if self.rank == 0:
             self.logger.debug("Finished P_S.T @ G'/lambda @ P_A.T")
-
-        # TODO: Handle this more elegantly
-        lo = torch.finfo(torch.float16).min
-        hi = torch.finfo(torch.float16).max
-        for k, v in transformed_gradients.items():
-            transformed_gradients[k] = transformed_gradients[k].to(device="cpu", non_blocking=True).flatten(1).numpy()
-
-            grad_buffer[k][:] = transformed_gradients[k]
-
-        grad_buffer.flush()
-
-        os.makedirs(self.gradient_ekfac_path, exist_ok=True)
-        if self.rank == 0:
-            self.logger.info(f"Saved IVHP gradients to {self.gradient_ekfac_path}")
+        return transformed_gradients
 
     def _projection(
         self,
@@ -817,6 +835,7 @@ class EkfacApplicator:
         gradients_noi: Float[Tensor, "n o i"],
         matrix_cb: Float[Tensor, "c b"],
         mult_type: Literal["left", "right"],
+        k=None,
     ):
         """
         Sharded matrix multiplication for distributed training.
@@ -859,7 +878,9 @@ class EkfacApplicator:
 
         return result_nxy
 
-    def _sharded_mult(self, matrix_noi: Float[Tensor, "n o i"], lambda_ci: Float[Tensor, "c i"]):
+    def _sharded_mult(
+        self, matrix_noi: Float[Tensor, "n o i"], lambda_ci: Float[Tensor, "c i"], k: Optional[str] = None
+    ):
         """
         Sharded in-place element-wise division for distributed training.
         gradients: [n, o, i]
@@ -883,19 +904,17 @@ class EkfacApplicator:
             start_row = rank_index * shard_ci.shape[0]
             end_row = (rank_index + 1) * shard_ci.shape[0]
             inverse_lambda = (shard_ci + self.cfg.lambda_damp_factor * global_lambda_mean).reciprocal()
-            inverse_lambda = (shard_ci).reciprocal()
-            inverse_lambda = (0 + self.cfg.lambda_damp_factor * global_lambda_mean).reciprocal()
-            if self.rank == 0 and rank_index == 0 and False:
-                self.logger.debug(shard_ci[2, 2].item())
-                self.logger.debug(
-                    f"Applying inverse lambda factor for rows {start_row} to {end_row},\
-                    global mean {global_lambda_mean}), {inverse_lambda[:2, :2]}"
-                )
-            # inverse_lambda = 2
-            # matrix_noi[:, start_row:end_row, :] = matrix_noi[:, start_row:end_row, :] * inverse_lambda
+            # b, c = 12, 15
+
+            # if self.rank == 0 and k == "layers.1.mlp.dense_h_to_4h" and rank_index == 0:
+            #     self.logger.debug(f"{matrix_noi[0, b, c].item()}")
+            #     self.logger.debug(f"{inverse_lambda[b, c].item()}")
 
             matrix_noi[:, start_row:end_row, :].mul_(inverse_lambda)
-
+            # if self.rank == 0 and k == "layers.1.mlp.dense_h_to_4h" and rank_index == 0:
+            #     self.logger.debug(f"{matrix_noi[0, b, c].item()}")
+            # if self.rank == 0 and k == "layers.1.mlp.dense_h_to_4h" and rank_index == 0:
+            #     self.logger.debug("--" * 50)
             if self.rank != rank_index:
                 del shard_ci
 

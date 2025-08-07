@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Run bergson hessians computation
-python -m bergson.hessians ekfac_merged_medical_train \
+python -m bergson.hessians ekfac_merged_medical_train_sampled \
     --model "/mnt/ssd-1/gpaulo/emergent-misalignment/emergent-misalignment-eleuther/open_models/qwen-14b-merged-medical/checkpoint-793" \
     --dataset "/mnt/ssd-1/gpaulo/emergent-misalignment/emergent-misalignment-eleuther/data/merged-medical-reformatted.jsonl" \
     --prompt_column "prompt" \
@@ -12,7 +12,7 @@ python -m bergson.hessians ekfac_merged_medical_train \
     --normalizer none
 
 
-python -m bergson.hessians ekfac_merged_medical_eval \
+python -m bergson.hessians ekfac_merged_medical_eval_sampled \
     --model "/mnt/ssd-1/gpaulo/emergent-misalignment/emergent-misalignment-eleuther/open_models/qwen-14b-merged-medical/checkpoint-793" \
     --dataset "/mnt/ssd-1/gpaulo/emergent-misalignment/emergent-misalignment-eleuther/open_models/merged_medical_completions_llama.jsonl" \
     --prompt_column "prompt" \

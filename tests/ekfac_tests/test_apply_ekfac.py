@@ -39,6 +39,13 @@ parser.add_argument(
     help="Path to the gradient.",
 )
 
+parser.add_argument(
+    "--gradient_batch_size",
+    type=int,
+    default=1,
+    help="Batch size for gradient computation.",
+)
+
 
 args = parser.parse_args()
 
@@ -67,10 +74,16 @@ def test_gradients(run_path, ground_truth_path):
         if not (ground_truth_tensor.shape == computed_tensor.shape):
             raise ValueError(f"Shape mismatch for key {k}: {ground_truth_tensor.shape} vs {computed_tensor.shape}")
 
-        if not torch.allclose(ground_truth_tensor, computed_tensor, rtol=1e-5, atol=float("inf")):
+        if not torch.allclose(ground_truth_tensor, computed_tensor, rtol=1e-2, atol=0):
             max_diff = torch.max(torch.abs(ground_truth_tensor - computed_tensor)).item()
             mean_diff = torch.mean(torch.abs(ground_truth_tensor - computed_tensor)).item()
             print(f"Gradient mismatch for key {k}: max diff {max_diff}, mean diff {mean_diff}")
+            # relative difference
+            rel_diff = torch.max(torch.abs((ground_truth_tensor - computed_tensor) / ground_truth_tensor)).item()
+            rel_diff_argmax = torch.argmax(torch.abs((ground_truth_tensor - computed_tensor) / ground_truth_tensor))
+            argmax_coords = torch.unravel_index(rel_diff_argmax, ground_truth_tensor.shape[:])
+
+            print(f"Relative difference for key {k}: {rel_diff}, argmax {argmax_coords}")
 
     print("Gradients test done")
 
@@ -100,6 +113,7 @@ def main():
     cfg.world_size = world_size
     cfg.ekfac = True
     cfg.gradient_path = args.gradient_path
+    cfg.gradient_batch_size = args.gradient_batch_size
 
     if not os.path.exists(run_path) or overwrite:
         distributed_computing(

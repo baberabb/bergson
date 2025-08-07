@@ -333,7 +333,7 @@ class GradientCollector(ContextDecorator):
 
         A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
         A /= A.norm(dim=1, keepdim=True)
-        print(name, A.sum())
+
         return A
 
     def __enter__(self):
