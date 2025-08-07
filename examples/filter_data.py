@@ -38,7 +38,7 @@ class FilterConfig:
 
     query_dataset: str = ""
     """
-    Use the mean of this dataset's gradients as the query for attribution 
+    Use the mean of this dataset's gradients as the query for attribution
     filtering. If unspecified the query is calculated over the index dataset.
     """
 
@@ -73,7 +73,7 @@ class FilterConfig:
     """Select the lowest scores."""
 
     sample: bool = False
-    """Filter by sampling from the dataset without replacement with 
+    """Filter by sampling from the dataset without replacement with
     probability proportional to the filtering criteria."""
 
     temperature: float = 0.1
@@ -345,7 +345,7 @@ def main(
         run_name = args.name
 
     if args.filter == "attribution" or args.filter == "loss":
-        dataset = load_gradient_dataset(args.index_dataset)  # .with_format("torch")
+        dataset = load_gradient_dataset(args.index_dataset)
     else:
         dataset = assert_type(Dataset, load_dataset(args.dataset, split="train"))
 
