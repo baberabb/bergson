@@ -64,6 +64,9 @@ class IndexConfig:
     reshape_to_square: bool = False
     """Whether to reshape the gradients to a square matrix."""
 
+    projection_type: Literal["normal", "rademacher"] = "rademacher"
+    """Type of random projections to use for the gradients."""
+
     token_batch_size: int = 8192
     """Batch size in tokens for building the index."""
 

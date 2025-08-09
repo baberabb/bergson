@@ -1,3 +1,6 @@
+import tempfile
+from pathlib import Path
+
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -10,6 +13,8 @@ from bergson.gradients import (
 
 
 def test_phi3():
+    temp_dir = Path(tempfile.mkdtemp())
+
     config = AutoConfig.from_pretrained("trl-internal-testing/tiny-Phi3ForCausalLM")
     model = AutoModelForCausalLM.from_config(config)
 
@@ -56,29 +61,44 @@ def test_phi3():
 
         # Now do it again but this time use the normalizers
         for normalizers in (adafactors, adams):
-            processor = GradientProcessor(normalizers=normalizers, projection_dim=p)
-            collector = GradientCollector(model, closure, processor)
-            with collector:
-                model.zero_grad()
-                model(**inputs).loss.backward()
+            previous_collected_grads = {}
+            for do_load in (False, True):
+                if do_load:
+                    processor = GradientProcessor.load(temp_dir / "processor")
+                else:
+                    processor = GradientProcessor(
+                        normalizers=normalizers, projection_dim=p
+                    )
+                    processor.save(temp_dir / "processor")
+                collector = GradientCollector(model, closure, processor)
+                with collector:
+                    model.zero_grad()
+                    model(**inputs).loss.backward()
 
-            for name, collected_grad in collected_grads.items():
-                layer = model.get_submodule(name)
+                for name, collected_grad in collected_grads.items():
+                    layer = model.get_submodule(name)
 
-                o, i = layer.out_features, layer.in_features
-                g = layer.weight.grad
-                assert g is not None
+                    o, i = layer.out_features, layer.in_features
+                    g = layer.weight.grad
+                    assert g is not None
 
-                g = normalizers[name].normalize_(g)
-                if p is not None:
-                    A = collector.projection(name, p, o, "left", g.dtype)
-                    B = collector.projection(name, p, i, "right", g.dtype)
-                    g = A @ g @ B.T
+                    g = normalizers[name].normalize_(g)
+                    if p is not None:
+                        A = collector.projection(name, p, o, "left", g.dtype)
+                        B = collector.projection(name, p, i, "right", g.dtype)
+                        g = A @ g @ B.T
 
-                # Compare the normalized gradient with the collected gradient. We use a
-                # higher tolerance than the default because there seems to be some
-                # non-negligible numerical error that accumulates due to the different
-                # order of operations. Maybe we should look into this more.
-                torch.testing.assert_close(
-                    g, collected_grad.squeeze(0), atol=1e-4, rtol=1e-4
-                )
+                    # Compare the normalized gradient with the collected gradient. We
+                    # use a higher tolerance than the default because there seems to be
+                    # some non-negligible numerical error that accumulates due to the
+                    # different order of operations. Maybe we should look into this
+                    torch.testing.assert_close(
+                        g, collected_grad.squeeze(0), atol=1e-4, rtol=1e-4
+                    )
+                    # Check gradients are the same after loading and restoring
+                    if do_load:
+                        torch.testing.assert_close(
+                            collected_grad, previous_collected_grads[name]
+                        )
+
+                previous_collected_grads = collected_grads.copy()

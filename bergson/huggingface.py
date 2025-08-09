@@ -221,7 +221,7 @@ class GradientCollectorCallback(TrainerCallback):
 
 
 def prepare_for_gradient_collection(trainer: Trainer):
-    """Mutate the trainer object and its datasets in-place to expose the dataset
+    """Mutate the trainer and its datasets in-place to expose the datasets'
     indices to the gradient collector callback."""
     # Add indices to the training dataset
     trainer.train_dataset = trainer.train_dataset.map(
@@ -240,18 +240,21 @@ def prepare_for_gradient_collection(trainer: Trainer):
                 lambda ex, idx: {"_idx": idx}, with_indices=True
             )
 
-    # Mutate the trainer to retain the indices
-    def retain_idx(collator):
-        @wraps(collator)
-        def wrapper(features):
-            batch = collator(features)
+    if trainer._signature_columns is None:
+        trainer._set_signature_columns_if_needed()
+    trainer._signature_columns.append("_idx")
+
+    if trainer.data_collator:
+        original_collator = trainer.data_collator
+
+        @wraps(original_collator)  # type: ignore
+        def wrapped_collator(features):
+            batch = original_collator(features)
             batch.setdefault("_idx", torch.tensor([f["_idx"] for f in features]))
             return batch
 
-        return wrapper
+        trainer.data_collator = wrapped_collator
 
-    trainer.data_collator = retain_idx(trainer.data_collator)
-    trainer.args.remove_unused_columns = False
     trainer.args.__gradient_collection_enabled__ = True  # type: ignore
 
     return trainer

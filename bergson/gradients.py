@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 from abc import ABC, abstractmethod
@@ -12,7 +11,7 @@ from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
 from .math import reshape_to_nearest_square
-from .utils import assert_type
+from .utils import assert_type, create_projection_matrix
 
 NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
 
@@ -202,11 +201,26 @@ class GradientProcessor:
     original shape of the gradients."""
 
     reshape_to_square: bool = False
+    """Whether to reshape the gradients into a nearly square matrix before projection.
+    This is useful when the matrix-valued parameters are far from square, like in the
+    case of LoRA adapters."""
+
+    projection_type: Literal["normal", "rademacher"] = "rademacher"
+    """
+    Type of random projection to use for compressing gradients. Can be either "normal"
+    for Gaussian projections or "rademacher" for Rademacher projections, which use a
+    uniform distribution over {-1, 1}.
+    """
+
+    def __post_init__(self):
+        self._projection_matrices: dict[
+            tuple[str, Literal["left", "right"]], Tensor
+        ] = {}
 
     @classmethod
     def load(
         cls,
-        path: str,
+        path: os.PathLike,
         *,
         map_location: str | torch.device | None = None,
     ) -> "GradientProcessor":
@@ -220,6 +234,10 @@ class GradientProcessor:
         # Load configuration
         with open(cfg_path, "r") as f:
             cfg = json.load(f)
+
+        # Backward compatibility
+        if "projection_type" not in cfg:
+            cfg["projection_type"] = "normal"
 
         # Load normalizers
         norm_state = torch.load(
@@ -239,10 +257,10 @@ class GradientProcessor:
                 map_location=map_location,
                 weights_only=True,
             ),
-            projection_dim=cfg.get("projection_dim"),
+            **cfg,
         )
 
-    def save(self, path: str):
+    def save(self, path: os.PathLike):
         """
         Save the normalizers and preconditioners to a file.
         """
@@ -331,16 +349,16 @@ class GradientCollector(ContextDecorator):
         dtype: torch.dtype,
     ) -> Tensor:
         """Return the `side` projection matrix for parameter `name` of shape [m, n]."""
-        # Seed the PRNG with the name of the layer and what "side" we are projecting
-        message = bytes(f"{name}/{side}", "utf-8")
-        digest = hashlib.md5(message).digest()
-        seed = int.from_bytes(digest, byteorder="big") % (2**63 - 1)
+        key = (name, side)
+        if key in self.processor._projection_matrices:
+            return self.processor._projection_matrices[key]
 
+        identifier = f"{name}/{side}"
         device, _ = self.target_info[name]
-        prng = torch.Generator(device).manual_seed(seed)
-
-        A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
-        A /= A.norm(dim=1, keepdim=True)
+        A = create_projection_matrix(
+            identifier, m, n, dtype, device, self.processor.projection_type
+        )
+        self.processor._projection_matrices[key] = A
         return A
 
     def __enter__(self):
