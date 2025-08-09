@@ -84,7 +84,8 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
         
         target_modules = None
     else:
-        cfg.normalizer = "adam"
+        if cfg.normalizer != "none":
+            cfg.normalizer = "adam"
         cfg.reshape_to_square = True
 
         if rank == 0:
@@ -105,8 +106,12 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
                     print(f"Adapter parameter '{name}' not found in the model.")
 
                 target_modules.add(name.removeprefix("model."))
+    
+    if cfg.processor_path != "":
+        processor_save_path = cfg.processor_path
+    else:
+        processor_save_path = cfg.run_path
 
-    processor_save_path = cfg.run_path
     if os.path.exists(processor_save_path):
         if rank == 0:
             print(f"Loading processor from '{processor_save_path}'")
