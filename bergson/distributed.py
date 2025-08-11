@@ -62,44 +62,42 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
 def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tuple[AutoModelForCausalLM, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
 
+    # Common configuration
+    device_map = {"": f"cuda:{rank}"} if not cfg.fsdp else "cpu"
+    quantization_config = None
+    if cfg.precision in ("int4", "int8"):
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=cfg.precision == "int4",
+            load_in_8bit=cfg.precision == "int8",
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_quant_storage=dtype,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+
+    # Try to detect PEFT model
     try:
         peft_config = PeftConfig.from_pretrained(cfg.model)
     except ValueError:
+        peft_config = None
+
+    if peft_config is None:
+        # Load regular model
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model,
-            device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
-            quantization_config=(
-                BitsAndBytesConfig(
-                    load_in_4bit=cfg.precision == "int4",
-                    load_in_8bit=cfg.precision == "int8",
-                    bnb_4bit_compute_dtype=dtype,
-                    bnb_4bit_quant_storage=dtype,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_use_double_quant=True,
-                )
-                if cfg.precision in ("int4", "int8")
-                else None
-            ),
+            device_map=device_map,
+            quantization_config=quantization_config,
             torch_dtype=dtype,
             revision=cfg.revision,
         )
         target_modules = None
+
     else:
+        # Load PEFT model
         base_model = AutoModelForCausalLM.from_pretrained(
-            peft_config.base_model_name_or_path,  # type:ignore
-            device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
-            quantization_config=(
-                BitsAndBytesConfig(
-                    load_in_4bit=cfg.precision == "int4",
-                    load_in_8bit=cfg.precision == "int8",
-                    bnb_4bit_compute_dtype=dtype,
-                    bnb_4bit_quant_storage=dtype,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_use_double_quant=True,
-                )
-                if cfg.precision in ("int4", "int8")
-                else None
-            ),
+            peft_config.base_model_name_or_path,  # type: ignore
+            device_map=device_map,
+            quantization_config=quantization_config,
             torch_dtype=dtype,
             revision=cfg.revision,
         )
@@ -107,38 +105,116 @@ def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tup
         model = PeftModel.from_pretrained(
             base_model,
             cfg.model,
-            device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
+            device_map=device_map,
             autocast_adapter_dtype=False,
         )
 
+        # Extract target modules
         target_modules = set()
-
         peft_state_dict = get_peft_model_state_dict(model=model)
-
         for adapter in model.peft_config.keys():
             for name in list(peft_state_dict.keys()):
                 prefix = name.removesuffix(".weight")
-                name = prefix + "." + adapter
-                name = name.removeprefix("base_model.")
+                processed_name = f"{prefix}.{adapter}".removeprefix("base_model.")
                 try:
-                    model.get_submodule(name)
+                    model.get_submodule(processed_name)
+                    target_modules.add(processed_name)
                 except AttributeError:
-                    print(f"Adapter parameter '{name}' not found in the model.")
-                target_modules.add(name)
+                    print(f"Adapter parameter '{processed_name}' not found in the model.")
 
-    embed = model.get_input_embeddings()
-    model.requires_grad_(False)  # Freeze the model
-    embed.requires_grad_(True)  # Make sure backward hooks are called though
+    # Configure gradients
+    model.requires_grad_(False)
+    model.get_input_embeddings().requires_grad_(True)
 
+    # Apply FSDP if needed
     if cfg.fsdp:
-        # Shard each individual transformer layer
         for layer in get_layer_list(model):
             fully_shard(layer)
-
-        # Shard the entire model
         fully_shard(model)
 
     return model, target_modules
+
+
+# def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tuple[AutoModelForCausalLM, set | None]:
+#     """Handle model loading, quantization, FSDP, and PEFT detection"""
+
+#     try:
+#         peft_config = PeftConfig.from_pretrained(cfg.model)
+#     except ValueError:
+#         model = AutoModelForCausalLM.from_pretrained(
+#             cfg.model,
+#             device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
+#             quantization_config=(
+#                 BitsAndBytesConfig(
+#                     load_in_4bit=cfg.precision == "int4",
+#                     load_in_8bit=cfg.precision == "int8",
+#                     bnb_4bit_compute_dtype=dtype,
+#                     bnb_4bit_quant_storage=dtype,
+#                     bnb_4bit_quant_type="nf4",
+#                     bnb_4bit_use_double_quant=True,
+#                 )
+#                 if cfg.precision in ("int4", "int8")
+#                 else None
+#             ),
+#             torch_dtype=dtype,
+#             revision=cfg.revision,
+#         )
+#         target_modules = None
+#     else:
+#         base_model = AutoModelForCausalLM.from_pretrained(
+#             peft_config.base_model_name_or_path,  # type:ignore
+#             device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
+#             quantization_config=(
+#                 BitsAndBytesConfig(
+#                     load_in_4bit=cfg.precision == "int4",
+#                     load_in_8bit=cfg.precision == "int8",
+#                     bnb_4bit_compute_dtype=dtype,
+#                     bnb_4bit_quant_storage=dtype,
+#                     bnb_4bit_quant_type="nf4",
+#                     bnb_4bit_use_double_quant=True,
+#                 )
+#                 if cfg.precision in ("int4", "int8")
+#                 else None
+#             ),
+#             torch_dtype=dtype,
+#             revision=cfg.revision,
+#         )
+
+#         model = PeftModel.from_pretrained(
+#             base_model,
+#             cfg.model,
+#             device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
+#             autocast_adapter_dtype=False,
+#         )
+
+#         target_modules = set()
+
+#         peft_state_dict = get_peft_model_state_dict(model=model)
+
+#         for adapter in model.peft_config.keys():
+#             for name in list(peft_state_dict.keys()):
+#                 prefix = name.removesuffix(".weight")
+#                 name = prefix + "." + adapter
+#                 name = name.removeprefix("base_model.")
+#                 try:
+#                     model.get_submodule(name)
+#                 except AttributeError:
+#                     print(f"Adapter parameter '{name}' not found in the model.")
+#                 target_modules.add(name)
+
+#     embed = model.get_input_embeddings()
+#     model.requires_grad_(False)  # Freeze the model
+#     embed.requires_grad_(True)  # Make sure backward hooks are called though
+
+#     if cfg.fsdp:
+#         # Shard each individual transformer layer
+#         for layer in get_layer_list(model):
+#             fully_shard(layer)
+
+#         # Shard the entire model
+#         fully_shard(model)
+
+#     return model, target_modules
 
 
 def create_processor(
