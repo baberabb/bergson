@@ -55,7 +55,7 @@ class IndexConfig:
     fsdp: bool = False
     """Whether to use Fully Sharded Data Parallel (FSDP) for collecing gradients."""
 
-    precision: Literal["bf16", "fp16", "fp32", "int4", "int8"] = "bf16"
+    precision: Literal["bf16", "fp16", "fp32", "int4", "int8"] = "fp32"
     """Precision to use for the model parameters."""
 
     projection_dim: int = 16

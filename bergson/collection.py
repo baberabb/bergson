@@ -45,14 +45,16 @@ def collect_gradients(
     preconditioners = {}
 
     # TODO: Handle this more elegantly
-    lo = torch.finfo(torch.float16).min
-    hi = torch.finfo(torch.float16).max
+    dtype = torch.float32 if model.dtype == torch.float32 else torch.float16
+    np_dtype = np.float32 if dtype == torch.float32 else np.float16
+    lo = torch.finfo(dtype).min
+    hi = torch.finfo(dtype).max
 
     def callback(name: str, g: torch.Tensor):
         g = g.flatten(1).clamp_(lo, hi)
 
         # Asynchronously move the gradient to CPU and convert to fp16
-        mod_grads[name] = g.to(device="cpu", dtype=torch.float16, non_blocking=True)
+        mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
 
         # Compute the outer product of the flattened gradient
         if not skip_preconditioners:
@@ -75,13 +77,13 @@ def collect_gradients(
 
     # Allocate structured space ahead of time for the gradients
     grad_buffer = create_index(
-        path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np.float16
+        path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np_dtype
     )
 
     per_doc_losses = torch.full(
         (len(data),),
         device=model.device,
-        dtype=torch.float16,
+        dtype=dtype,
         fill_value=0.0,
     )
 
@@ -168,7 +170,7 @@ def collect_gradients(
         data = data.add_column(
             "loss",
             per_doc_losses.cpu().numpy(),
-            feature=Value("float16"),
+            feature=Value("float16" if dtype == torch.float16 else "float32"),
             new_fingerprint="loss",
         )
         if kl_divergence:
