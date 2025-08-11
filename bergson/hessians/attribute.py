@@ -21,7 +21,7 @@ device = "cuda:1"
 # %%
 base_path = "/mnt/ssd-1/gpaulo/emergent-misalignment/emergent-misalignment-eleuther/data/"
 index_dataset = load_dataset("json", data_files=f"{base_path}merged-medical-reformatted.jsonl")["train"]
-index_path = "/mnt/ssd-1/gpaulo/emergent-misalignment/qwen14_merged_medical_proj16/merged_medical"
+index_path = "/mnt/ssd-1/gpaulo/emergent-misalignment/qwen14_merged_medical_proj16/merged_medical_no_normalizer"
 queries_path = "/mnt/ssd-1/louis/emergent_misalignment/test_query_ekfac"
 
 # %%
@@ -37,7 +37,7 @@ names = queries.dtype.names
 normalize = args.normalize
 
 attribution_dict = {}
-output_path = "/mnt/ssd-1/louis/emergent_misalignment/test_query_ekfac_attribution"
+output_path = "/mnt/ssd-1/louis/emergent_misalignment/test_query_ekfac_attribution_no_normalizer"
 if normalize:
     output_path += "_unit_norm"
 os.makedirs(output_path, exist_ok=True)

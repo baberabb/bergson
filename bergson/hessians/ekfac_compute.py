@@ -559,7 +559,9 @@ class EkfacApplicator:
         self.cfg = cfg
         self.path = os.path.join(cfg.run_path, "influence_results")
         self.gradient_path = cfg.gradient_path
-        self.gradient_ekfac_path = self.gradient_path + "_ekfac"
+        # hash of self.path
+        path_hash = hashlib.md5(self.path.encode("utf-8")).hexdigest()
+        self.gradient_ekfac_path = self.gradient_path + path_hash
         os.makedirs(self.gradient_ekfac_path, exist_ok=True)
         self.logger = get_logger("EkfacApplicator", level="DEBUG" if cfg.debug else "INFO")
 

@@ -6,7 +6,7 @@ python -m bergson.hessians ekfac_merged_medical_train_sampled_DELETE \
     --dataset "/mnt/ssd-1/gpaulo/emergent-misalignment/emergent-misalignment-eleuther/data/merged-medical-reformatted.jsonl" \
     --prompt_column "prompt" \
     --completion_column "completion" \
-    --token_batch_size "512" \
+    --token_batch_size "1024" \
     --precision bf16 \
     --ekfac \
     --normalizer none \

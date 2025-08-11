@@ -13,6 +13,7 @@ from datasets import (
     IterableDatasetDict,
     load_dataset,
 )
+from peft import PeftConfig, PeftModel, get_peft_model_state_dict
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from torch.distributed.fsdp import fully_shard
 from tqdm.auto import tqdm
@@ -60,52 +61,70 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
 
 def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tuple[AutoModelForCausalLM, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.model,
-        device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
-        quantization_config=(
-            BitsAndBytesConfig(
-                load_in_4bit=cfg.precision == "int4",
-                load_in_8bit=cfg.precision == "int8",
-                bnb_4bit_compute_dtype=dtype,
-                bnb_4bit_quant_storage=dtype,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True,
-            )
-            if cfg.precision in ("int4", "int8")
-            else None
-        ),
-        torch_dtype=dtype,
-        revision=cfg.revision,
-    )
 
-    # Check for PEFT adapters
     try:
-        adapters = model.active_adapters()
+        peft_config = PeftConfig.from_pretrained(cfg.model)
     except ValueError:
+        model = AutoModelForCausalLM.from_pretrained(
+            cfg.model,
+            device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
+            quantization_config=(
+                BitsAndBytesConfig(
+                    load_in_4bit=cfg.precision == "int4",
+                    load_in_8bit=cfg.precision == "int8",
+                    bnb_4bit_compute_dtype=dtype,
+                    bnb_4bit_quant_storage=dtype,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                )
+                if cfg.precision in ("int4", "int8")
+                else None
+            ),
+            torch_dtype=dtype,
+            revision=cfg.revision,
+        )
         target_modules = None
     else:
-        if not cfg.ekfac:
-            cfg.normalizer = "adam"
-            cfg.reshape_to_square = True
-            if rank == 0:
-                print("PEFT model detected. Using Adam and reshape_to_square = True")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            peft_config.base_model_name_or_path,  # type:ignore
+            device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
+            quantization_config=(
+                BitsAndBytesConfig(
+                    load_in_4bit=cfg.precision == "int4",
+                    load_in_8bit=cfg.precision == "int8",
+                    bnb_4bit_compute_dtype=dtype,
+                    bnb_4bit_quant_storage=dtype,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                )
+                if cfg.precision in ("int4", "int8")
+                else None
+            ),
+            torch_dtype=dtype,
+            revision=cfg.revision,
+        )
+
+        model = PeftModel.from_pretrained(
+            base_model,
+            cfg.model,
+            device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
+            autocast_adapter_dtype=False,
+        )
 
         target_modules = set()
 
-        for adapter_name in adapters:
-            state = model.get_adapter_state_dict(adapter_name)
+        peft_state_dict = get_peft_model_state_dict(model=model)
 
-            for name in state:
+        for adapter in model.peft_config.keys():
+            for name in list(peft_state_dict.keys()):
                 prefix = name.removesuffix(".weight")
-                name = prefix + "." + adapter_name
-
+                name = prefix + "." + adapter
+                name = name.removeprefix("base_model.")
                 try:
                     model.get_submodule(name)
                 except AttributeError:
                     print(f"Adapter parameter '{name}' not found in the model.")
-
-                target_modules.add(name.removeprefix("model."))
+                target_modules.add(name)
 
     embed = model.get_input_embeddings()
     model.requires_grad_(False)  # Freeze the model
