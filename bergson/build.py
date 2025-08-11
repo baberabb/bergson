@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from datasets import Dataset, IterableDataset
+from peft import PeftConfig, PeftModel, get_peft_model_state_dict
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from torch.distributed.fsdp import fully_shard
 from tqdm.auto import tqdm
@@ -46,24 +47,67 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
         case other:
             raise ValueError(f"Unsupported precision: {other}")
 
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.model,
-        device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
-        quantization_config=(
-            BitsAndBytesConfig(
-                load_in_4bit=cfg.precision == "int4",
-                load_in_8bit=cfg.precision == "int8",
-                bnb_4bit_compute_dtype=dtype,
-                bnb_4bit_quant_storage=dtype,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True,
-            )
-            if cfg.precision in ("int4", "int8")
-            else None
-        ),
-        torch_dtype=dtype,
-        revision=cfg.revision,
-    )
+    device_map = {"": f"cuda:{rank}"} if not cfg.fsdp else "cpu"
+
+    quantization_config = None
+    if cfg.precision in ("int4", "int8"):
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=cfg.precision == "int4",
+            load_in_8bit=cfg.precision == "int8",
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_quant_storage=dtype,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+
+    # Try to detect PEFT model
+    try:
+        peft_config = PeftConfig.from_pretrained(cfg.model)
+    except ValueError:
+        peft_config = None
+
+    if peft_config is None:
+        # Load regular model
+        model = AutoModelForCausalLM.from_pretrained(
+            cfg.model,
+            device_map=device_map,
+            quantization_config=quantization_config,
+            torch_dtype=dtype,
+            revision=cfg.revision,
+        )
+        target_modules = None
+
+    else:
+        # Load PEFT model
+        base_model = AutoModelForCausalLM.from_pretrained(
+            peft_config.base_model_name_or_path,  # type: ignore
+            device_map=device_map,
+            quantization_config=quantization_config,
+            torch_dtype=dtype,
+            revision=cfg.revision,
+        )
+
+        model = PeftModel.from_pretrained(
+            base_model,
+            cfg.model,
+            device_map=device_map,
+            autocast_adapter_dtype=False,
+        )
+
+        # Extract target modules
+        target_modules = set()
+        peft_state_dict = get_peft_model_state_dict(model=model)
+        for adapter in model.peft_config.keys():
+            for name in list(peft_state_dict.keys()):
+                prefix = name.removesuffix(".weight")
+                processed_name = f"{prefix}.{adapter}".removeprefix("base_model.")
+                try:
+                    model.get_submodule(processed_name)
+                    target_modules.add(processed_name)
+                except AttributeError:
+                    print(
+                        f"Adapter parameter '{processed_name}' not found in the model."
+                    )
 
     embed = model.get_input_embeddings()
     model.requires_grad_(False)  # Freeze the model
@@ -77,42 +121,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
         # Shard the entire model
         fully_shard(model)
 
-    # Check for PEFT adapters
-    try:
-        adapters = model.active_adapters()
-    except ValueError:
-        
-        target_modules = None
-    else:
-        if cfg.normalizer != "none":
-            cfg.normalizer = "adam"
-        cfg.reshape_to_square = True
-
-        if rank == 0:
-            print(f"PEFT model detected. Using Adam and reshape_to_square = {cfg.reshape_to_square}")
-
-        target_modules = set()
-
-        for adapter_name in adapters:
-            state = model.get_adapter_state_dict(adapter_name)
-
-            for name in state:
-                prefix = name.removesuffix(".weight")
-                name = prefix + "." + adapter_name
-
-                try:
-                    model.get_submodule(name)
-                except AttributeError:
-                    print(f"Adapter parameter '{name}' not found in the model.")
-
-                target_modules.add(name.removeprefix("model."))
-    
-    if cfg.processor_path != "":
-        processor_save_path = cfg.processor_path
-    else:
-        processor_save_path = cfg.run_path
-
-    if os.path.exists(processor_save_path):
+    if os.path.exists(cfg.processor_path):
         if rank == 0:
             print(f"Loading processor from '{processor_save_path}'")
 
