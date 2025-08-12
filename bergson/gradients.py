@@ -220,7 +220,7 @@ class GradientProcessor:
     @classmethod
     def load(
         cls,
-        path: os.PathLike,
+        path: str,
         *,
         map_location: str | torch.device | None = None,
     ) -> "GradientProcessor":
@@ -260,7 +260,7 @@ class GradientProcessor:
             **cfg,
         )
 
-    def save(self, path: os.PathLike):
+    def save(self, path: str):
         """
         Save the normalizers and preconditioners to a file.
         """

@@ -1,6 +1,7 @@
 import os
 import socket
 from datetime import timedelta
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -10,7 +11,12 @@ from peft import PeftConfig, PeftModel, get_peft_model_state_dict
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from torch.distributed.fsdp import fully_shard
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    PreTrainedModel,
+)
 
 from .collection import collect_gradients, fit_normalizers
 from .data import IndexConfig, allocate_batches, load_data_string, tokenize
@@ -44,11 +50,12 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             dtype = torch.float32
         case "int4" | "int8":
             dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        case "auto":
+            dtype = "auto"
         case other:
             raise ValueError(f"Unsupported precision: {other}")
 
     device_map = {"": f"cuda:{rank}"} if not cfg.fsdp else "cpu"
-
     quantization_config = None
     if cfg.precision in ("int4", "int8"):
         quantization_config = BitsAndBytesConfig(
@@ -108,6 +115,12 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
                     print(
                         f"Adapter parameter '{processed_name}' not found in the model."
                     )
+
+        # Hack for type checking
+        model = cast(PreTrainedModel, model)
+
+    if rank == 0:
+        print(f"Model loaded with dtype: {model.dtype}")
 
     embed = model.get_input_embeddings()
     model.requires_grad_(False)  # Freeze the model
@@ -221,7 +234,7 @@ def dist_worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
 
 def build_gradient_dataset(cfg: IndexConfig):
     # Do all the data loading and preprocessing on the main process
-    ds = load_data_string(cfg.data.dataset, streaming=cfg.streaming)
+    ds = load_data_string(cfg.data.dataset, cfg.data.split, streaming=cfg.streaming)
 
     remove_columns = ds.column_names if cfg.drop_columns else None
 

@@ -258,7 +258,9 @@ def main(args: IndexConfig):
         completion_column=args.data.completion_column,
         conversation_column=args.data.conversation_column,
     )
-    dataset = load_data_string(args.data.dataset, streaming=args.streaming)
+    dataset = load_data_string(
+        args.data.dataset, args.data.split, streaming=args.streaming
+    )
     dataset = dataset.map(
         tokenize,
         batched=True,
