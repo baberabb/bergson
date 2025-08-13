@@ -1,12 +1,14 @@
 import math
 import os
 from functools import wraps
+from typing import Sized
 
 import numpy as np
 import torch
 import torch.distributed as dist
 from numpy.typing import DTypeLike
 from torch import Tensor
+from torch.utils.data import DataLoader
 from transformers.trainer import Trainer
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
@@ -52,22 +54,17 @@ class GradientCollectorCallback(TrainerCallback):
         self.eval_indices: dict[str, list[int]] = {}
 
         self.mod_grads = {}
+        self.batch_indices: Tensor | None = None
 
-    def write_grads(self, grad_buffer: np.memmap, indices: list[int]):
+    def write_grads(self, grad_buffer: np.memmap):
+        # Ensure the nonblocking copies are all finished
+        torch.cuda.synchronize()
         for layer_name in self.mod_grads.keys():
-            torch.cuda.synchronize()
-            grad_buffer[layer_name][indices] += self.mod_grads[layer_name].numpy()
+            grad_buffer[layer_name][self.batch_indices] += self.mod_grads[
+                layer_name
+            ].numpy()
 
         self.mod_grads.clear()
-
-    def on_init_end(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
-        pass
 
     def on_train_begin(
         self,
@@ -95,13 +92,22 @@ class GradientCollectorCallback(TrainerCallback):
         self.grad_sizes = {
             name: math.prod(s) for name, s in self.collector.shapes().items()
         }
+
+        # Record forward and backward hooks
         self.collector.__enter__()
+        self.fwd_handle = model.register_forward_pre_hook(
+            self.on_forward_begin,
+            with_kwargs=True,
+        )
 
     def on_epoch_begin(
         self,
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
+        *,
+        eval_dataloader: DataLoader | dict[str, DataLoader],
+        train_dataloader: DataLoader,
         **kwargs,
     ):
         epoch = int(state.epoch or 0)
@@ -111,21 +117,20 @@ class GradientCollectorCallback(TrainerCallback):
 
         epoch_suffix = "" if self.accumulate_grads else f"/epoch_{epoch}"
 
+        ds = train_dataloader.dataset
+        if not isinstance(ds, Sized):
+            raise ValueError("Dataset must be sized for gradient collection")
+
+        self.num_examples = len(ds)
         if dist.is_initialized():
             num_examples = torch.tensor(
-                [len(kwargs["train_dataloader"].dataset)],
+                [self.num_examples],
                 device="cuda",
                 dtype=torch.int32,
             )
             dist.all_reduce(num_examples, op=dist.ReduceOp.SUM)
             self.num_examples = int(num_examples.item())
-        else:
-            self.num_examples = len(kwargs["train_dataloader"].dataset)
 
-        # Set up the gradient buffers for the training dataset
-        self.train_indices = [
-            i.item() for batch in kwargs["train_dataloader"] for i in batch["_idx"]
-        ]
         self.train_grad_buffer = create_index(
             os.path.join(self.path, "train" + epoch_suffix),
             num_grads=self.num_examples,
@@ -135,12 +140,12 @@ class GradientCollectorCallback(TrainerCallback):
         self.train_step_idx = 0
 
         # Set up the gradient buffers for the evaluation datasets
-        if kwargs["eval_dataloader"] is None:
+        if eval_dataloader is None:
             return
-        elif isinstance(kwargs["eval_dataloader"], dict):
-            eval_datasets = kwargs["eval_dataloader"]
+        elif isinstance(eval_dataloader, dict):
+            eval_datasets = eval_dataloader
         else:
-            eval_datasets = {"eval": kwargs["eval_dataloader"]}
+            eval_datasets = {"eval": eval_dataloader}
 
         for dataset_name, dataloader in eval_datasets.items():
             self.eval_grad_buffers[dataset_name] = create_index(
@@ -171,6 +176,11 @@ class GradientCollectorCallback(TrainerCallback):
         for eval_grad_buffer in self.eval_grad_buffers.values():
             eval_grad_buffer.flush()
 
+    def on_forward_begin(self, _: torch.nn.Module, args, **kwargs):
+        # Record the original indices of this batch
+        self.batch_indices = kwargs.pop("_idx")
+        return args, kwargs
+
     def on_module_backward(self, name: str, g: Tensor):
         lo = torch.finfo(torch.float16).min
         hi = torch.finfo(torch.float16).max
@@ -190,12 +200,7 @@ class GradientCollectorCallback(TrainerCallback):
     ):
         """Called at the end of each training step.
         If using gradient accumulation, one training step might take several inputs."""
-        indices = self.train_indices[
-            self.train_step_idx : self.train_step_idx + args.per_device_train_batch_size
-        ]
-        self.train_step_idx += args.per_device_train_batch_size
-
-        self.write_grads(self.train_grad_buffer, indices)
+        self.write_grads(self.train_grad_buffer)
 
     def on_step_end(
         self,
@@ -236,15 +241,7 @@ class GradientCollectorCallback(TrainerCallback):
 
     def on_prediction_step(self, args, state, control, **kwargs):
         dataset_name = kwargs["inputs"]["dataset_name"]
-
-        indices = self.eval_indices[dataset_name][
-            self.eval_step_idxs[dataset_name] : self.eval_step_idxs[dataset_name]
-            + args.per_device_eval_batch_size
-        ]
-
-        self.eval_step_idxs[dataset_name] += args.per_device_eval_batch_size
-
-        self.write_grads(self.eval_grad_buffers[dataset_name], indices)
+        self.write_grads(self.eval_grad_buffers[dataset_name])
 
     def on_train_end(
         self,
@@ -255,6 +252,7 @@ class GradientCollectorCallback(TrainerCallback):
     ):
         assert self.collector is not None
         self.collector.__exit__(None, None, None)
+        self.fwd_handle.remove()
 
 
 def prepare_for_gradient_collection(trainer: Trainer):
@@ -277,8 +275,7 @@ def prepare_for_gradient_collection(trainer: Trainer):
                 lambda ex, idx: {"_idx": idx}, with_indices=True
             )
 
-    if trainer._signature_columns is None:
-        trainer._set_signature_columns_if_needed()
+    trainer._set_signature_columns_if_needed()
     trainer._signature_columns.append("_idx")
 
     if trainer.data_collator:
