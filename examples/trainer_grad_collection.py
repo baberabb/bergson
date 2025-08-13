@@ -9,7 +9,7 @@ from datasets import Dataset
 from simple_parsing import parse
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import SFTConfig, SFTTrainer, setup_chat_format
+from trl import SFTConfig, SFTTrainer
 
 from bergson.data import (
     DataConfig,
@@ -53,11 +53,9 @@ def worker(
         revision=cfg.revision,
         device_map=f"cuda:{rank}",
     )
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model, max_length=8192)
-    model, tokenizer = setup_chat_format(model, tokenizer)
 
     callback = GradientCollectorCallback(
-        f"examples/runs/gradients/{run_name}",
+        f"{run_name}/gradients",
         accumulate_grads=True,
     )
 
@@ -68,12 +66,12 @@ def worker(
         callbacks=[callback],
         args=SFTConfig(
             max_length=8192,
-            output_dir=f"examples/runs/{run_name}",
-            per_device_train_batch_size=1,
+            output_dir=run_name,
+            per_device_train_batch_size=2,
             per_device_eval_batch_size=1,
-            gradient_accumulation_steps=32,
-            gradient_checkpointing=True,
-            num_train_epochs=2,
+            gradient_accumulation_steps=1,
+            # gradient_checkpointing=True,
+            num_train_epochs=1,
             logging_steps=10,
             eval_steps=20,
             save_total_limit=3,
@@ -111,18 +109,7 @@ def main(args: IndexConfig):
     seed = 0
     set_seeds(seed)
 
-    run_name = (
-        f"{args.model.split('/')[-1]}-{args.data.dataset.split('/')[-1]}" f"-s={seed}"
-    )
-
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        torch_dtype="bfloat16",
-        revision=args.revision,
-        device_map="auto",
-    )
     tokenizer = AutoTokenizer.from_pretrained(args.model, max_length=8192)
-    model, tokenizer = setup_chat_format(model, tokenizer)
 
     # Create DataConfig for tokenization
     data_config = DataConfig(
@@ -148,7 +135,7 @@ def main(args: IndexConfig):
     if world_size <= 1:
         # Run the worker directly if no distributed training is needed. This is great
         # for debugging purposes.
-        worker(0, 1, args, train, eval, run_name)
+        worker(0, 1, args, train, eval, args.run_path)
     else:
         # Set up multiprocessing and distributed training
         mp.set_sharing_strategy("file_system")
@@ -162,7 +149,7 @@ def main(args: IndexConfig):
             "train",
             dist_worker,
             args={
-                i: (i, world_size, args, train, eval, run_name)
+                i: (i, world_size, args, train, eval, args.run_path)
                 for i in range(world_size)
             },
             envs={

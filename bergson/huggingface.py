@@ -59,10 +59,8 @@ class GradientCollectorCallback(TrainerCallback):
     def write_grads(self, grad_buffer: np.memmap):
         # Ensure the nonblocking copies are all finished
         torch.cuda.synchronize()
-        for layer_name in self.mod_grads.keys():
-            grad_buffer[layer_name][self.batch_indices] += self.mod_grads[
-                layer_name
-            ].numpy()
+        for layer_name, g in self.mod_grads.items():
+            grad_buffer[layer_name][self.batch_indices, :] = g.numpy()
 
         self.mod_grads.clear()
 
@@ -176,9 +174,9 @@ class GradientCollectorCallback(TrainerCallback):
         for eval_grad_buffer in self.eval_grad_buffers.values():
             eval_grad_buffer.flush()
 
-    def on_forward_begin(self, _: torch.nn.Module, args, **kwargs):
+    def on_forward_begin(self, _: torch.nn.Module, args, kwargs: dict):
         # Record the original indices of this batch
-        self.batch_indices = kwargs.pop("_idx")
+        self.batch_indices = kwargs.pop("_idx").to("cpu", non_blocking=True)
         return args, kwargs
 
     def on_module_backward(self, name: str, g: Tensor):
@@ -227,14 +225,23 @@ class GradientCollectorCallback(TrainerCallback):
         # Read normalizers off of the optimizer state. We need to figure out
         # what type of optimizer this is first.
         for group in optimizer.param_groups:
+            lr_sqrt = group["lr"] ** 0.5
+
             for param in group["params"]:
+                name = param_to_name[param]
+                if name not in self.collector.target_info:
+                    continue
+
                 p_state = optimizer.state[param]
 
                 # Adam-like optimizer
                 if (eas := p_state.get("exp_avg_sq")) is not None:
                     norm = AdamNormalizer(eas).to_adafactor()
-                    name = param_to_name[param]
 
+                    # Scale the gradient by the current learning rate. It's factorized
+                    # so we multiply each factor by the square root of the LR.
+                    norm.row *= lr_sqrt
+                    norm.col *= lr_sqrt
                     normalizers[name] = norm
 
         proc.normalizers = normalizers
