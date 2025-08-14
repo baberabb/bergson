@@ -18,11 +18,9 @@ from bergson import (
     GradientCollector,
     GradientProcessor,
 )
-from bergson.collection import fit_normalizers
 from bergson.data import (
     DataConfig,
     IndexConfig,
-    allocate_batches,
     load_data_string,
     tokenize,
 )
@@ -100,26 +98,8 @@ def configure_gradient_collection(
             map_location=f"cuda:{rank}",
         )
     else:
-        if cfg.normalizer != "none":
-            # Evenly sample `stats_sample_size` examples to compute statistics
-            if cfg.stats_sample_size is not None and cfg.stats_sample_size < len(train):
-                stats_ds = train.shuffle(seed=0).select(range(cfg.stats_sample_size))
-            else:
-                stats_ds = train
-
-            stats_ds.set_format(None)
-            normalizers = fit_normalizers(
-                model,
-                stats_ds,
-                batches=allocate_batches(stats_ds["length"], cfg.token_batch_size),
-                kind=cfg.normalizer,
-                target_modules=target_modules,
-            )
-        else:
-            normalizers = {}
-
         processor = GradientProcessor(
-            normalizers,
+            {},
             fisher_fourth_root=cfg.fisher_fourth_root,
             projection_dim=cfg.projection_dim or None,
             reshape_to_square=cfg.reshape_to_square,

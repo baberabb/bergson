@@ -18,7 +18,7 @@ from transformers import (
     PreTrainedModel,
 )
 
-from .collection import collect_gradients, fit_normalizers
+from .collection import collect_gradients
 from .data import IndexConfig, allocate_batches, load_data_string, tokenize
 from .gradients import GradientProcessor
 from .utils import assert_type, get_layer_list
@@ -143,38 +143,8 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             map_location=f"cuda:{rank}",
         )
     else:
-        if cfg.normalizer != "none":
-            # Evenly sample `stats_sample_size` examples to compute statistics
-            if isinstance(ds, Dataset):
-                if cfg.stats_sample_size is not None and cfg.stats_sample_size < len(
-                    ds
-                ):
-                    stats_ds = ds.shuffle(seed=0).select(range(cfg.stats_sample_size))
-                else:
-                    stats_ds = ds
-            else:
-                if cfg.stats_sample_size is not None:
-                    stats_iterable_ds = ds.shuffle(seed=0).take(cfg.stats_sample_size)
-                    stats_ds = assert_type(
-                        Dataset, Dataset.from_generator(lambda: iter(stats_iterable_ds))
-                    )
-                else:
-                    stats_ds = assert_type(
-                        Dataset, Dataset.from_generator(lambda: iter(ds))
-                    )
-
-            normalizers = fit_normalizers(
-                model,
-                stats_ds,
-                batches=allocate_batches(stats_ds["length"][:], cfg.token_batch_size),
-                kind=cfg.normalizer,
-                target_modules=target_modules,
-            )
-        else:
-            normalizers = {}
-
         processor = GradientProcessor(
-            normalizers,
+            {},
             fisher_fourth_root=cfg.fisher_fourth_root,
             projection_dim=cfg.projection_dim or None,
             reshape_to_square=cfg.reshape_to_square,

@@ -1,6 +1,4 @@
 import math
-import random
-from typing import Literal
 
 import numpy as np
 import torch
@@ -12,11 +10,8 @@ from transformers import PreTrainedModel
 
 from .data import create_index, pad_and_tensor
 from .gradients import (
-    AdafactorNormalizer,
-    AdamNormalizer,
     GradientCollector,
     GradientProcessor,
-    Normalizer,
 )
 from .utils import set_peft_enabled
 
@@ -164,92 +159,3 @@ def collect_gradients(
 
     # Make sure the gradients are written to disk
     grad_buffer.flush()
-
-
-def fit_normalizers(
-    model: PreTrainedModel,
-    data: Dataset,
-    batches: list[list[int]],
-    *,
-    kind: Literal["adafactor", "adam"] = "adafactor",
-    target_modules: set[str] | None = None,
-) -> dict[str, Normalizer]:
-    """
-    Estimate the second moments of the model's gradients using a subset of the dataset.
-    """
-    normalizers: dict[str, Normalizer] = {}
-    rank = dist.get_rank() if dist.is_initialized() else 0
-
-    # Just to make the pbar more accurate
-    rng = random.Random(0)
-    rng.shuffle(batches)
-
-    def adafactor_update(name: str, g: torch.Tensor):
-        # We follow the tensor2tensor implementation of Adafactor, which
-        # takes the mean rather than summing over the rows and columns.
-        # row: mean over columns, shape [O]
-        sq = g.float().square_().sum(0)
-        row_acc = sq.mean(dim=1)
-        # col: mean over rows,    shape [I]
-        col_acc = sq.mean(dim=0)
-
-        if (normalizer := normalizers.get(name)) is None:
-            # initialize accumulators at zero
-            normalizers[name] = normalizer = AdafactorNormalizer(
-                torch.zeros_like(row_acc),
-                torch.zeros_like(col_acc),
-            )
-        else:
-            assert isinstance(normalizer, AdafactorNormalizer)
-
-        # in‐place accumulate
-        normalizer.row.add_(row_acc)
-        normalizer.col.add_(col_acc)
-
-    def adam_update(name: str, g: torch.Tensor):
-        sq = g.square_().float().sum(0)
-
-        # initialize accumulators at zero
-        if (normalizer := normalizers.get(name)) is None:
-            normalizers[name] = normalizer = AdamNormalizer(torch.zeros_like(sq))
-        else:
-            assert isinstance(normalizer, AdamNormalizer)
-
-        # in‐place accumulate
-        normalizer.avg_sq.add_(sq)
-
-    callback = adafactor_update if kind == "adafactor" else adam_update
-
-    for indices in tqdm(batches, disable=rank != 0, desc="Estimating normalizers"):
-        batch = data[indices]
-
-        with GradientCollector(
-            model.base_model,
-            closure=callback,
-            target_modules=target_modules,
-        ):
-            x, y = pad_and_tensor(
-                batch["input_ids"],  # type: ignore
-                labels=batch.get("labels", None),  # type: ignore
-                device=model.device,
-            )
-            model(x, labels=y).loss.backward()
-            model.zero_grad()
-
-    # Divide by the number of documents processed and average across all ranks
-    for normalizer in normalizers.values():
-        if isinstance(normalizer, AdamNormalizer):
-            normalizer.avg_sq.div_(len(data))
-
-            if dist.is_initialized():
-                dist.all_reduce(normalizer.avg_sq, op=dist.ReduceOp.AVG)
-
-        elif isinstance(normalizer, AdafactorNormalizer):
-            normalizer.row.div_(len(data))
-            normalizer.col.div_(len(data))
-
-            if dist.is_initialized():
-                dist.all_reduce(normalizer.row, op=dist.ReduceOp.AVG)
-                dist.all_reduce(normalizer.col, op=dist.ReduceOp.AVG)
-
-    return normalizers
