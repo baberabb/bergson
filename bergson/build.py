@@ -193,6 +193,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             batches=batches,
             skip_preconditioners=cfg.skip_preconditioners,
             target_modules=target_modules,
+            kl_divergence=cfg.loss_fn == "kl",
         )
     else:
         # Convert each chunk to Dataset then collect their gradients
@@ -212,6 +213,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
                 batches=batches,
                 skip_preconditioners=cfg.skip_preconditioners,
                 target_modules=target_modules,
+                kl_divergence=cfg.loss_fn == "kl",
             )
             buf.clear()
             chunk_id += 1
@@ -245,7 +247,6 @@ def build_gradient_dataset(cfg: IndexConfig):
         fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
         remove_columns=remove_columns,
     )
-
     world_size = torch.cuda.device_count()
     if world_size <= 1:
         # Run the worker directly if no distributed training is needed. This is great

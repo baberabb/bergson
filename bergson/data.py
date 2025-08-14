@@ -91,6 +91,9 @@ class IndexConfig:
     drop_columns: bool = False
     """Only return the new dataset columns."""
 
+    loss_fn: Literal["ce", "kl"] = "ce"
+    """Loss function to use."""
+
     streaming: bool = False
     """Whether to use streaming mode for the dataset."""
 

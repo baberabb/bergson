@@ -17,11 +17,6 @@ from tqdm import tqdm
 from .data import load_gradients, load_unstructured_gradients
 from .gradients import GradientCollector, GradientProcessor
 
-try:
-    import faiss
-except ImportError:
-    faiss = None
-
 
 class TraceResult:
     """Result of a .trace() call."""
