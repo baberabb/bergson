@@ -44,6 +44,8 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             dtype = torch.float32
         case "int4" | "int8":
             dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        case "auto":
+            dtype = "auto"
         case other:
             raise ValueError(f"Unsupported precision: {other}")
 
@@ -123,10 +125,10 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
 
     if os.path.exists(cfg.processor_path):
         if rank == 0:
-            print(f"Loading processor from '{processor_save_path}'")
+            print(f"Loading processor from '{cfg.processor_path}'")
 
         processor = GradientProcessor.load(
-            processor_save_path,
+            cfg.processor_path,
             map_location=f"cuda:{rank}",
         )
     else:
@@ -180,7 +182,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             batches=batches,
             skip_preconditioners=cfg.skip_preconditioners,
             target_modules=target_modules,
-            kl_divergence=cfg.kl_divergence,
+            kl_divergence=cfg.loss_fn == "kl",
         )
     else:
         # Convert each chunk to Dataset then collect their gradients
@@ -200,7 +202,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
                 batches=batches,
                 skip_preconditioners=cfg.skip_preconditioners,
                 target_modules=target_modules,
-                kl_divergence=cfg.kl_divergence,
+                kl_divergence=cfg.loss_fn == "kl",
             )
             buf.clear()
             chunk_id += 1

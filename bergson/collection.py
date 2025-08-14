@@ -18,6 +18,7 @@ from .gradients import (
     GradientProcessor,
     Normalizer,
 )
+from .utils import set_peft_enabled
 
 
 def collect_gradients(
@@ -87,19 +88,6 @@ def collect_gradients(
         fill_value=0.0,
     )
 
-    per_doc_mean_kl_divergence = torch.full(
-        (len(data),),
-        device=model.device,
-        dtype=torch.float16,
-        fill_value=0.0,
-    )
-    per_doc_max_kl_divergence = torch.full(
-        (len(data),),
-        device=model.device,
-        dtype=torch.float16,
-        fill_value=0.0,
-    )
-
     for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
         batch = data[indices]
         x, y = pad_and_tensor(
@@ -107,44 +95,41 @@ def collect_gradients(
             labels=batch.get("labels"),  # type: ignore
             device=model.device,
         )
+        masks = y[:, 1:] != -100
+        denoms = masks.sum(dim=1, dtype=dtype)
 
         if kl_divergence:
-            model.disable_adapters()
-            with torch.no_grad():
-                    outputs_base = model(x).logits
-            model.enable_adapters()
-            with collector:
-                outputs_finetuned = model(x).logits
-                # kl divergence on the logits
-                outputs_finetuned = torch.log_softmax(outputs_finetuned.reshape(-1, outputs_finetuned.shape[-1]), dim=-1)
-                outputs_base = torch.softmax(outputs_base.reshape(-1, outputs_base.shape[-1]), dim=-1)
-                kl = torch.nn.functional.kl_div(outputs_finetuned, outputs_base, reduction='none').sum(axis=1)
-                losses = kl.mean()
-                per_doc_mean_kl_divergence[indices] = losses.half().detach()
-                per_doc_max_kl_divergence[indices] = kl.max().half().detach()
+            with torch.inference_mode():
+                set_peft_enabled(model, False)
+                ref_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
+                set_peft_enabled(model, True)
 
-                losses.backward()
-                model.zero_grad()
+            with collector:
+                ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
+
+                # Compute average KL across all unmasked tokens
+                kls = torch.sum(ft_lps.exp() * (ft_lps - ref_lps), dim=-1)
+                losses = torch.sum(kls * masks, dim=-1) / denoms
+                losses.mean().backward()
         else:
             with collector:
-                logits = model(x).logits
+                logits = model(x).logits[:, :-1]
 
                 losses = F.cross_entropy(
-                    logits[:, :-1].reshape(-1, logits.size(-1)),
+                    logits.reshape(-1, logits.size(-1)),
                     y[:, 1:].flatten(),
                     reduction="none",
                 ).reshape_as(y[:, 1:])
-
-                masks = y[:, 1:] != -100
-                denoms = masks.sum(dim=1, dtype=logits.dtype)
                 losses = losses.sum(1).div(denoms)
                 losses.mean().backward()
 
-                model.zero_grad()
+        # Weirdly you need to explicitly synchronize here in order to make sure that
+        # the nonblocking copies actually finish before we call .numpy()
+        model.zero_grad()
+        torch.cuda.synchronize()
 
         # It turns out that it's very important for efficiency to write the gradients
         # sequentially instead of first concatenating them, then writing to one vector
-        torch.cuda.synchronize()
         for layer_name in mod_grads.keys():
             grad_buffer[layer_name][indices] = mod_grads[layer_name].numpy()
 
@@ -173,19 +158,6 @@ def collect_gradients(
             feature=Value("float16" if dtype == torch.float16 else "float32"),
             new_fingerprint="loss",
         )
-        if kl_divergence:
-            data = data.add_column(
-                "mean_kl_divergence",
-                per_doc_mean_kl_divergence.cpu().numpy(),
-                feature=Value("float16"),
-                new_fingerprint="mean_kl_divergence",
-            )
-            data = data.add_column(
-                "max_kl_divergence",
-                per_doc_max_kl_divergence.cpu().numpy(),
-                feature=Value("float16"),
-                new_fingerprint="max_kl_divergence",
-            )
         data.save_to_disk(path + "/data.hf")
 
         processor.save(path)

@@ -55,7 +55,7 @@ class IndexConfig:
     fsdp: bool = False
     """Whether to use Fully Sharded Data Parallel (FSDP) for collecing gradients."""
 
-    precision: Literal["bf16", "fp16", "fp32", "int4", "int8"] = "fp32"
+    precision: Literal["auto", "bf16", "fp16", "fp32", "int4", "int8"] = "auto"
     """Precision to use for the model parameters."""
 
     projection_dim: int = 16
@@ -88,9 +88,9 @@ class IndexConfig:
     drop_columns: bool = False
     """Only return the new dataset columns."""
 
-    kl_divergence: bool = False
-    """Whether to compute KL as a loss function."""
-    
+    loss_fn: Literal["ce", "kl"] = "ce"
+    """Loss function to use."""
+
     streaming: bool = False
     """Whether to use streaming mode for the dataset."""
 
