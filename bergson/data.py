@@ -29,6 +29,9 @@ class DataConfig:
     dataset: str = "EleutherAI/SmolLM2-135M-10B"
     """Dataset identifier to build the index from."""
 
+    split: str = "train"
+    """Split of the dataset to use for building the index."""
+
     prompt_column: str = "text"
     """Column in the dataset that contains the prompts."""
 
@@ -270,7 +273,7 @@ def create_index(
 
 
 def load_data_string(
-    data_str: str, streaming: bool = False
+    data_str: str, split: str = "train", streaming: bool = False
 ) -> Dataset | IterableDataset:
     """Load a dataset from a string identifier or path."""
     if data_str.endswith(".csv"):
@@ -279,7 +282,7 @@ def load_data_string(
         ds = assert_type(Dataset, Dataset.from_json(data_str))
     else:
         try:
-            ds = load_dataset(data_str, split="train", streaming=streaming)
+            ds = load_dataset(data_str, split=split, streaming=streaming)
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
                 raise NotImplementedError(
