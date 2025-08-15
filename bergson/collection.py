@@ -18,7 +18,7 @@ from .gradients import (
     GradientProcessor,
     Normalizer,
 )
-from .utils import set_peft_enabled
+from .peft import set_peft_enabled
 
 
 def collect_gradients(

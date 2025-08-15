@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from datasets import Dataset
+from peft import LoraConfig
 from simple_parsing import parse
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -80,6 +81,7 @@ def worker(
             ddp_find_unused_parameters=False,
             seed=0,
         ),
+        peft_config=LoraConfig(),
     )
     trainer = prepare_for_gradient_collection(trainer)
     trainer.train()

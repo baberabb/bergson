@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from numpy.typing import DTypeLike
+from peft import PeftModel
 from torch import Tensor
 from torch.utils.data import DataLoader
 from transformers.trainer import Trainer
@@ -16,6 +17,7 @@ from transformers.training_args import TrainingArguments
 from bergson import GradientCollector, GradientProcessor
 from bergson.data import create_index
 from bergson.gradients import AdafactorNormalizer, AdamNormalizer
+from bergson.peft import detect_peft_modules
 
 
 class GradientCollectorCallback(TrainerCallback):
@@ -79,13 +81,22 @@ class GradientCollectorCallback(TrainerCallback):
                 "calling bergson.prepare_gradient_collection on the trainer."
             )
 
+        if isinstance(model, PeftModel):
+            reshape_to_square = True
+            target_modules = detect_peft_modules(model)
+        else:
+            reshape_to_square = False
+            target_modules = None
+
         self.collector = GradientCollector(
             model=model,
             closure=self.on_module_backward,
             processor=GradientProcessor(
                 {},
                 projection_dim=self.projection_dim or None,
+                reshape_to_square=reshape_to_square,
             ),
+            target_modules=target_modules,
         )
         self.grad_sizes = {
             name: math.prod(s) for name, s in self.collector.shapes().items()
