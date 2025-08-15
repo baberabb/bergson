@@ -73,6 +73,7 @@ class EkfacComputer:
         self.data = data
         self.batches = batches
         self.path = os.path.join(cfg.run_path, "influence_results")
+        os.makedirs(self.path, exist_ok=True)
 
         self.cfg = cfg
 
@@ -109,7 +110,7 @@ class EkfacComputer:
 
             local_update_ii = a_bi.mT @ a_bi
 
-            dist.all_reduce(local_update_ii, op=dist.ReduceOp.SUM)
+            dist.all_reduce(local_update_ii, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
 
             # Manually sharding
             start_row = self.rank * A_cov_ki.shape[0]
@@ -125,7 +126,7 @@ class EkfacComputer:
 
             g_bo = g.reshape(-1, g.shape[-1])  # [N*S, O]
             local_update_oo = g_bo.mT @ g_bo
-            dist.all_reduce(local_update_oo, op=dist.ReduceOp.SUM)
+            dist.all_reduce(local_update_oo, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
 
             start_row = self.rank * S_cov_po.shape[0]
             end_row = (self.rank + 1) * S_cov_po.shape[0]
@@ -251,66 +252,35 @@ class EkfacComputer:
         transformed_activation_cache = {}
 
         def callback_activation(name: str, a: torch.Tensor):
-            a_ni = a.reshape(-1, a.shape[-1])  # [N*S, I]
+            a_nsi = a  # [N, S, I]
 
             transformed_activation_cache[name] = self._sharded_vec_matmul(
-                vector_na=a_ni, matrix_cb=eigen_a[name], mult_type="left"
-            )  # shape [N*S, I]
-
-            if self.rank == 0 and self.cfg.debug:
-                run_covariances_shards = [
-                    os.path.join(
-                        self.path,
-                        "activation_eigen_sharded",
-                        f"shard_{rank}.safetensors",
-                    )
-                    for rank in range(self.world_size)
-                ]
-                run_covariances_list = [(load_file(shard)) for shard in run_covariances_shards]
-                run_covariances = {}
-                for k, v in run_covariances_list[0].items():
-                    run_covariances[k] = torch.cat([shard[k] for shard in run_covariances_list], dim=0).to(a.device)
-
-                result_2 = a_ni @ run_covariances[name]
-                assert torch.allclose(transformed_activation_cache[name], result_2, atol=1e-4, rtol=1e-4), (
-                    "Distributed eigenvector multiplication failed"
-                )
+                vector_nsa=a_nsi, matrix_cb=eigen_a[name], mult_type="left"
+            )  # shape [N, S, I]
 
         def callback_gradient(name: str, g: torch.Tensor):
-            g_no = g.reshape(-1, g.shape[-1])  # [N*S, O]
-
-            result_no = self._sharded_vec_matmul(vector_na=g_no, matrix_cb=eigen_g[name], mult_type="right")  # [N*S, O]
+            g_nso = g  # [N, S, O]
+            result_nso = self._sharded_vec_matmul(
+                vector_nsa=g_nso, matrix_cb=eigen_g[name], mult_type="right"
+            )  # [N, S, O]
 
             transformed_grad_shard = torch.einsum(
-                "B I, B O-> O I", transformed_activation_cache[name] ** 2, result_no**2
-            ).contiguous()  # [O, I]
-            dist.all_reduce(transformed_grad_shard, op=dist.ReduceOp.SUM)
+                "N S I, N S O -> N O I", transformed_activation_cache[name], result_nso
+            )
+
+            transformed_grad_shard = (transformed_grad_shard**2).sum(dim=0).contiguous()
+
+            dist.all_reduce(transformed_grad_shard, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
 
             shard_size = transformed_grad_shard.shape[0] // self.world_size
             start_row = self.rank * shard_size
             end_row = (self.rank + 1) * shard_size
             if name not in eigenvalue_corrections:
-                eigenvalue_corrections[name] = (
-                    transformed_grad_shard[start_row:end_row, :].contiguous().to(device="cpu", non_blocking=False)
-                )
+                eigenvalue_corrections[name] = transformed_grad_shard[start_row:end_row, :].contiguous()
             else:
                 eigenvalue_corrections[name] = eigenvalue_corrections[name].to(device=self.device)
                 eigenvalue_corrections[name].add_(transformed_grad_shard[start_row:end_row, :].contiguous())
                 eigenvalue_corrections[name] = eigenvalue_corrections[name].to(device="cpu", non_blocking=False)
-
-            if self.rank == 0 and self.cfg.debug:
-                run_covariances_shards = [
-                    os.path.join(self.path, "gradient_eigen_sharded", f"shard_{rank}.safetensors")
-                    for rank in range(self.world_size)
-                ]
-                run_covariances_list = [(load_file(shard)) for shard in run_covariances_shards]
-
-                run_covariances = torch.cat([shard[name] for shard in run_covariances_list], dim=0).to(g.device)
-                result_2 = torch.einsum(" r l, b r-> b l", run_covariances, g_no)
-
-                assert torch.allclose(result_no, result_2, atol=1e-0, rtol=1e-4), (
-                    "Distributed eigenvector multiplication failed"
-                )
 
         collector = EkfacCollector(
             self.model.base_model,
@@ -327,8 +297,6 @@ class EkfacComputer:
         if self.rank == 0:
             torch.save(total_processed, os.path.join(self.path, "total_processed_lambda.pt"))
             self.logger.info(f"Total processed: {total_processed.item()}")
-        for k, v in eigenvalue_corrections.items():
-            v.div_(total_processed.to(device=v.device))
 
         os.makedirs(self.path + "/eigenvalue_correction_sharded", exist_ok=True)
         save_file(
@@ -338,24 +306,25 @@ class EkfacComputer:
 
     def _sharded_vec_matmul(
         self,
-        vector_na: Float[Tensor, "n a"],
+        vector_nsa: Float[Tensor, "n s a"],
         matrix_cb: Float[Tensor, "c b"],
         mult_type: Literal["left", "right"],
-    ):
+    ) -> Float[Tensor, "n s b"]:
         """
         Sharded matrix multiplication for distributed training. Assumes that c= a/world_size.
-        vector: [n, a]
+        vector: [n, s, a]
         matrix_shard: [c, b]
-        Returns: [n, b]
+        Returns: [n, s, b]
         """
         # Split the vector into shards
-        vector_shards_wnc = torch.chunk(vector_na, self.world_size, dim=1)  # (w, n, c)
+        vector_shards_wnsc = torch.chunk(vector_nsa, self.world_size, dim=-1)  # (w, n, s, a/w)
 
-        result_nb = torch.zeros(
-            vector_na.shape[0],
+        result_nsb = torch.zeros(
+            vector_nsa.shape[0],
+            vector_nsa.shape[1],
             matrix_cb.shape[1],
-            device=vector_na.device,
-            dtype=vector_na.dtype,
+            device=vector_nsa.device,
+            dtype=vector_nsa.dtype,
         )
 
         for rank_index in range(self.world_size):
@@ -364,15 +333,15 @@ class EkfacComputer:
             else:
                 shard_cb = torch.zeros_like(matrix_cb)
 
-            dist.broadcast(shard_cb, src=rank_index)
+            dist.broadcast(shard_cb, src=rank_index) if dist.is_initialized() else None
             if mult_type == "left":
-                result_nb += torch.einsum("n c, c b-> n b", vector_shards_wnc[rank_index], shard_cb)  # [B, c]
+                result_nsb += torch.einsum("n s c, c b-> n s b", vector_shards_wnsc[rank_index], shard_cb)  # [B, c]
             elif mult_type == "right":
-                result_nb += torch.einsum("c b, n c-> n b", shard_cb, vector_shards_wnc[rank_index])
+                result_nsb += torch.einsum("c b, n s c-> n s b", shard_cb, vector_shards_wnsc[rank_index])
             if self.rank != rank_index:
                 del shard_cb
 
-        return result_nb
+        return result_nsb
 
     def _setup_profiler(self):
         """Set up profiler if profiling is enabled."""
@@ -467,12 +436,11 @@ class EkfacComputer:
                                     reduction="none",
                                 ).reshape_as(y[:, 1:])
 
-                                masks = y[:, 1:] != -100
-                                denoms = masks.sum(dim=1, dtype=logits.dtype)
-                                losses = losses.sum(1).div(denoms)
+                                losses = losses.sum(1)
 
                             losses.mean().backward()
                             self.model.zero_grad()
+                            torch.cuda.synchronize()
 
                     if self.cfg.profile:
                         assert isinstance(prof, profile), "Profiler is not set up correctly"
@@ -535,7 +503,7 @@ class EkfacComputer:
             else:
                 tensor = input_dict[key].to(device=self.device)
 
-            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
 
             shard = torch.empty(shard_size, d, device=self.device, dtype=self.dtype)
             shard.copy_(tensor[self.rank * shard_size : (self.rank + 1) * shard_size, :])
@@ -609,7 +577,7 @@ class EkfacApplicator:
             proj_shards_wpt = torch.chunk(proj_pi, self.world_size, dim=1)  # (w, p, i/w)
             result_shard_pi = torch.einsum("t i, p t-> p i", eigen_a[name], proj_shards_wpt[self.rank]).contiguous()
 
-            dist.all_reduce(result_shard_pi, op=dist.ReduceOp.SUM)
+            dist.all_reduce(result_shard_pi, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
 
             shard_size = result_shard_pi.shape[0] // self.world_size
             start_row = self.rank * shard_size
@@ -634,7 +602,7 @@ class EkfacApplicator:
             )
             proj_shards_wqr = torch.chunk(proj_qo, self.world_size, dim=1)  # (w, q, o/w)
             result_shard_qo = torch.einsum("q r, r o -> q o", proj_shards_wqr[self.rank], eigen_g[name]).contiguous()
-            dist.all_reduce(result_shard_qo, op=dist.ReduceOp.SUM)
+            dist.all_reduce(result_shard_qo, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
 
             shard_size = result_shard_qo.shape[0] // self.world_size
             start_row = self.rank * shard_size
@@ -736,7 +704,7 @@ class EkfacApplicator:
     def compute_ivhp_batch(self, eigen_a, mmap, eigen_g, lambda_factor, random_eigen_a, random_eigen_g, batch_slice):
         transformed_gradients = {}
         for k, v in eigen_a.items():
-            gradients_noi = torch.from_numpy(mmap[k][batch_slice].copy()).to(
+            gradients_noi = torch.from_numpy(mmap[k][batch_slice]).to(
                 device=self.device, dtype=torch.float32
             )  # shape [num_grads, out*in]
             gradients_noi = gradients_noi.view(-1, eigen_g[k].shape[1], eigen_a[k].shape[1])
@@ -792,13 +760,15 @@ class EkfacApplicator:
     ) -> Tensor:
         """Return the `side` projection matrix for parameter `name` of shape [m, n]."""
         # Seed the PRNG with the name of the layer and what "side" we are projecting
+        if m == 0:
+            A = torch.eye(n, dtype=dtype, device=self.device)
+
         message = bytes(f"{name}/{side}", "utf-8")
         digest = hashlib.md5(message).digest()
         seed = int.from_bytes(digest, byteorder="big") % (2**63 - 1)
-        device = self.device
-        prng = torch.Generator(device).manual_seed(seed)
+        prng = torch.Generator(self.device).manual_seed(seed)
 
-        A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
+        A = torch.randn(m, n, device=self.device, dtype=dtype, generator=prng)
         A /= A.norm(dim=1, keepdim=True)
         return A
 
@@ -870,7 +840,7 @@ class EkfacApplicator:
             else:
                 shard_cb = torch.zeros_like(matrix_cb)
 
-            dist.broadcast(shard_cb, src=rank_index)
+            dist.broadcast(shard_cb, src=rank_index) if dist.is_initialized() else None
             if mult_type == "left":
                 result_nxy += torch.einsum("n o c, c b-> n o b", gradients_shard_wnfg[rank_index], shard_cb)  # [B, c]
             elif mult_type == "right":
@@ -892,7 +862,7 @@ class EkfacApplicator:
 
         global_lambda_mean = lambda_ci.mean()
 
-        dist.all_reduce(global_lambda_mean, op=dist.ReduceOp.SUM)
+        dist.all_reduce(global_lambda_mean, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
         global_lambda_mean /= self.world_size
 
         for rank_index in range(self.world_size):
@@ -901,22 +871,14 @@ class EkfacApplicator:
             else:
                 shard_ci = torch.zeros_like(lambda_ci)
 
-            dist.broadcast(shard_ci, src=rank_index)
+            dist.broadcast(shard_ci, src=rank_index) if dist.is_initialized() else None
 
             start_row = rank_index * shard_ci.shape[0]
             end_row = (rank_index + 1) * shard_ci.shape[0]
             inverse_lambda = (shard_ci + self.cfg.lambda_damp_factor * global_lambda_mean).reciprocal()
-            # b, c = 12, 15
-
-            # if self.rank == 0 and k == "layers.1.mlp.dense_h_to_4h" and rank_index == 0:
-            #     self.logger.debug(f"{matrix_noi[0, b, c].item()}")
-            #     self.logger.debug(f"{inverse_lambda[b, c].item()}")
 
             matrix_noi[:, start_row:end_row, :].mul_(inverse_lambda)
-            # if self.rank == 0 and k == "layers.1.mlp.dense_h_to_4h" and rank_index == 0:
-            #     self.logger.debug(f"{matrix_noi[0, b, c].item()}")
-            # if self.rank == 0 and k == "layers.1.mlp.dense_h_to_4h" and rank_index == 0:
-            #     self.logger.debug("--" * 50)
+
             if self.rank != rank_index:
                 del shard_ci
 
@@ -947,7 +909,7 @@ class EkfacApplicator:
                 shard_bc = matrix_bc
             else:
                 shard_bc = torch.zeros_like(matrix_bc)
-            dist.broadcast(shard_bc, src=rank_index)
+            dist.broadcast(shard_bc, src=rank_index) if dist.is_initialized() else None
 
             shard_size = shard_bc.shape[0]
             start_row = rank_index * shard_size
