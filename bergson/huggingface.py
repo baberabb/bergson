@@ -1,18 +1,23 @@
+import math
 import os
-from copy import deepcopy
 from functools import wraps
+from typing import Sized
 
 import numpy as np
 import torch
 import torch.distributed as dist
 from numpy.typing import DTypeLike
+from peft import PeftModel
 from torch import Tensor
+from torch.utils.data import DataLoader
 from transformers.trainer import Trainer
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
 
 from bergson import GradientCollector, GradientProcessor
 from bergson.data import create_index
+from bergson.gradients import AdafactorNormalizer, AdamNormalizer
+from bergson.peft import detect_peft_modules
 
 
 class GradientCollectorCallback(TrainerCallback):
@@ -21,54 +26,44 @@ class GradientCollectorCallback(TrainerCallback):
 
     def __init__(
         self,
-        collector: GradientCollector,
-        processor: GradientProcessor,
-        mod_grads: dict[str, Tensor],
-        preconditioners: dict[str, Tensor],
-        grad_sizes: dict[str, int],
         path: str,
+        projection_dim: int = 16,
         dtype: DTypeLike = np.float16,
-        mean_gradients: bool = False,
-        normalize_eval: bool = False,
+        accumulate_grads: bool = False,
     ):
         """
         Args:
             grad_sizes: The sizes of the module gradients
-            processor: The gradient processor
-            mod_grads: The module gradients
-            preconditioners: The gradient preconditioners
-            path: The path to the gradient store
+            projection_dim: The dimension to project the gradients onto
             dtype: The dtype of the on-disk gradient store
-            mean_gradients: Whether to take the mean of the gradients
+            accumulate_grads: Whether to take the sum of the gradients
                 of the same example across epochs. If `False`, the
                 gradients for each epoch are stored separately.
-            normalize_eval: Whether to normalize the evaluation gradients
-                using the training optimizer normalization.
         """
         super().__init__()
-        self.collector = collector
-        self.processor = processor
-        self.mod_grads = mod_grads
-        self.preconditioners = preconditioners
-        self.grad_sizes = grad_sizes
-        self.path = path
+
+        # Initialized in on_train_begin when we learn what the model is
+        self.collector = None
+        self.grad_sizes = {}
+
+        self.accumulate_grads = accumulate_grads
         self.dtype = dtype
-        self.mean_gradients = mean_gradients
-        self.normalize_eval = normalize_eval
+        self.path = path
+        self.projection_dim = projection_dim
 
         self.eval_grad_buffers: dict[str, np.memmap] = {}
         self.eval_step_idxs: dict[str, int] = {}
         self.eval_indices: dict[str, list[int]] = {}
 
-    def write_grads(
-        self,
-        grad_buffer: np.memmap,
-        mod_grads: dict[str, Tensor],
-        indices: list[int],
-    ):
-        for layer_name in mod_grads.keys():
-            torch.cuda.synchronize()
-            grad_buffer[layer_name][indices] += mod_grads[layer_name].numpy() / self.div
+        self.mod_grads = {}
+        self.batch_indices: Tensor | None = None
+
+    def write_grads(self, grad_buffer: np.memmap):
+        # Ensure the nonblocking copies are all finished
+        torch.cuda.synchronize()
+        for layer_name, g in self.mod_grads.items():
+            grad_buffer[layer_name][self.batch_indices, :] = g.numpy()
+
         self.mod_grads.clear()
 
     def on_train_begin(
@@ -76,43 +71,75 @@ class GradientCollectorCallback(TrainerCallback):
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
+        *,
+        model: torch.nn.Module,
         **kwargs,
     ):
-        assert hasattr(args, "__gradient_collection_enabled__"), (
-            "Gradient collection is not enabled. Please enable it by "
-            "calling bergson.prepare_gradient_collection on the trainer."
+        if not hasattr(args, "__gradient_collection_enabled__"):
+            raise RuntimeError(
+                "Gradient collection is not enabled. Please enable it by "
+                "calling bergson.prepare_gradient_collection on the trainer."
+            )
+
+        if isinstance(model, PeftModel):
+            reshape_to_square = True
+            target_modules = detect_peft_modules(model)
+        else:
+            reshape_to_square = False
+            target_modules = None
+
+        self.collector = GradientCollector(
+            model=model,
+            closure=self.on_module_backward,
+            processor=GradientProcessor(
+                {},
+                projection_dim=self.projection_dim or None,
+                reshape_to_square=reshape_to_square,
+            ),
+            target_modules=target_modules,
         )
-        self.div = args.num_train_epochs if self.mean_gradients else 1
+        self.grad_sizes = {
+            name: math.prod(s) for name, s in self.collector.shapes().items()
+        }
+
+        # Record forward and backward hooks
+        self.collector.__enter__()
+        self.fwd_handle = model.register_forward_pre_hook(
+            self.on_forward_begin,
+            with_kwargs=True,
+        )
 
     def on_epoch_begin(
         self,
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
+        *,
+        eval_dataloader: DataLoader | dict[str, DataLoader],
+        train_dataloader: DataLoader,
         **kwargs,
     ):
         epoch = int(state.epoch or 0)
 
-        if self.mean_gradients and epoch > 0:
+        if self.accumulate_grads and epoch > 0:
             return
 
-        epoch_suffix = "" if self.mean_gradients else f"/epoch_{epoch}"
+        epoch_suffix = "" if self.accumulate_grads else f"/epoch_{epoch}"
 
+        ds = train_dataloader.dataset
+        if not isinstance(ds, Sized):
+            raise ValueError("Dataset must be sized for gradient collection")
+
+        self.num_examples = len(ds)
         if dist.is_initialized():
             num_examples = torch.tensor(
-                [len(kwargs["train_dataloader"].dataset)],
+                [self.num_examples],
                 device="cuda",
                 dtype=torch.int32,
             )
             dist.all_reduce(num_examples, op=dist.ReduceOp.SUM)
             self.num_examples = int(num_examples.item())
-        else:
-            self.num_examples = len(kwargs["train_dataloader"].dataset)
 
-        # Set up the gradient buffers for the training dataset
-        self.train_indices = [
-            i.item() for batch in kwargs["train_dataloader"] for i in batch["_idx"]
-        ]
         self.train_grad_buffer = create_index(
             os.path.join(self.path, "train" + epoch_suffix),
             num_grads=self.num_examples,
@@ -122,12 +149,12 @@ class GradientCollectorCallback(TrainerCallback):
         self.train_step_idx = 0
 
         # Set up the gradient buffers for the evaluation datasets
-        if kwargs["eval_dataloader"] is None:
+        if eval_dataloader is None:
             return
-        elif isinstance(kwargs["eval_dataloader"], dict):
-            eval_datasets = kwargs["eval_dataloader"]
+        elif isinstance(eval_dataloader, dict):
+            eval_datasets = eval_dataloader
         else:
-            eval_datasets = {"eval": kwargs["eval_dataloader"]}
+            eval_datasets = {"eval": eval_dataloader}
 
         for dataset_name, dataloader in eval_datasets.items():
             self.eval_grad_buffers[dataset_name] = create_index(
@@ -141,9 +168,6 @@ class GradientCollectorCallback(TrainerCallback):
                 i.item() for batch in dataloader for i in batch["_idx"]
             ]
 
-        if epoch > 0 and not self.normalize_eval:
-            self.collector.processor = self.processor
-
     def on_epoch_end(
         self,
         args: TrainingArguments,
@@ -152,28 +176,29 @@ class GradientCollectorCallback(TrainerCallback):
         **kwargs,
     ):
         rank = dist.get_rank() if dist.is_initialized() else 0
-
-        # Save the preconditioners
-        chols = {}
-        for name, prec in self.preconditioners.items():
-            if dist.is_initialized():
-                dist.all_reduce(prec)
-
-            L, info = torch.linalg.cholesky_ex(prec / self.num_examples)
-            if info.any() and rank == 0:
-                print(f"Warning: {name} has a singular second moment matrix.")
-
-            chols[name] = L
-
-        self.processor.preconditioners = chols
-
         if rank == 0:
-            self.processor.save(self.path)
+            assert self.collector is not None
+            self.collector.processor.save(self.path)
 
         # Ensure the gradients are written to disk
         self.train_grad_buffer.flush()
         for eval_grad_buffer in self.eval_grad_buffers.values():
             eval_grad_buffer.flush()
+
+    def on_forward_begin(self, _: torch.nn.Module, args, kwargs: dict):
+        # Record the original indices of this batch
+        self.batch_indices = kwargs.pop("_idx").to("cpu", non_blocking=True)
+        return args, kwargs
+
+    def on_module_backward(self, name: str, g: Tensor):
+        lo = torch.finfo(torch.float16).min
+        hi = torch.finfo(torch.float16).max
+        g = g.flatten(1).clamp_(lo, hi)
+
+        # Asynchronously move the gradient to CPU and convert to fp16
+        self.mod_grads[name] = g.to(
+            device="cpu", dtype=torch.float16, non_blocking=True
+        )
 
     def on_substep_end(
         self,
@@ -184,40 +209,68 @@ class GradientCollectorCallback(TrainerCallback):
     ):
         """Called at the end of each training step.
         If using gradient accumulation, one training step might take several inputs."""
-        indices = self.train_indices[
-            self.train_step_idx : self.train_step_idx + args.per_device_train_batch_size
-        ]
-        self.train_step_idx += args.per_device_train_batch_size
+        self.write_grads(self.train_grad_buffer)
 
-        self.write_grads(self.train_grad_buffer, self.mod_grads, indices)
+    def on_step_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        *,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        **kwargs,
+    ):
+        # The optimizer doesn't actually know the names of the parameters
+        param_to_name = {
+            param: name
+            for name, param in model.named_parameters()
+            if param.requires_grad
+        }
+        normalizers: dict[str, AdafactorNormalizer] = {}
 
-    def on_evaluate(
+        assert self.collector is not None
+        proc = self.collector.processor
+        proc.normalizers = {}
+
+        # Read normalizers off of the optimizer state. We need to figure out
+        # what type of optimizer this is first.
+        for group in optimizer.param_groups:
+            lr_sqrt = group["lr"] ** 0.5
+
+            for param in group["params"]:
+                name = param_to_name[param]
+                if name not in self.collector.target_info:
+                    continue
+
+                p_state = optimizer.state[param]
+
+                # Adam-like optimizer
+                if (eas := p_state.get("exp_avg_sq")) is not None:
+                    norm = AdamNormalizer(eas).to_adafactor()
+
+                    # Scale the gradient by the current learning rate. It's factorized
+                    # so we multiply each factor by the square root of the LR.
+                    norm.row *= lr_sqrt
+                    norm.col *= lr_sqrt
+                    normalizers[name] = norm
+
+        proc.normalizers = normalizers
+
+    def on_prediction_step(self, args, state, control, **kwargs):
+        dataset_name = kwargs["inputs"]["dataset_name"]
+        self.write_grads(self.eval_grad_buffers[dataset_name])
+
+    def on_train_end(
         self,
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
         **kwargs,
     ):
-        if not self.normalize_eval:
-            eval_processor = deepcopy(self.collector.processor)
-            eval_processor.normalizers = {}
-            self.collector.processor = eval_processor
-
-    def on_prediction_step(self, args, state, control, **kwargs):
-        dataset_name = kwargs["inputs"]["dataset_name"]
-
-        indices = self.eval_indices[dataset_name][
-            self.eval_step_idxs[dataset_name] : self.eval_step_idxs[dataset_name]
-            + args.per_device_eval_batch_size
-        ]
-
-        self.eval_step_idxs[dataset_name] += args.per_device_eval_batch_size
-
-        self.write_grads(
-            self.eval_grad_buffers[dataset_name],
-            self.mod_grads,
-            indices,
-        )
+        assert self.collector is not None
+        self.collector.__exit__(None, None, None)
+        self.fwd_handle.remove()
 
 
 def prepare_for_gradient_collection(trainer: Trainer):
@@ -240,8 +293,7 @@ def prepare_for_gradient_collection(trainer: Trainer):
                 lambda ex, idx: {"_idx": idx}, with_indices=True
             )
 
-    if trainer._signature_columns is None:
-        trainer._set_signature_columns_if_needed()
+    trainer._set_signature_columns_if_needed()
     trainer._signature_columns.append("_idx")
 
     if trainer.data_collator:

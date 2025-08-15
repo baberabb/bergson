@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from datasets import Dataset, IterableDataset
-from peft import PeftConfig, PeftModel, get_peft_model_state_dict
+from peft import PeftConfig, PeftModel
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from torch.distributed.fsdp import fully_shard
 from tqdm.auto import tqdm
@@ -21,6 +21,7 @@ from transformers import (
 from .collection import collect_gradients
 from .data import IndexConfig, allocate_batches, load_data_string, tokenize
 from .gradients import GradientProcessor
+from .peft import detect_peft_modules
 from .utils import assert_type, get_layer_list
 
 
@@ -100,21 +101,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             device_map=device_map,
             autocast_adapter_dtype=False,
         )
-
-        # Extract target modules
-        target_modules = set()
-        peft_state_dict = get_peft_model_state_dict(model=model)
-        for adapter in model.peft_config.keys():
-            for name in list(peft_state_dict.keys()):
-                prefix = name.removesuffix(".weight")
-                processed_name = f"{prefix}.{adapter}".removeprefix("base_model.")
-                try:
-                    model.get_submodule(processed_name)
-                    target_modules.add(processed_name)
-                except AttributeError:
-                    print(
-                        f"Adapter parameter '{processed_name}' not found in the model."
-                    )
+        target_modules = detect_peft_modules(model)
 
         # Hack for type checking
         model = cast(PreTrainedModel, model)

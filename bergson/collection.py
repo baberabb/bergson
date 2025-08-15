@@ -13,7 +13,7 @@ from .gradients import (
     GradientCollector,
     GradientProcessor,
 )
-from .utils import set_peft_enabled
+from .peft import set_peft_enabled
 
 
 def collect_gradients(

@@ -17,22 +17,6 @@ def assert_type(typ: Type[T], obj: Any) -> T:
     return cast(typ, obj)  # type: ignore[return-value]
 
 
-def set_peft_enabled(model: PreTrainedModel, enabled: bool):
-    """Bizarrely, the standard enable_adapters and disable_adapters aren't working"""
-    from peft.tuners.tuners_utils import BaseTunerLayer
-    from peft.utils import ModulesToSaveWrapper
-
-    futile = True
-
-    for _, module in model.named_modules():
-        if isinstance(module, (BaseTunerLayer, ModulesToSaveWrapper)):
-            futile = False
-            module.enable_adapters(enabled=enabled)
-
-    if futile:
-        raise RuntimeError("PEFT model incorrectly initialized")
-
-
 def get_layer_list(model: PreTrainedModel) -> nn.ModuleList:
     """Get the list of layers to train SAEs on."""
     N = assert_type(int, model.config.num_hidden_layers)
