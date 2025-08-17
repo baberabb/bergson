@@ -6,6 +6,7 @@ from contextlib import ContextDecorator
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Literal, Mapping
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -319,21 +320,34 @@ class GradientCollector(ContextDecorator):
         name: str,
         m: int,
         n: int,
+        device: str,
         side: Literal["left", "right"],
         dtype: torch.dtype,
+        projection_type: Literal["normal", "rademacher"] = "rademacher",
     ) -> Tensor:
-        """Return the `side` projection matrix for parameter `name` of shape [m, n]."""
+        """Create a projection matrix deterministically based on identifier and side."""
         # Seed the PRNG with the name of the layer and what "side" we are projecting
+
+        if m == 0:
+            A = torch.eye(n, dtype=dtype, device=device)
+
         message = bytes(f"{name}/{side}", "utf-8")
         digest = hashlib.md5(message).digest()
         seed = int.from_bytes(digest, byteorder="big") % (2**63 - 1)
 
-        device, _ = self.target_info[name]
-        prng = torch.Generator(device).manual_seed(seed)
-
-        A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
+        if projection_type == "normal":
+            prng = torch.Generator(device).manual_seed(seed)
+            A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
+        elif projection_type == "rademacher":
+            numpy_rng = np.random.Generator(np.random.PCG64(seed))
+            random_bytes = numpy_rng.bytes((m * n + 7) // 8)
+            random_bytes = np.frombuffer(random_bytes, dtype=np.uint8)
+            A = np.unpackbits(random_bytes)[: m * n].reshape((m, n))
+            A = torch.from_numpy(A).to(device, dtype=dtype)
+            A = A.add_(-0.5).mul_(2)
+        else:
+            raise ValueError(f"Unknown projection type: {projection_type}")
         A /= A.norm(dim=1, keepdim=True)
-
         return A
 
     def __enter__(self):
@@ -376,7 +390,8 @@ class GradientCollector(ContextDecorator):
         p = self.processor.projection_dim
         if p is not None and not isinstance(norm, AdamNormalizer):
             i = module.in_features
-            x = x @ self.projection(name, p, i, "right", x.dtype).T
+
+            x = x @ self.projection(name=name, m=p, n=i, side="right", dtype=x.dtype, device=x.device).T
 
         module._inputs = x
 
@@ -417,14 +432,14 @@ class GradientCollector(ContextDecorator):
 
             # Project the gradients to the lower-dimensional space
             if p is not None:
-                A = self.projection(name, p, o, "left", G.dtype)
-                B = self.projection(name, p, i, "right", G.dtype)
+                A = self.projection(name=name, m=p, n=o, side="left", dtype=G.dtype, device=G.device)
+                B = self.projection(name=name, m=p, n=i, side="right", dtype=G.dtype, device=G.device)
                 P = A @ P @ B.T  # [N, p, q]
 
         # Both Adafactor and no normalizer, we can project G first
         else:
             if p is not None:
-                A = self.projection(name, p, o, "left", G.dtype)
+                A = self.projection(name=name, m=p, n=o, side="left", dtype=G.dtype, device=G.device)
                 G = G @ A.T  # [N, S, p]
 
             P = G.mT @ I  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]

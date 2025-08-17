@@ -566,9 +566,9 @@ class EkfacApplicator:
 
         for name in eigen_a.keys():
             proj_pi = self._projection(
-                name,
-                p,  # type: ignore
-                eigen_a[name].shape[1],
+                name=name,
+                m=p,  # type: ignore
+                n=eigen_a[name].shape[1],
                 side="right",
                 dtype=eigen_a[name].dtype,
             )
@@ -593,9 +593,9 @@ class EkfacApplicator:
 
         for name in eigen_g.keys():
             proj_qo = self._projection(
-                name,
-                p,  # type: ignore
-                eigen_g[name].shape[1],
+                name=name,
+                m=p,  # type: ignore
+                n=eigen_g[name].shape[1],
                 side="left",
                 dtype=eigen_g[name].dtype,
             )
@@ -756,18 +756,30 @@ class EkfacApplicator:
         n: int,
         side: Literal["left", "right"],
         dtype: torch.dtype,
+        projection_type: Literal["normal", "rademacher"] = "rademacher",
     ) -> Tensor:
-        """Return the `side` projection matrix for parameter `name` of shape [m, n]."""
+        """Create a projection matrix deterministically based on identifier and side."""
         # Seed the PRNG with the name of the layer and what "side" we are projecting
+        device = self.device
         if m == 0:
-            A = torch.eye(n, dtype=dtype, device=self.device)
+            A = torch.eye(n, dtype=dtype, device=device)
 
         message = bytes(f"{name}/{side}", "utf-8")
         digest = hashlib.md5(message).digest()
         seed = int.from_bytes(digest, byteorder="big") % (2**63 - 1)
-        prng = torch.Generator(self.device).manual_seed(seed)
 
-        A = torch.randn(m, n, device=self.device, dtype=dtype, generator=prng)
+        if projection_type == "normal":
+            prng = torch.Generator(device).manual_seed(seed)
+            A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
+        elif projection_type == "rademacher":
+            numpy_rng = np.random.Generator(np.random.PCG64(seed))
+            random_bytes = numpy_rng.bytes((m * n + 7) // 8)
+            random_bytes = np.frombuffer(random_bytes, dtype=np.uint8)
+            A = np.unpackbits(random_bytes)[: m * n].reshape((m, n))
+            A = torch.from_numpy(A).to(device, dtype=dtype)
+            A = A.add_(-0.5).mul_(2)
+        else:
+            raise ValueError(f"Unknown projection type: {projection_type}")
         A /= A.norm(dim=1, keepdim=True)
         return A
 
