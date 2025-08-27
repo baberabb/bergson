@@ -181,6 +181,7 @@ cython_debug/
 *.pth
 *.safetensors
 *.json
+*.jsonl
 *.txt
 *.arrow
 *.bin

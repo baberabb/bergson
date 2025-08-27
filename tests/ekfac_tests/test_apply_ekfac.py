@@ -74,18 +74,20 @@ def test_gradients(run_path, ground_truth_path):
         if not (ground_truth_tensor.shape == computed_tensor.shape):
             raise ValueError(f"Shape mismatch for key {k}: {ground_truth_tensor.shape} vs {computed_tensor.shape}")
 
-        if not torch.allclose(ground_truth_tensor, computed_tensor, rtol=1e-2, atol=0):
-            max_diff = torch.max(torch.abs(ground_truth_tensor - computed_tensor)).item()
-            mean_diff = torch.mean(torch.abs(ground_truth_tensor - computed_tensor)).item()
-            print(f"Gradient mismatch for key {k}: max diff {max_diff}, mean diff {mean_diff}")
-            # relative difference
-            rel_diff = torch.max(torch.abs((ground_truth_tensor - computed_tensor) / ground_truth_tensor)).item()
-            rel_diff_argmax = torch.argmax(torch.abs((ground_truth_tensor - computed_tensor) / ground_truth_tensor))
-            argmax_coords = torch.unravel_index(rel_diff_argmax, ground_truth_tensor.shape[:])
+        if not torch.allclose(ground_truth_tensor, computed_tensor, rtol=1e-3, atol=0):
+            abs_diff = torch.abs(ground_truth_tensor - computed_tensor)
+            rel_diff = abs_diff / (torch.abs(ground_truth_tensor) + 1e-12)
 
-            print(f"Relative difference for key {k}: {rel_diff}, argmax {argmax_coords}")
+            max_abs_diff = torch.max(abs_diff).item()
+            max_rel_diff = torch.max(rel_diff).item()
+            argmax_idx = torch.argmax(rel_diff)
+            coords = torch.unravel_index(argmax_idx, ground_truth_tensor.shape)
 
-    print("Gradients test done")
+            gt_val = ground_truth_tensor.flatten()[argmax_idx].item()
+            comp_val = computed_tensor.flatten()[argmax_idx].item()
+
+            print(f"Mismatch '{k}': max_abs={max_abs_diff:.2e}, max_rel={max_rel_diff:.2e}")
+            print(f"  At {tuple(coords)}: gt={gt_val:.2e}, comp={comp_val:.2e}")
 
 
 def main():

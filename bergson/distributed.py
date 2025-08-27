@@ -1,8 +1,10 @@
 import os
+import random
 import socket
 from datetime import timedelta
 from typing import Callable
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -25,8 +27,32 @@ from bergson.gradients import GradientProcessor
 from bergson.utils import assert_type, get_layer_list
 
 
+def setup_reproducibility():
+    """Setup reproducibility for distributed training"""
+    seed: int = 42
+    # Set all random seeds - same across all ranks for model consistency
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    # Force deterministic behavior
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+
+    # Environment variables for determinism
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+
 def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
     """Handle data loading and preprocessing"""
+
+    torch.manual_seed(42)
+
     data_str = cfg.data.dataset
     if data_str.endswith(".csv"):
         ds = assert_type(Dataset, Dataset.from_csv(data_str))
@@ -61,6 +87,9 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
 
 def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tuple[AutoModelForCausalLM, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
 
     # Common configuration
     device_map = {"": f"cuda:{rank}"} if not cfg.fsdp else "cpu"
@@ -135,88 +164,6 @@ def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tup
     return model, target_modules
 
 
-# def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tuple[AutoModelForCausalLM, set | None]:
-#     """Handle model loading, quantization, FSDP, and PEFT detection"""
-
-#     try:
-#         peft_config = PeftConfig.from_pretrained(cfg.model)
-#     except ValueError:
-#         model = AutoModelForCausalLM.from_pretrained(
-#             cfg.model,
-#             device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
-#             quantization_config=(
-#                 BitsAndBytesConfig(
-#                     load_in_4bit=cfg.precision == "int4",
-#                     load_in_8bit=cfg.precision == "int8",
-#                     bnb_4bit_compute_dtype=dtype,
-#                     bnb_4bit_quant_storage=dtype,
-#                     bnb_4bit_quant_type="nf4",
-#                     bnb_4bit_use_double_quant=True,
-#                 )
-#                 if cfg.precision in ("int4", "int8")
-#                 else None
-#             ),
-#             torch_dtype=dtype,
-#             revision=cfg.revision,
-#         )
-#         target_modules = None
-#     else:
-#         base_model = AutoModelForCausalLM.from_pretrained(
-#             peft_config.base_model_name_or_path,  # type:ignore
-#             device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
-#             quantization_config=(
-#                 BitsAndBytesConfig(
-#                     load_in_4bit=cfg.precision == "int4",
-#                     load_in_8bit=cfg.precision == "int8",
-#                     bnb_4bit_compute_dtype=dtype,
-#                     bnb_4bit_quant_storage=dtype,
-#                     bnb_4bit_quant_type="nf4",
-#                     bnb_4bit_use_double_quant=True,
-#                 )
-#                 if cfg.precision in ("int4", "int8")
-#                 else None
-#             ),
-#             torch_dtype=dtype,
-#             revision=cfg.revision,
-#         )
-
-#         model = PeftModel.from_pretrained(
-#             base_model,
-#             cfg.model,
-#             device_map={"": f"cuda:{rank}" if not cfg.fsdp else "cpu"},
-#             autocast_adapter_dtype=False,
-#         )
-
-#         target_modules = set()
-
-#         peft_state_dict = get_peft_model_state_dict(model=model)
-
-#         for adapter in model.peft_config.keys():
-#             for name in list(peft_state_dict.keys()):
-#                 prefix = name.removesuffix(".weight")
-#                 name = prefix + "." + adapter
-#                 name = name.removeprefix("base_model.")
-#                 try:
-#                     model.get_submodule(name)
-#                 except AttributeError:
-#                     print(f"Adapter parameter '{name}' not found in the model.")
-#                 target_modules.add(name)
-
-#     embed = model.get_input_embeddings()
-#     model.requires_grad_(False)  # Freeze the model
-#     embed.requires_grad_(True)  # Make sure backward hooks are called though
-
-#     if cfg.fsdp:
-#         # Shard each individual transformer layer
-#         for layer in get_layer_list(model):
-#             fully_shard(layer)
-
-#         # Shard the entire model
-#         fully_shard(model)
-
-#     return model, target_modules
-
-
 def create_processor(
     cfg: IndexConfig,
     model,
@@ -281,6 +228,9 @@ def worker_wrapper(
 ):
     try:
         torch.cuda.set_device(rank)
+        if cfg.debug:
+            setup_reproducibility()
+            print("DEBUG MODE IS ENABLED: quasi-deterministic training")
 
         # These should be set by the main process
         if world_size > 1:

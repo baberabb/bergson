@@ -425,7 +425,7 @@ def tokenize(batch: dict, *, args: DataConfig, tokenizer):
                 continue
 
             ans = msg["content"]
-            start = strings[i].find(ans, pos)
+            start = strings[i].rfind(ans, pos)
             pos = start + len(ans)  # move past this match
 
             start_token = encodings.char_to_token(i, start)

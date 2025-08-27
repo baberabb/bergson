@@ -34,6 +34,13 @@ parser.add_argument(
     default=8,
     help="World size for distributed training.",
 )
+parser.add_argument(
+    "--sample",
+    type=bool,
+    default=False,
+    help="Batch size for gradient computation.",
+)
+
 
 args = parser.parse_args()
 
@@ -48,10 +55,34 @@ ground_truth_path = os.path.join(test_dir, "ground_truth")
 run_path = os.path.join(test_dir, "run/influence_results")
 
 
+import os
+import random
+
+import numpy as np
+
+
+def deterministic_cuda(seed=42):
+    # Set all random seeds
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # for multi-GPU
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    # Force deterministic behavior (sacrifices speed for reproducibility)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+
+    # Set environment variables for additional determinism
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+
 def test_total_processed_examples():
-    total_processed_ground_truth_path = os.path.join(
-        ground_truth_path, "covariances/stats.json"
-    )
+    total_processed_ground_truth_path = os.path.join(ground_truth_path, "covariances/stats.json")
     total_processed_run_path = os.path.join(run_path, "total_processed.pt")
 
     with open(total_processed_ground_truth_path, "r") as f:
@@ -75,6 +106,7 @@ def test_total_processed_examples():
 def main():
     # assert covariances, eigenvalue_corrections, eigenvectors and index_config.json exist
 
+    deterministic_cuda(seed=42)
     required_files = [
         "covariances",
         "eigenvalue_corrections",
@@ -83,23 +115,19 @@ def main():
     ]
 
     for file_name in required_files:
-        assert os.path.exists(
-            os.path.join(ground_truth_path, file_name)
-        ), f"Missing required file: {file_name}"
+        assert os.path.exists(os.path.join(ground_truth_path, file_name)), f"Missing required file: {file_name}"
 
-    cfg_json = json.load(
-        open(os.path.join(ground_truth_path, "index_config.json"), "r")
-    )
+    cfg_json = json.load(open(os.path.join(ground_truth_path, "index_config.json"), "r"))
 
     cfg = IndexConfig(**cfg_json)
 
     cfg.data = DataConfig(**(cfg_json["data"]))
-
+    assert isinstance(cfg.fsdp, bool)  # for the type checker
     cfg.run_path = test_dir + "/run"
     cfg.debug = True
     cfg.fsdp = use_fsdp
     cfg.world_size = world_size
-
+    cfg.sample = args.sample
 
     if not os.path.exists(run_path) or overwrite:
         distributed_computing(

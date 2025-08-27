@@ -32,6 +32,7 @@ from bergson.gradients import (
 )
 from bergson.hessians.collector import EkfacCollector
 from bergson.hessians.logger import get_logger
+from bergson.hessians.sharded_computation import ShardedMul
 
 
 class EkfacComputer:
@@ -80,6 +81,7 @@ class EkfacComputer:
         self.logger = get_logger("EkfacComputer", level="DEBUG" if cfg.debug else "INFO")
 
         ### Distributed related
+        self.shard_computer = ShardedMul(target_info=self.target_info, lambda_damp_factor=cfg.lambda_damp_factor)
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
 
@@ -95,7 +97,7 @@ class EkfacComputer:
         A_cov_dict = {}
         S_cov_dict = {}
 
-        self._sharded_covariance(
+        self.shard_computer._init_covariance_dict(
             activation_covariance_dict=A_cov_dict,
             gradient_covariance_dict=S_cov_dict,
             dtype=self.dtype,
@@ -191,7 +193,9 @@ class EkfacComputer:
             position=self.rank,
             leave=False,
         ):
-            matrix = self._compute_full_matrix(key, shard_type=covariance_type + "_covariance")  # type: ignore
+            matrix = self.shard_computer._compute_full_matrix(
+                key, shard_path=os.path.join(self.path, f"{covariance_type}_covariance_sharded")
+            )  # type: ignore
 
             original_dtype = matrix.dtype
             matrix_normalized = matrix.to(torch.float64) / total_processed
@@ -212,8 +216,8 @@ class EkfacComputer:
             eigenvectors = eigenvectors.to(original_dtype).to(device="cpu").contiguous()
             covariance_eigenvectors[key] = eigenvectors
 
-        covariance_eigenvectors = self._merge_and_shard_dict(
-            input_dict=covariance_eigenvectors, covariance_type=covariance_type
+        covariance_eigenvectors = self.shard_computer._merge_and_shard_dict(
+            input_dict=covariance_eigenvectors, covariance_type=covariance_type, dtype=self.dtype
         )
 
         eigen_path = os.path.join(self.path, f"{covariance_type}_eigen_sharded")
@@ -249,24 +253,20 @@ class EkfacComputer:
         )
 
         eigenvalue_corrections = {}
-        transformed_activation_cache = {}
+        transformed_a_cache = {}
 
         def callback_activation(name: str, a: torch.Tensor):
             a_nsi = a  # [N, S, I]
 
-            transformed_activation_cache[name] = self._sharded_vec_matmul(
-                vector_nsa=a_nsi, matrix_cb=eigen_a[name], mult_type="left"
+            transformed_a_cache[name] = self.shard_computer._vec_matmul(
+                vector_nsa=a_nsi, matrix_cb=eigen_a[name]
             )  # shape [N, S, I]
 
         def callback_gradient(name: str, g: torch.Tensor):
             g_nso = g  # [N, S, O]
-            result_nso = self._sharded_vec_matmul(
-                vector_nsa=g_nso, matrix_cb=eigen_g[name], mult_type="right"
-            )  # [N, S, O]
+            result_nso = self.shard_computer._vec_matmul(vector_nsa=g_nso, matrix_cb=eigen_g[name])  # [N, S, O]
 
-            transformed_grad_shard = torch.einsum(
-                "N S I, N S O -> N O I", transformed_activation_cache[name], result_nso
-            )
+            transformed_grad_shard = torch.einsum("N S I, N S O -> N O I", transformed_a_cache[name], result_nso)
 
             transformed_grad_shard = (transformed_grad_shard**2).sum(dim=0).contiguous()
 
@@ -304,45 +304,6 @@ class EkfacComputer:
             self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
         )
 
-    def _sharded_vec_matmul(
-        self,
-        vector_nsa: Float[Tensor, "n s a"],
-        matrix_cb: Float[Tensor, "c b"],
-        mult_type: Literal["left", "right"],
-    ) -> Float[Tensor, "n s b"]:
-        """
-        Sharded matrix multiplication for distributed training. Assumes that c= a/world_size.
-        vector: [n, s, a]
-        matrix_shard: [c, b]
-        Returns: [n, s, b]
-        """
-        # Split the vector into shards
-        vector_shards_wnsc = torch.chunk(vector_nsa, self.world_size, dim=-1)  # (w, n, s, a/w)
-
-        result_nsb = torch.zeros(
-            vector_nsa.shape[0],
-            vector_nsa.shape[1],
-            matrix_cb.shape[1],
-            device=vector_nsa.device,
-            dtype=vector_nsa.dtype,
-        )
-
-        for rank_index in range(self.world_size):
-            if rank_index == self.rank:
-                shard_cb = matrix_cb
-            else:
-                shard_cb = torch.zeros_like(matrix_cb)
-
-            dist.broadcast(shard_cb, src=rank_index) if dist.is_initialized() else None
-            if mult_type == "left":
-                result_nsb += torch.einsum("n s c, c b-> n s b", vector_shards_wnsc[rank_index], shard_cb)  # [B, c]
-            elif mult_type == "right":
-                result_nsb += torch.einsum("c b, n s c-> n s b", shard_cb, vector_shards_wnsc[rank_index])
-            if self.rank != rank_index:
-                del shard_cb
-
-        return result_nsb
-
     def _setup_profiler(self):
         """Set up profiler if profiling is enabled."""
         if not self.cfg.profile:
@@ -367,155 +328,60 @@ class EkfacComputer:
 
         return prof
 
-    def _sharded_covariance(
-        self,
-        activation_covariance_dict: dict,
-        gradient_covariance_dict: dict,
-        dtype: torch.dtype,
-    ):
-        """This function initializes the sharded covariance matrices for activations and gradients.
-        So far we always shard using the first dimension.
-        TODO: Make this also work when dimension is not divisible by world_size."""
-
-        for name, (device, weight_shape) in self.target_info.items():
-            # Activation covariance A^T A has shape [in_dim, in_dim]
-            in_dim = weight_shape[1]
-            if in_dim % self.world_size != 0:
-                raise ValueError(f"Activation dim {in_dim} for {name} not divisible by world_size {self.world_size}")
-            shard_size = in_dim // self.world_size
-            activation_covariance_dict[name] = torch.zeros((shard_size, in_dim), device=self.device, dtype=dtype)
-
-            # Gradient covariance G^T G has shape [out_dim, out_dim]
-            out_dim = weight_shape[0]
-            if out_dim % self.world_size != 0:
-                raise ValueError(f"Gradient dim {out_dim} for {name} not divisible by world_size {self.world_size}")
-            shard_size = out_dim // self.world_size
-            gradient_covariance_dict[name] = torch.zeros((shard_size, out_dim), device=self.device, dtype=dtype)
-
     def _collector(self, collector, desc: Optional[str] = None) -> Float[Tensor, " "]:
         total_processed = torch.tensor(0, device=self.model.device)
         prof = self._setup_profiler()
         step = 0
-        try:
-            # torch.cuda.memory._record_memory_history()
-            with prof:
-                for sl in tqdm(self.batches, disable=self.rank != 0, desc=f"Computing {desc}"):
-                    batch = self.data[sl]
-                    x, y = pad_and_tensor(
-                        batch["input_ids"],  # type: ignore
-                        labels=batch.get("labels"),  # type: ignore
-                        device=self.model.device,
-                    )
 
-                    total_processed += x.numel()
+        with prof:
+            for sl in tqdm(self.batches, disable=self.rank != 0, desc=f"Computing {desc}"):
+                batch = self.data[sl]
+                x, y = pad_and_tensor(
+                    batch["input_ids"],  # type: ignore
+                    labels=batch.get("labels"),  # type: ignore
+                    device=self.model.device,
+                )
 
-                    with record_function(f"step_{step}") if self.cfg.profile else nullcontext():
-                        with collector:
-                            logits = self.model(x).logits
-                            logits = logits[:, :-1].reshape(-1, logits.size(-1))
+                total_processed += x.numel()
 
-                            if not self.cfg.sample:
-                                losses = F.cross_entropy(
-                                    logits,
-                                    y[:, 1:].flatten(),
-                                    reduction="none",
-                                ).reshape_as(y[:, 1:])
-                            else:
-                                with torch.no_grad():
-                                    probs = torch.nn.functional.softmax(logits.detach(), dim=-1)
-                                    sampled_labels = torch.multinomial(
-                                        probs,
-                                        num_samples=1,
-                                    ).flatten()
+                with collector, record_function(f"step_{step}") if self.cfg.profile else nullcontext():
+                    logits = self.model(x).logits
+                    logits = logits[:, :-1].reshape(-1, logits.size(-1))
 
-                                    del probs
+                    assert not self.cfg.sample, "DEBUGGING MODE, SAMPLE MUST BE FALSE"
+                    if not self.cfg.sample:
+                        losses = F.cross_entropy(
+                            logits,
+                            y[:, 1:].flatten(),
+                            reduction="none",
+                        ).reshape_as(y[:, 1:])
+                    else:
+                        with torch.no_grad():
+                            probs = torch.nn.functional.softmax(logits.detach(), dim=-1)
+                            sampled_labels = torch.multinomial(
+                                probs,
+                                num_samples=1,
+                            ).flatten()
 
-                                losses = F.cross_entropy(
-                                    logits,
-                                    sampled_labels,
-                                    reduction="none",
-                                ).reshape_as(y[:, 1:])
+                            del probs
 
-                            losses = losses.sum(1)
-                            losses.mean().backward()
-                            self.model.zero_grad()
-                            torch.cuda.synchronize()
+                        losses = F.cross_entropy(
+                            logits,
+                            sampled_labels,
+                            reduction="none",
+                        ).reshape_as(y[:, 1:])
 
-                    if self.cfg.profile:
-                        assert isinstance(prof, profile), "Profiler is not set up correctly"
-                        prof.step()
-                    step += 1
+                    losses = losses.sum(1)
+                    losses.mean().backward()
+                    self.model.zero_grad()
+                    torch.cuda.synchronize()
 
-        finally:
-            # torch.cuda.memory._dump_snapshot(f"snapshot_{self.rank}.pickle")
-            pass
+                if self.cfg.profile:
+                    assert isinstance(prof, profile), "Profiler is not set up correctly"
+                    prof.step()
+                step += 1
 
         return total_processed
-
-    def _compute_full_matrix(
-        self,
-        name: str,
-        shard_type: Literal[
-            "activation_covariance",
-            "gradient_covariance",
-            "eigenvalue_correction",
-            "inverse_eigenvalue_correction",
-        ],
-    ):
-        """
-        Load a full matrix from sharded covariance files. Needed to compute eigendecomposition.
-        """
-        shard_path = os.path.join(self.path, f"{shard_type}_sharded")
-        files = os.listdir(shard_path)
-        assert len(files) == self.world_size, f"Expected {self.world_size} shards, found {len(files)} in {self.path}"
-
-        full_matrix = []
-        for shard_id in range(self.world_size):
-            shard_path_rank = os.path.join(shard_path, f"shard_{shard_id}.safetensors")
-            with safe_open(shard_path_rank, framework="pt", device=f"cuda:{self.rank}") as f:
-                local_matrix = f.get_tensor(name)
-
-            full_matrix.append(local_matrix)
-
-        # Concatenate all shards to form the full matrix
-        full_matrix = torch.cat(full_matrix, dim=0)
-
-        return full_matrix
-
-    def _merge_and_shard_dict(
-        self,
-        input_dict: dict[str, torch.Tensor],
-        covariance_type: Literal["activation", "gradient"],
-    ):
-        """This function takes a dict of tensors, where each rank will have eigenvectors of *some* modules.
-        It then redistributes the tensors across all ranks,
-        so that each rank has a shard of the eigenvectors of *each* module.
-        """
-
-        for key in self.target_info:
-            d_out, d_in = self.target_info[key][1]
-            d = d_in if covariance_type == "activation" else d_out
-            shard_size = d // self.world_size
-
-            if key not in input_dict:
-                tensor = torch.zeros([d, d], device=self.device, dtype=self.dtype)
-            else:
-                tensor = input_dict[key].to(device=self.device)
-
-            dist.all_reduce(tensor, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
-
-            shard = torch.empty(shard_size, d, device=self.device, dtype=self.dtype)
-            shard.copy_(tensor[self.rank * shard_size : (self.rank + 1) * shard_size, :])
-            input_dict[key] = shard.to(device="cpu", non_blocking=True)
-
-            assert shard.shape[0] == shard_size, f"Shard shape {shard.shape} does not match expected {shard_size}"
-
-            del tensor
-
-            gc.collect()
-            torch.cuda.empty_cache()
-
-        return input_dict
 
 
 class EkfacApplicator:
