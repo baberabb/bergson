@@ -2,6 +2,8 @@ import logging
 import sys
 from typing import Optional
 
+import torch.distributed as dist
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -11,10 +13,16 @@ logging.basicConfig(
 )
 
 
+class RankFilter(logging.Filter):
+    """Filter that only allows logging from rank 0."""
+
+    def filter(self, record):
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        return rank == 0
+
+
 # Create a function to get loggers with consistent naming
-def get_logger(
-    name: Optional[str] = None, level: Optional[str] = None
-) -> logging.Logger:
+def get_logger(name: Optional[str] = None, level: Optional[str] = None) -> logging.Logger:
     """
     Get a logger with the configured format.
 
@@ -36,6 +44,10 @@ def get_logger(
 
     logger = logging.getLogger(name)
 
+    # Add rank filter if not already present
+    if not any(isinstance(f, RankFilter) for f in logger.filters):
+        logger.addFilter(RankFilter())
+
     if level is not None:
         # Convert string level to logging constant
         level_mapping = {
@@ -49,35 +61,3 @@ def get_logger(
         logger.setLevel(log_level)
 
     return logger
-
-
-# Create a default logger for convenience
-logger = logging.getLogger(__name__)
-
-
-# Optional: Add some convenience functions
-def info(msg: str):
-    """Log an info message"""
-    logger.info(msg)
-
-
-def warning(msg: str):
-    """Log a warning message"""
-    logger.warning(msg)
-
-
-def error(msg: str):
-    """Log an error message"""
-    logger.error(msg)
-
-
-def debug(msg: str):
-    """Log a debug message"""
-    logger.debug(msg)
-
-
-# Example usage when run directly
-if __name__ == "__main__":
-    logger.info("Logger configuration loaded")
-    logger.warning("This is a test warning")
-    logger.error("This is a test error")
