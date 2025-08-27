@@ -258,13 +258,13 @@ class EkfacComputer:
         def callback_activation(name: str, a: torch.Tensor):
             a_nsi = a  # [N, S, I]
 
-            transformed_a_cache[name] = self.shard_computer._vec_matmul(
+            transformed_a_cache[name] = self.shard_computer._matmul(
                 vector_nsa=a_nsi, matrix_cb=eigen_a[name]
             )  # shape [N, S, I]
 
         def callback_gradient(name: str, g: torch.Tensor):
             g_nso = g  # [N, S, O]
-            result_nso = self.shard_computer._vec_matmul(vector_nsa=g_nso, matrix_cb=eigen_g[name])  # [N, S, O]
+            result_nso = self.shard_computer._matmul(vector_nsa=g_nso, matrix_cb=eigen_g[name])  # [N, S, O]
 
             transformed_grad_shard = torch.einsum("N S I, N S O -> N O I", transformed_a_cache[name], result_nso)
 
@@ -398,10 +398,12 @@ class EkfacApplicator:
         os.makedirs(self.gradient_ekfac_path, exist_ok=True)
         self.logger = get_logger("EkfacApplicator", level="DEBUG" if cfg.debug else "INFO")
 
-        ### FSDP related
+        ### Distributed related
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.device = f"cuda:{self.rank}"
+
+        self.sharded_computer = ShardedMul(target_info=None, lambda_damp_factor=cfg.lambda_damp_factor)
 
         match cfg.precision:
             case "bf16":
@@ -567,13 +569,13 @@ class EkfacApplicator:
             self.logger.info(f"Saved IVHP gradients to {self.gradient_ekfac_path}")
 
     def compute_ivhp_batch(self, eigen_a, mmap, eigen_g, lambda_factor, random_eigen_a, random_eigen_g, batch_slice):
-        transformed_gradients = {}
+        transformed_gradients: dict[str, Tensor] = {}
         for k, v in eigen_a.items():
             gradients_noi = torch.from_numpy(mmap[k][batch_slice]).to(
                 device=self.device, dtype=torch.float32
             )  # shape [num_grads, out*in]
             gradients_noi = gradients_noi.view(-1, eigen_g[k].shape[1], eigen_a[k].shape[1])
-            transformed_gradients[k] = self._sharded_matmul(gradients_noi=gradients_noi, matrix_cb=v, mult_type="left")
+            transformed_gradients[k] = self.sharded_computer._matmul(vector_nsa=gradients_noi, matrix_cb=v)
 
         if self.rank == 0:
             self.logger.debug("Finished G @ Q_A")
@@ -583,9 +585,9 @@ class EkfacApplicator:
         torch.cuda.empty_cache()
 
         for k, v in eigen_g.items():
-            transformed_gradients[k] = self._sharded_matmul(
-                gradients_noi=transformed_gradients[k], matrix_cb=v, mult_type="right", k=k
-            )
+            transformed_gradients[k] = self.sharded_computer._matmul(
+                vector_nsa=transformed_gradients[k].transpose(-2, -1), matrix_cb=v
+            ).transpose(-2, -1)
 
         if self.rank == 0:
             self.logger.debug("Finished G'=Q_S.T @ G @ Q_A")
@@ -594,22 +596,25 @@ class EkfacApplicator:
         torch.cuda.empty_cache()
 
         for k, v in lambda_factor.items():
-            self._sharded_mult(matrix_noi=transformed_gradients[k], lambda_ci=v, k=k)  # this is in-place
+            self.sharded_computer._hadamard(matrix_noi=transformed_gradients[k], lambda_ci=v)  # this is in-place
 
         if self.rank == 0:
             self.logger.debug("Finished G'/lambda")
 
         for k, v in random_eigen_a.items():
-            transformed_gradients[k] = self._sharded_transpose_matmul(
-                matrix_noi=transformed_gradients[k], matrix_bc=v, mult_type="left"
+            transformed_gradients[k] = self.sharded_computer._transpose_matmul(
+                vector_nsa=transformed_gradients[k],
+                matrix_cb=v,
             )
+
         if self.rank == 0:
             self.logger.debug("Finished G'/lambda @ P_A.T")
 
         for k, v in random_eigen_g.items():
-            transformed_gradients[k] = self._sharded_transpose_matmul(
-                matrix_noi=transformed_gradients[k], matrix_bc=v, mult_type="right"
-            )
+            transformed_gradients[k] = self.sharded_computer._transpose_matmul(
+                vector_nsa=transformed_gradients[k].transpose(-2, -1),
+                matrix_cb=v,
+            ).transpose(-2, -1)
 
         if self.rank == 0:
             self.logger.debug("Finished P_S.T @ G'/lambda @ P_A.T")
@@ -678,125 +683,3 @@ class EkfacApplicator:
         full_matrix = torch.cat(full_matrix, dim=0)
 
         return full_matrix
-
-    def _sharded_matmul(
-        self,
-        gradients_noi: Float[Tensor, "n o i"],
-        matrix_cb: Float[Tensor, "c b"],
-        mult_type: Literal["left", "right"],
-        k=None,
-    ):
-        """
-        Sharded matrix multiplication for distributed training.
-        Assumes that c=i/world_size if left or o/world_size if right.
-        gradients: [n, o, i]
-        matrix_shard: [c, b] where c=i/w if left or c=o/w if right
-        Returns: [n, o, b] if left or [n, b, i] if right
-        """
-        # Split the vector into shards
-        gradients_shard_wnfg = torch.chunk(
-            gradients_noi, self.world_size, dim=2 if mult_type == "left" else 1
-        )  # (w, n, f, g) where f=i/w if left or g=o/w if right
-
-        x, y = (
-            (gradients_noi.shape[1], matrix_cb.shape[1])
-            if mult_type == "left"
-            else (matrix_cb.shape[1], gradients_noi.shape[2])
-        )
-        result_nxy = torch.zeros(
-            gradients_noi.shape[0],
-            x,
-            y,
-            device=gradients_noi.device,
-            dtype=gradients_noi.dtype,
-        )
-
-        for rank_index in range(self.world_size):
-            if rank_index == self.rank:
-                shard_cb = matrix_cb
-            else:
-                shard_cb = torch.zeros_like(matrix_cb)
-
-            dist.broadcast(shard_cb, src=rank_index) if dist.is_initialized() else None
-            if mult_type == "left":
-                result_nxy += torch.einsum("n o c, c b-> n o b", gradients_shard_wnfg[rank_index], shard_cb)  # [B, c]
-            elif mult_type == "right":
-                result_nxy += torch.einsum("c b, n c i -> n b i", shard_cb, gradients_shard_wnfg[rank_index])
-            if self.rank != rank_index:
-                del shard_cb
-
-        return result_nxy
-
-    def _sharded_mult(
-        self, matrix_noi: Float[Tensor, "n o i"], lambda_ci: Float[Tensor, "c i"], k: Optional[str] = None
-    ):
-        """
-        Sharded in-place element-wise division for distributed training.
-        gradients: [n, o, i]
-        matrix_shard: [c, i] where c=o/world_size
-
-        """
-
-        global_lambda_mean = lambda_ci.mean()
-
-        dist.all_reduce(global_lambda_mean, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
-        global_lambda_mean /= self.world_size
-
-        for rank_index in range(self.world_size):
-            if rank_index == self.rank:
-                shard_ci = lambda_ci
-            else:
-                shard_ci = torch.zeros_like(lambda_ci)
-
-            dist.broadcast(shard_ci, src=rank_index) if dist.is_initialized() else None
-
-            start_row = rank_index * shard_ci.shape[0]
-            end_row = (rank_index + 1) * shard_ci.shape[0]
-            inverse_lambda = (shard_ci + self.cfg.lambda_damp_factor * global_lambda_mean).reciprocal()
-
-            matrix_noi[:, start_row:end_row, :].mul_(inverse_lambda)
-
-            if self.rank != rank_index:
-                del shard_ci
-
-    def _sharded_transpose_matmul(
-        self,
-        matrix_noi: Float[Tensor, "n o i"],
-        matrix_bc: Float[Tensor, "b c"],
-        mult_type: Literal["left", "right"],
-    ):
-        """
-        Sharded matrix multiplication for distributed training.
-        Assumes that c=i/world_size if left or o/world_size if right.
-        gradients: [n, o, i]
-        matrix_shard: [c, b] where b=i if left or b=o if right
-        Returns: [n, o, c*w] if left or [n, c*w, i] if right
-        """
-
-        x, y = (
-            (matrix_noi.shape[1], matrix_bc.shape[0] * self.world_size)
-            if mult_type == "left"
-            else (matrix_bc.shape[0] * self.world_size, matrix_noi.shape[2])
-        )
-
-        result_nxy = torch.zeros(matrix_noi.shape[0], x, y, device=matrix_noi.device, dtype=matrix_noi.dtype)
-
-        for rank_index in range(self.world_size):
-            if rank_index == self.rank:
-                shard_bc = matrix_bc
-            else:
-                shard_bc = torch.zeros_like(matrix_bc)
-            dist.broadcast(shard_bc, src=rank_index) if dist.is_initialized() else None
-
-            shard_size = shard_bc.shape[0]
-            start_row = rank_index * shard_size
-            end_row = (rank_index + 1) * shard_size
-
-            if mult_type == "left":
-                result_nxy[:, :, start_row:end_row].copy_(torch.einsum("n o i, c i -> n o c", matrix_noi, shard_bc))
-            elif mult_type == "right":
-                result_nxy[:, start_row:end_row, :].copy_(torch.einsum("b o, n o i -> n b i", shard_bc, matrix_noi))
-            if self.rank != rank_index:
-                del shard_bc
-
-        return result_nxy
