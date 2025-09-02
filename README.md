@@ -1,5 +1,5 @@
 # Bergson
-This library enables you to the memory of deep neural nets with gradient-based data attribution techniques. We currently focus on TrackStar, as described in [Scalable Influence and Fact Tracing for Large Language Model Pretraining](https://arxiv.org/abs/2410.17413v3) by Chang et al. (2024), although we plan to add support for other methods inspired by influence functions in the near future.
+This library enables you to trace the memory of deep neural nets with gradient-based data attribution techniques. We currently focus on TrackStar, as described in [Scalable Influence and Fact Tracing for Large Language Model Pretraining](https://arxiv.org/abs/2410.17413v3) by Chang et al. (2024), although we plan to add support for other methods inspired by influence functions in the near future.
 
 We view attribution as a counterfactual question: **_If we "unlearned" this training sample, how would the model's behavior change?_** This formulation ties attribution to some notion of what it means to "unlearn" a training sample. Here we focus on a very simple notion of unlearning: taking a gradient _ascent_ step on the loss with respect to the training sample. To mimic the behavior of popular optimizers, we precondition the gradient using Adam or Adafactor-style estimates of the second moments of the gradient.
 

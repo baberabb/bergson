@@ -189,14 +189,15 @@ def dist_worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
 
 
 def build_gradient_dataset(cfg: IndexConfig):
+    # In many cases the token_batch_size may be smaller than the max length allowed by
+    # the model. If cfg.data.truncation is True, we use the tokenizer to truncate
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model, revision=cfg.revision)
+    tokenizer.model_max_length = min(tokenizer.model_max_length, cfg.token_batch_size)
+
     # Do all the data loading and preprocessing on the main process
     ds = load_data_string(cfg.data.dataset, cfg.data.split, streaming=cfg.streaming)
 
     remove_columns = ds.column_names if cfg.drop_columns else None
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        cfg.model, model_max_length=cfg.token_batch_size, revision=cfg.revision
-    )
     ds = ds.map(
         tokenize,
         batched=True,

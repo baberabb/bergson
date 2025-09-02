@@ -41,6 +41,9 @@ class DataConfig:
     conversation_column: str = ""
     """Optional column in the dataset that contains the conversation."""
 
+    truncation: bool = False
+    """Whether to truncate long documents to fit the token budget."""
+
 
 @dataclass
 class IndexConfig:
@@ -145,7 +148,9 @@ def allocate_batches(doc_lengths: list[int], N: int) -> list[list[int]]:
 
     docs_sorted = sorted(enumerate(doc_lengths), key=lambda x: x[1], reverse=True)
     if docs_sorted[0][1] > N:  # a single document would overflow any batch
-        raise RuntimeError("At least one document is too long for the budget N.")
+        raise RuntimeError(
+            f"At least one document is too long for the token batch size {N}."
+        )
 
     # ---------------------------------------------------------------------
     # 1) Bin packing under the cost function
@@ -399,6 +404,7 @@ def tokenize(batch: dict, *, args: DataConfig, tokenizer):
     kwargs = dict(
         return_attention_mask=False,
         return_length=True,
+        truncation=args.truncation,
     )
     if args.completion_column:
         # We're dealing with a prompt-completion dataset
@@ -416,11 +422,11 @@ def tokenize(batch: dict, *, args: DataConfig, tokenizer):
         convos = assert_type(list, batch[args.conversation_column])
     else:
         # We're dealing with vanilla next-token prediction
-        return tokenizer(batch[args.prompt_column], truncation=True, **kwargs)
+        return tokenizer(batch[args.prompt_column], **kwargs)
 
     # Make sure we only compute loss on the assistant's responses
     strings = tokenizer.apply_chat_template(convos, tokenize=False)
-    encodings = tokenizer(strings, truncation=True, **kwargs)
+    encodings = tokenizer(strings, **kwargs)
     labels_list: list[list[int]] = []
 
     for i, convo in enumerate(convos):
@@ -433,8 +439,16 @@ def tokenize(batch: dict, *, args: DataConfig, tokenizer):
                 continue
 
             ans = msg["content"]
-            start = strings[i].find(ans, pos)
-            pos = start + len(ans)  # move past this match
+            start = strings[i].rfind(ans, pos)
+            if start < 0:
+                raise RuntimeError(
+                    "Failed to find completion in the chat-formatted conversation. "
+                    "Make sure the chat template does not alter the completion, e.g. "
+                    "by removing leading whitespace."
+                )
+
+            # move past this match
+            pos = start + len(ans)
 
             start_token = encodings.char_to_token(i, start)
             end_token = encodings.char_to_token(i, pos)
