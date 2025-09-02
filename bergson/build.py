@@ -132,7 +132,6 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
     else:
         processor = GradientProcessor(
             {},
-            fisher_fourth_root=cfg.fisher_fourth_root,
             projection_dim=cfg.projection_dim or None,
             reshape_to_square=cfg.reshape_to_square,
             projection_type=cfg.projection_type,

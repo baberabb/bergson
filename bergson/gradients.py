@@ -44,7 +44,6 @@ class Normalizer(ABC):
     def normalize_(
         self,
         grad: Tensor,
-        fisher_fourth_root: bool = False,
         eps: float = 1e-8,
     ) -> Tensor:
         """
@@ -80,7 +79,6 @@ class AdafactorNormalizer(Normalizer):
     def normalize_(
         self,
         grad: Tensor,
-        fisher_fourth_root: bool = False,
         eps: float = 1e-30,
     ) -> Tensor:
         """
@@ -108,12 +106,8 @@ class AdafactorNormalizer(Normalizer):
         # by diag(a) and right-multiplying by diag(b). In this case we can represent
         # the elementwise reciprocal square root of V as ab^T where:
         # a = denom.sqrt() * r.rsqrt() and b = c.rsqrt()
-        if fisher_fourth_root:
-            a = denom.pow(0.25) * r.pow(-0.25)
-            b = c.pow(-0.25)
-        else:
-            a = denom.sqrt() * r.rsqrt_()  # shape [O]
-            b = c.rsqrt_()
+        a = denom.sqrt() * r.rsqrt_()  # shape [O]
+        b = c.rsqrt_()
 
         # Implicitly do the Hadamard product
         grad *= a[:, None]  # [N, O] * [O] → [N, O]
@@ -145,12 +139,11 @@ class AdamNormalizer(Normalizer):
     def normalize_(
         self,
         grad: Tensor,
-        fisher_fourth_root: bool = False,
         eps: float = 1e-8,
     ) -> Tensor:
         """Normalize the gradients by the square root of the second moments."""
         # Adam-style epsilon is added outside the square root
-        denom = self.avg_sq.pow(0.25) if fisher_fourth_root else self.avg_sq.sqrt()
+        denom = self.avg_sq.sqrt()
         return grad.div_(denom.add_(eps))
 
     def to_adafactor(self) -> AdafactorNormalizer:
@@ -186,14 +179,6 @@ class GradientProcessor:
     """
     Dictionary of preconditioners for each matrix-valued parameter in the model.
     These are applied after the normalization and random projection steps.
-    """
-
-    fisher_fourth_root: bool = False
-    """
-    Whether to use the fourth root of the inverse Fisher information matrix when
-    normalizing gradients. This means any inner product between normalized gradients
-    will implicitly use the square root of the inverse Fisher, rather than the inverse
-    Fisher itself.
     """
 
     projection_dim: int | None = None
@@ -389,10 +374,7 @@ class GradientCollector(ContextDecorator):
         norm = self.processor.normalizers.get(name)
         if isinstance(norm, AdafactorNormalizer):
             b = norm.col.add(1e-30)
-            if self.processor.fisher_fourth_root:
-                b.pow_(-0.25)
-            else:
-                b.rsqrt_()
+            b.rsqrt_()
 
             x = x * b.type_as(x)  # [N, S, I] * [I] → [N, S, I]
 
@@ -421,11 +403,7 @@ class GradientCollector(ContextDecorator):
         if isinstance(norm, AdafactorNormalizer):
             # Compare to the normalize_ method in AdafactorNormalizer
             r = norm.row.add(1e-30)
-
-            if self.processor.fisher_fourth_root:
-                a = r.mean().pow(0.25) * r.pow(-0.25)
-            else:
-                a = r.mean().sqrt() * r.rsqrt_()
+            a = r.mean().sqrt() * r.rsqrt_()
 
             G = G * a.type_as(G)  # [N, S, O] * [O] → [N, S, O]
 
