@@ -1,14 +1,11 @@
-import hashlib
 from contextlib import ContextDecorator
-from dataclasses import dataclass, field
-from typing import Callable, Literal, Mapping, Optional
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
-from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
-from bergson.gradients import GradientProcessor
 from bergson.utils import assert_type
 
 
@@ -31,9 +28,6 @@ class EkfacCollector(ContextDecorator):
     closure: Optional[Callable] = None
     """Closure to call on the gradient as it is collected."""
 
-    processor: GradientProcessor = field(default_factory=GradientProcessor)
-    """Configuration for processing and compressing gradients."""
-
     target_modules: set[str] | None = None
     """
     List of parameter names to collect gradients for. Should consist only of weight
@@ -45,6 +39,7 @@ class EkfacCollector(ContextDecorator):
     """Closure to call on the activations during forward hook."""
 
     def __post_init__(self):
+        print("WARNING EKFAC IS USING ALL LAYERS, NOT JUST MLP")
         self._fwd_hooks: list[RemovableHandle] = []
         self._bwd_hooks: list[RemovableHandle] = []
 
@@ -58,40 +53,11 @@ class EkfacCollector(ContextDecorator):
             if self.target_modules is not None and name not in self.target_modules:
                 continue
 
-            if "mlp" not in name:
-                continue
+            # if "mlp" not in name:
+            #     continue
 
             # Users of this class really like to know ahead of time what the shapes are
             self.target_info[name] = layer.weight.device, layer.weight.shape
-
-    def shapes(self) -> Mapping[str, torch.Size]:
-        """Return the shapes of the gradients collected by this collector."""
-        if (p_dim := self.processor.projection_dim) is not None:
-            return {name: torch.Size((p_dim, p_dim)) for name in self.target_info}
-
-        # If we don't have a projection dimension, we can just use the original shapes.
-        return {name: shape for name, (_, shape) in self.target_info.items()}
-
-    def projection(
-        self,
-        name: str,
-        m: int,
-        n: int,
-        side: Literal["left", "right"],
-        dtype: torch.dtype,
-    ) -> Tensor:
-        """Return the `side` projection matrix for parameter `name` of shape [m, n]."""
-        # Seed the PRNG with the name of the layer and what "side" we are projecting
-        message = bytes(f"{name}/{side}", "utf-8")
-        digest = hashlib.md5(message).digest()
-        seed = int.from_bytes(digest, byteorder="big") % (2**63 - 1)
-
-        device, _ = self.target_info[name]
-        prng = torch.Generator(device).manual_seed(seed)
-
-        A = torch.randn(m, n, device=device, dtype=dtype, generator=prng)
-        A /= A.norm(dim=1, keepdim=True)
-        return A
 
     def __enter__(self):
         # Install a hook on every Linear

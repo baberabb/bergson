@@ -18,7 +18,6 @@ def compute_all_factors(
 ):
     computer = EkfacComputer(
         model=model,
-        processor=processor,
         data=data,
         batches=batches,
         target_modules=target_modules,

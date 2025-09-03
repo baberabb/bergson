@@ -13,7 +13,6 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import Dataset
 from jaxtyping import Float
-from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch import Tensor
 from torch.profiler import (
@@ -27,9 +26,6 @@ from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
 from bergson.data import IndexConfig, create_index, load_gradients, pad_and_tensor
-from bergson.gradients import (
-    GradientProcessor,
-)
 from bergson.hessians.collector import EkfacCollector
 from bergson.hessians.logger import get_logger
 from bergson.hessians.sharded_computation import ShardedMul
@@ -55,7 +51,6 @@ class EkfacComputer:
     def __init__(
         self,
         model: PreTrainedModel,
-        processor: GradientProcessor,
         data: Dataset,
         *,
         batches: list[list[int]],
@@ -69,7 +64,6 @@ class EkfacComputer:
         self.ekfac_collector = EkfacCollector(model.base_model, target_modules=target_modules)
         self.target_info = self.ekfac_collector.target_info
 
-        self.processor = processor
         self.target_modules = target_modules  # which modules to compute EKFAC for, by default uses all MLPs
         self.data = data
         self.batches = batches
@@ -85,8 +79,7 @@ class EkfacComputer:
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-        if self.rank == 0:
-            self.logger.info(f"Computing EKFAC for {list(self.target_info)} target modules.")
+        self.logger.info(f"Computing EKFAC for {list(self.target_info)} target modules.")
 
     def compute_covariance(self):
         """
@@ -139,7 +132,6 @@ class EkfacComputer:
         collector = EkfacCollector(
             self.model.base_model,
             closure=callback_gradient,
-            processor=self.processor,
             target_modules=self.target_modules,
             fwd_closure=callback_activation,
         )
@@ -152,7 +144,7 @@ class EkfacComputer:
 
         if self.rank == 0:
             torch.save(total_processed, os.path.join(self.path, "total_processed.pt"))
-            self.logger.info(f"Total processed: {total_processed.item()}")
+        self.logger.info(f"Total processed: {total_processed.item()}")
 
         activation_path = os.path.join(self.path, "activation_covariance_sharded")
         gradient_path = os.path.join(self.path, "gradient_covariance_sharded")
@@ -164,10 +156,9 @@ class EkfacComputer:
         save_file(A_cov_dict, os.path.join(activation_path, f"shard_{self.rank}.safetensors"))
         save_file(S_cov_dict, os.path.join(gradient_path, f"shard_{self.rank}.safetensors"))
 
-        if self.rank == 0:
-            self.logger.info(f"Saved activation covariance to {activation_path}")
-            self.logger.info(f"Saved gradient covariance to {gradient_path}")
-            self.logger.info("-*-" * 50)
+        self.logger.info(f"Saved activation covariance to {activation_path}")
+        self.logger.info(f"Saved gradient covariance to {gradient_path}")
+        self.logger.info("-*-" * 50)
         # Clean up
         torch.cuda.empty_cache()
         gc.collect()
@@ -228,8 +219,8 @@ class EkfacComputer:
             covariance_eigenvectors,
             os.path.join(eigen_path, f"shard_{self.rank}.safetensors"),
         )
-        if self.rank == 0:
-            self.logger.info(f"Saved {covariance_type} eigenvectors to {eigen_path}")
+
+        self.logger.info(f"Saved {covariance_type} eigenvectors to {eigen_path}")
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -240,8 +231,7 @@ class EkfacComputer:
         This is Eq. 20 from above reference.
         """
 
-        if self.rank == 0:
-            self.logger.info(f"Computing eigenvalue correction for {len(self.data)} documents...")
+        self.logger.info(f"Computing eigenvalue correction for {len(self.data)} documents...")
 
         eigen_a = load_file(
             self.path + f"/activation_eigen_sharded/shard_{self.rank}.safetensors",
@@ -285,7 +275,6 @@ class EkfacComputer:
         collector = EkfacCollector(
             self.model.base_model,
             closure=callback_gradient,
-            processor=self.processor,
             target_modules=self.target_modules,
             fwd_closure=callback_activation,
         )
@@ -296,7 +285,7 @@ class EkfacComputer:
             dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
         if self.rank == 0:
             torch.save(total_processed, os.path.join(self.path, "total_processed_lambda.pt"))
-            self.logger.info(f"Total processed: {total_processed.item()}")
+        self.logger.info(f"Total processed: {total_processed.item()}")
 
         os.makedirs(self.path + "/eigenvalue_correction_sharded", exist_ok=True)
         save_file(
@@ -348,7 +337,6 @@ class EkfacComputer:
                     logits = self.model(x).logits
                     logits = logits[:, :-1].reshape(-1, logits.size(-1))
 
-                    assert not self.cfg.sample, "DEBUGGING MODE, SAMPLE MUST BE FALSE"
                     if not self.cfg.sample:
                         losses = F.cross_entropy(
                             logits,
@@ -483,11 +471,10 @@ class EkfacApplicator:
             os.path.join(random_gradient_path, f"shard_{self.rank}.safetensors"),
         )
 
-        if self.rank == 0:
-            self.logger.info(f"Saved random activation eigenvectors to {random_activation_path}")
-            self.logger.info(f"Saved random gradient eigenvectors to {random_gradient_path}")
+        self.logger.info(f"Saved random activation eigenvectors to {random_activation_path}")
+        self.logger.info(f"Saved random gradient eigenvectors to {random_gradient_path}")
 
-            self.logger.info("-*-" * 50)
+        self.logger.info("-*-" * 50)
 
     def compute_ivhp_sharded(self):
         eigen_a = load_file(
@@ -537,8 +524,7 @@ class EkfacApplicator:
             dtype=np.float32,
         )
 
-        if self.rank == 0:
-            self.logger.info(f"Loaded gradients for {len(mmap)} queries and computing IVHP...")
+        self.logger.info(f"Loaded gradients for {len(mmap)} queries and computing IVHP...")
 
         for i in tqdm(
             range(math.ceil(info["num_grads"] / self.cfg.gradient_batch_size)),
@@ -565,8 +551,8 @@ class EkfacApplicator:
             transformed_gradients_slice.clear()
 
         grad_buffer.flush()
-        if self.rank == 0:
-            self.logger.info(f"Saved IVHP gradients to {self.gradient_ekfac_path}")
+
+        self.logger.info(f"Saved IVHP gradients to {self.gradient_ekfac_path}")
 
     def compute_ivhp_batch(self, eigen_a, mmap, eigen_g, lambda_factor, random_eigen_a, random_eigen_g, batch_slice):
         transformed_gradients: dict[str, Tensor] = {}
@@ -577,8 +563,7 @@ class EkfacApplicator:
             gradients_noi = gradients_noi.view(-1, eigen_g[k].shape[1], eigen_a[k].shape[1])
             transformed_gradients[k] = self.sharded_computer._matmul(vector_nsa=gradients_noi, matrix_cb=v)
 
-        if self.rank == 0:
-            self.logger.debug("Finished G @ Q_A")
+        self.logger.debug("Finished G @ Q_A")
 
         del eigen_a
         gc.collect()
@@ -589,8 +574,7 @@ class EkfacApplicator:
                 vector_nsa=transformed_gradients[k].transpose(-2, -1), matrix_cb=v
             ).transpose(-2, -1)
 
-        if self.rank == 0:
-            self.logger.debug("Finished G'=Q_S.T @ G @ Q_A")
+        self.logger.debug("Finished G'=Q_S.T @ G @ Q_A")
         del eigen_g
         gc.collect()
         torch.cuda.empty_cache()
@@ -598,8 +582,7 @@ class EkfacApplicator:
         for k, v in lambda_factor.items():
             self.sharded_computer._hadamard(matrix_noi=transformed_gradients[k], lambda_ci=v)  # this is in-place
 
-        if self.rank == 0:
-            self.logger.debug("Finished G'/lambda")
+        self.logger.debug("Finished G'/lambda")
 
         for k, v in random_eigen_a.items():
             transformed_gradients[k] = self.sharded_computer._transpose_matmul(
@@ -607,8 +590,7 @@ class EkfacApplicator:
                 matrix_cb=v,
             )
 
-        if self.rank == 0:
-            self.logger.debug("Finished G'/lambda @ P_A.T")
+        self.logger.debug("Finished G'/lambda @ P_A.T")
 
         for k, v in random_eigen_g.items():
             transformed_gradients[k] = self.sharded_computer._transpose_matmul(
@@ -616,8 +598,7 @@ class EkfacApplicator:
                 matrix_cb=v,
             ).transpose(-2, -1)
 
-        if self.rank == 0:
-            self.logger.debug("Finished P_S.T @ G'/lambda @ P_A.T")
+        self.logger.debug("Finished P_S.T @ G'/lambda @ P_A.T")
         return transformed_gradients
 
     def _projection(
@@ -653,33 +634,3 @@ class EkfacApplicator:
             raise ValueError(f"Unknown projection type: {projection_type}")
         A /= A.norm(dim=1, keepdim=True)
         return A
-
-    def _compute_full_matrix(
-        self,
-        name: str,
-        shard_type: Literal[
-            "activation_covariance",
-            "gradient_covariance",
-            "eigenvalue_correction",
-            "inverse_eigenvalue_correction",
-        ],
-    ):
-        """
-        Load a full matrix from sharded covariance files. Needed to compute eigendecomposition.
-        """
-        shard_path = os.path.join(self.path, f"{shard_type}_sharded")
-        files = os.listdir(shard_path)
-        assert len(files) == self.world_size, f"Expected {self.world_size} shards, found {len(files)} in {self.path}"
-
-        full_matrix = []
-        for shard_id in range(self.world_size):
-            shard_path_rank = os.path.join(shard_path, f"shard_{shard_id}.safetensors")
-            with safe_open(shard_path_rank, framework="pt", device=f"cuda:{self.rank}") as f:
-                local_matrix = f.get_tensor(name)
-
-            full_matrix.append(local_matrix)
-
-        # Concatenate all shards to form the full matrix
-        full_matrix = torch.cat(full_matrix, dim=0)
-
-        return full_matrix
