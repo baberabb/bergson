@@ -1,4 +1,5 @@
 import math
+from typing import Literal
 
 import numpy as np
 import torch
@@ -23,9 +24,10 @@ def collect_gradients(
     path: str,
     *,
     batches: list[list[int]] | None = None,
+    kl_divergence: bool | None = None,
+    loss_reduction: Literal["mean", "sum"] = "mean",
     skip_preconditioners: bool = False,
     target_modules: set[str] | None = None,
-    kl_divergence: bool | None = None,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -91,7 +93,7 @@ def collect_gradients(
             device=model.device,
         )
         masks = y[:, 1:] != -100
-        denoms = masks.sum(dim=1, dtype=dtype)
+        denoms = masks.sum(dim=1, dtype=dtype) if loss_reduction == "mean" else 1.0
 
         if kl_divergence:
             with torch.inference_mode():
@@ -115,7 +117,7 @@ def collect_gradients(
                     y[:, 1:].flatten(),
                     reduction="none",
                 ).reshape_as(y[:, 1:])
-                losses = losses.sum(1).div(denoms)
+                losses = losses.sum(1) / denoms
                 losses.mean().backward()
 
         # Weirdly you need to explicitly synchronize here in order to make sure that

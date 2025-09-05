@@ -91,6 +91,9 @@ class IndexConfig:
     loss_fn: Literal["ce", "kl"] = "ce"
     """Loss function to use."""
 
+    loss_reduction: Literal["mean", "sum"] = "mean"
+    """Reduction method for the loss function."""
+
     streaming: bool = False
     """Whether to use streaming mode for the dataset."""
 

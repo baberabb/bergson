@@ -147,9 +147,10 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             processor,
             cfg.run_path,
             batches=batches,
+            kl_divergence=cfg.loss_fn == "kl",
+            loss_reduction=cfg.loss_reduction,
             skip_preconditioners=cfg.skip_preconditioners,
             target_modules=target_modules,
-            kl_divergence=cfg.loss_fn == "kl",
         )
     else:
         # Convert each chunk to Dataset then collect their gradients
@@ -167,9 +168,10 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
                 processor,
                 os.path.join(cfg.run_path, f"chunk-{chunk_id:05d}"),
                 batches=batches,
+                kl_divergence=cfg.loss_fn == "kl",
+                loss_reduction=cfg.loss_reduction,
                 skip_preconditioners=cfg.skip_preconditioners,
                 target_modules=target_modules,
-                kl_divergence=cfg.loss_fn == "kl",
             )
             buf.clear()
             chunk_id += 1
