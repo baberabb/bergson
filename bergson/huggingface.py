@@ -71,6 +71,7 @@ class GradientCollectorCallback(TrainerCallback):
 
         self.mod_grads = {}
         self.batch_indices: Tensor | None = None
+        self.training_order: list[dict] = []
 
         # TODO: Handle this more elegantly
         self.torch_dtype = torch.float32 if self.dtype == np.float32 else torch.float16
@@ -82,6 +83,12 @@ class GradientCollectorCallback(TrainerCallback):
             grad_buffer[layer_name][self.batch_indices, :] = g.numpy()
 
         self.mod_grads.clear()
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        """Track the current step and epoch for training order recording."""
+        if self.track_training_order:
+            self._current_step = state.global_step
+            self._current_epoch = int(state.epoch or 0)
 
     def on_train_begin(
         self,
@@ -158,6 +165,7 @@ class GradientCollectorCallback(TrainerCallback):
 
         # Set up the gradient buffers for the evaluation datasets
         if eval_dataloader is None:
+            print("No evaluation dataloader found")
             return
         elif isinstance(eval_dataloader, dict):
             eval_datasets = eval_dataloader
@@ -212,6 +220,12 @@ class GradientCollectorCallback(TrainerCallback):
             device="cpu", dtype=self.torch_dtype, non_blocking=True
         )
 
+        if (self.mod_grads[name].pow(2).sum(dim=1) == 0).any():
+            print(
+                f"{self.mod_grads[name].pow(2).sum(dim=1).eq(0).sum().item()} "
+                "sum of squares == 0 rows found in gradients after fp16"
+            )
+
     def on_substep_end(
         self,
         args: TrainingArguments,
@@ -257,6 +271,24 @@ class GradientCollectorCallback(TrainerCallback):
         # We can skip all this if we're not using the optimizer state
         if not self.use_optimizer_state:
             return
+
+        # Record training order if enabled
+        if self.training_order is not None:
+            if self.batch_indices is None:
+                raise ValueError(
+                    "Batch indices are not available for training order tracking"
+                )
+
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            self.training_order.extend(
+                {
+                    "_idx": int(idx),
+                    "rank": rank,
+                    "global_step": getattr(self, "_current_step", 0),
+                    "epoch": getattr(self, "_current_epoch", 0),
+                }
+                for idx in self.batch_indices.tolist()
+            )
 
         # The optimizer doesn't actually know the names of the parameters
         model = getattr(model, "base_model", model)

@@ -109,7 +109,7 @@ def collect_gradients(
                 if "advantage" in batch:
                     losses *= torch.tensor(batch["advantage"], device=losses.device)
 
-                losses.mean().backward()
+                losses.sum().backward()
         else:
             with collector:
                 logits = model(x).logits[:, :-1]
@@ -123,7 +123,7 @@ def collect_gradients(
                 if "advantage" in batch:
                     losses *= torch.tensor(batch["advantage"], device=losses.device)
 
-                losses.mean().backward()
+                losses.sum().backward()
 
         # Weirdly you need to explicitly synchronize here in order to make sure that
         # the nonblocking copies actually finish before we call .numpy()
