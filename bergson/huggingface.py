@@ -5,6 +5,8 @@ from itertools import chain
 from typing import Sized
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 import torch.distributed as dist
 from datasets import Dataset
@@ -354,7 +356,6 @@ class GradientCollectorCallback(TrainerCallback):
 
     def _save_order(self):
         """Save the training order to disk, handling distributed training."""
-        assert self.order is not None
         os.makedirs(self.path, exist_ok=True)
 
         if dist.is_initialized():
