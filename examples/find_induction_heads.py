@@ -216,7 +216,7 @@ def setup_training(
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=True,
-        num_train_epochs=3,
+        num_train_epochs=2,
         per_device_train_batch_size=16,
         # per_device_eval_batch_size=16,
         gradient_accumulation_steps=1,
@@ -242,6 +242,7 @@ def setup_training(
         path=f"{output_dir}/gradients",
         projection_dim=projection_dim,
         dtype=np.float32,
+        torch_dtype=torch.float32,
         accumulate_grads=False,
         track_training_order=True,
     )
@@ -278,6 +279,10 @@ def build_induction_index(model, induction_prompts, output_dir, projection_dim):
                 "text": prompt_data["text"],
             }
         )
+        # Mask out everything except the last token in the labels
+        labels = [-100] * len(prompt_data["input_ids"])
+        labels[-1] = prompt_data["input_ids"][-1]
+        induction_data[-1]["labels"] = labels
 
     induction_dataset = Dataset.from_list(induction_data)
 
@@ -309,8 +314,19 @@ def build_induction_index(model, induction_prompts, output_dir, projection_dim):
     # Collect mean gradient from attributor index
     mean_gradient = attributor.grads.mean(dim=0)
 
+    attributor = Attributor(
+        index_path=f"{output_dir}/induction_gradients",
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        dtype=torch.float32,
+        modules=True,
+    )
+
+    mean_module_gradients = {
+        name: attributor.grads[name].mean(dim=0) for name in attributor.grads.keys()
+    }
+
     print("In-context index built successfully! Returning mean gradient...")
-    return mean_gradient
+    return mean_gradient, mean_module_gradients
 
 
 def upload_to_hub(model, tokenizer, model_name="2layer-transformer-tinystories"):
@@ -328,9 +344,9 @@ def upload_to_hub(model, tokenizer, model_name="2layer-transformer-tinystories")
 
 
 def main(projection_dim=128):
-    tag = ""
+    tag = "mask_query"
     k = 1000
-    unit_norm = False
+    unit_norm = True
 
     print(
         "Starting 2-layer transformer pretraining with Bergson gradient collection..."
@@ -364,10 +380,10 @@ def main(projection_dim=128):
         wandb=False,
     )
 
-    trainer.train()
+    # trainer.train()
 
-    # trainer.save_model(trainer.args.output_dir)
-    # tokenizer.save_pretrained(trainer.args.output_dir)
+    trainer.save_model(trainer.args.output_dir)
+    tokenizer.save_pretrained(trainer.args.output_dir)
 
     # upload_to_hub(model, tokenizer)
 
@@ -377,7 +393,7 @@ def main(projection_dim=128):
     model = model.to(device)
 
     # Build Bergson index for induction head queries
-    mean_induction_gradients = build_induction_index(
+    mean_induction_gradients, module_induction_gradients = build_induction_index(
         model, induction_prompts, trainer.args.output_dir, projection_dim
     )
     model = model.cpu()
@@ -393,7 +409,7 @@ def main(projection_dim=128):
             dtype=torch.float32,
             # faiss_cfg=FaissConfig(
         )
-        for epoch in [0]  # range(trainer.args.num_train_epochs)
+        for epoch in range(trainer.args.num_train_epochs)
     ]
     # Load parquet table containing training order
     training_order = pq.read_table(
@@ -464,7 +480,10 @@ def main(projection_dim=128):
 
     plt.xlabel("Cumulative Training Steps")
     plt.ylabel("Influence Score")
-    plt.title("Most Influential Training Examples Per Epoch (Normalized)")
+    plt.title(
+        f"Most Influential Training Examples Per Epoch "
+        f"({'Normalized' if unit_norm else 'Unnormalized'})"
+    )
     plt.legend()
     plt.grid(True, alpha=0.3)
     fig_name = (
@@ -512,7 +531,10 @@ def main(projection_dim=128):
 
     plt.xlabel("Cumulative Training Steps")
     plt.ylabel("Influence Score")
-    plt.title("Most Influential Training Examples Per Epoch (Normalized)")
+    plt.title(
+        f"Most Influential Training Examples Per Epoch "
+        f"({'Normalized' if unit_norm else 'Unnormalized'})"
+    )
     plt.legend()
     plt.grid(True, alpha=0.3)
     fig_name = (
@@ -524,7 +546,121 @@ def main(projection_dim=128):
         format="pdf",
         bbox_inches="tight",
     )
-    plt.show()
+
+    # Produce the same plot but split out by module (i.e. key in the grads mmap)
+
+    # Second, produce the module-wise scores
+    del epoch_attributors
+    import os
+
+    os.makedirs("module_figures", exist_ok=True)
+
+    for epoch_idx in range(trainer.args.num_train_epochs):
+        module_attributor = Attributor(
+            index_path=f"{trainer.args.output_dir}/gradients/train/epoch_{epoch_idx}",
+            device=device,
+            dtype=torch.float32,
+            modules=True,
+        )
+        for name, grads in module_attributor.grads.items():
+            data = []
+            inner_products = grads.float() @ module_induction_gradients[name].float()
+            for i, score in enumerate(inner_products.squeeze()):
+                training_metadata = training_order[
+                    (training_order["_idx"] == i)
+                    & (training_order["epoch"] == epoch_idx)
+                ]
+                if len(training_metadata) != 1:
+                    continue
+                for row in training_metadata.itertuples(index=False):
+                    data.append(
+                        {
+                            "global_step": row.global_step,
+                            "epoch": epoch_idx,
+                            "module": name,
+                            "score": score.item(),
+                        }
+                    )
+            data = pd.DataFrame(data)
+            module_data = data
+
+            plt.figure(figsize=(12, 8))
+
+            plt.scatter(
+                module_data["global_step"],
+                module_data["score"],
+                alpha=0.6,
+                s=20,
+                label=f"Module {name}",
+            )
+            plt.xlabel("Training Step")
+            plt.ylabel("Influence Score")
+            plt.title(
+                f"Most Influential Training Examples for {name} "
+                f"({'Normalized' if unit_norm else 'Unnormalized'})"
+            )
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            fig_name = (
+                f'training_dynamics_induction{"_" + tag if tag else ""}'
+                f'{"_norm" if unit_norm else ""}_{name}.pdf'
+            )
+            plt.savefig(
+                os.path.join("module_figures", fig_name),
+                format="pdf",
+                bbox_inches="tight",
+            )
+            plt.close()
+
+            # Add a line plot with absolute sum of the gradients for each module
+            plt.figure(figsize=(12, 8))
+
+            module_data = module_data.groupby("global_step", as_index=False).agg(
+                score=("score", lambda s: s.abs().sum())
+            )
+            plt.plot(
+                module_data["global_step"], module_data["score"], label=f"Module {name}"
+            )
+            plt.xlabel("Training Step")
+            plt.ylabel("Absolute Sum of Gradients")
+            plt.title(f"Absolute Sum of Gradients for {name}")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            fig_name = (
+                f'training_dynamics_induction_abs_sum{"_" + tag if tag else ""}'
+                f'{"_norm" if unit_norm else ""}_{name}.pdf'
+            )
+            plt.savefig(
+                os.path.join("module_figures", fig_name),
+                format="pdf",
+                bbox_inches="tight",
+            )
+            plt.close()
+
+            # Add a line plot with the sum of the gradients for each module
+            # Sum points at each global step
+            module_data = module_data.groupby("global_step", as_index=False).agg(
+                score=("score", lambda s: s.sum())
+            )
+            plt.figure(figsize=(12, 8))
+            plt.plot(
+                module_data["global_step"], module_data["score"], label=f"Module {name}"
+            )
+            plt.xlabel("Training Step")
+            plt.ylabel("Sum of Gradients")
+            plt.title(f"Sum of Gradients for {name}")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            fig_name = (
+                f'training_dynamics_induction_sum{"_" + tag if tag else ""}'
+                f'{"_norm" if unit_norm else ""}_{name}.pdf'
+            )
+            plt.savefig(
+                os.path.join("module_figures", fig_name),
+                format="pdf",
+                bbox_inches="tight",
+            )
+            plt.close()
 
 
 if __name__ == "__main__":

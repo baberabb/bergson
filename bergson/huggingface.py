@@ -33,7 +33,6 @@ class GradientCollectorCallback(TrainerCallback):
         path: str,
         head_cfgs: dict[str, HeadConfig],
         projection_dim: int = 16,
-        dtype: DTypeLike = np.float16,
         accumulate_grads: bool = False,
         use_optimizer_state: bool = True,
         track_order: bool = False,
@@ -74,6 +73,7 @@ class GradientCollectorCallback(TrainerCallback):
         self.mod_grads = {}
         self.batch_indices: Tensor | None = None
         self.training_order: list[dict] = []
+        self.torch_dtype = torch_dtype
 
         # TODO: Handle this more elegantly
         self.torch_dtype = torch.float32 if self.dtype == np.float32 else torch.float16
@@ -225,7 +225,7 @@ class GradientCollectorCallback(TrainerCallback):
         if (self.mod_grads[name].pow(2).sum(dim=1) == 0).any():
             print(
                 f"{self.mod_grads[name].pow(2).sum(dim=1).eq(0).sum().item()} "
-                "sum of squares == 0 rows found in gradients after fp16"
+                f"sum of squares == 0 rows found in gradients after {self.torch_dtype}"
             )
 
     def on_substep_end(

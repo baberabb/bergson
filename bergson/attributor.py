@@ -43,6 +43,7 @@ class Attributor:
         dtype: torch.dtype = torch.float32,
         unit_norm: bool = False,
         faiss_cfg: FaissConfig | None = None,
+        modules: bool = False,
     ):
         self.device = device
         self.dtype = dtype
@@ -119,6 +120,67 @@ class Attributor:
         ).sum(-1)
 
         return torch.topk(scores, k)
+
+    def search_module(
+        self, queries: Tensor, k: int, module: str
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Search for the `k` nearest examples in the index based on the query or queries.
+        If fewer than `k` examples are found FAISS will return items with the index -1
+        and the maximum negative distance.
+
+        Args:
+            queries: The query tensor of shape [..., d].
+            k: The number of nearest examples to return for each query.
+            nprobe: The number of FAISS vector clusters to search if using ANN.
+
+        Returns:
+            A namedtuple containing the top `k` indices and inner products for each
+            query. Both have shape [..., k].
+        """
+        assert isinstance(
+            self.grads, dict
+        ), "Gradients must be a dictionary of tensors."
+        assert module in self.grads, f"Module {module} not found in gradients."
+
+        k = min(k, self.grads[module].shape[0])
+
+        q = queries
+
+        if self.unit_norm:
+            q /= q.norm(dim=1, keepdim=True)
+
+        if not self.faiss_cfg:
+            return torch.topk(q.to(self.device) @ self.grads[module].mT, k)
+
+        q = q.cpu().numpy()
+
+        shard_distances = []
+        shard_indices = []
+        offset = 0
+
+        for index in self.faiss_shards:
+            index.nprobe = self.faiss_cfg.nprobe
+            distances, indices = index.search(q, k)
+
+            indices += offset
+            offset += index.ntotal
+
+            shard_distances.append(distances)
+            shard_indices.append(indices)
+
+        distances = np.concatenate(shard_distances, axis=1)
+        indices = np.concatenate(shard_indices, axis=1)
+
+        # Rerank results overfetched from multiple shards
+        if len(self.faiss_shards) > 1:
+            topk_indices = np.argsort(distances, axis=1)[:, :k]
+            indices = indices[np.arange(indices.shape[0])[:, None], topk_indices]
+            distances = distances[np.arange(distances.shape[0])[:, None], topk_indices]
+
+        return torch.from_numpy(distances.squeeze()), torch.from_numpy(
+            indices.squeeze()
+        )
 
     @contextmanager
     def trace(
