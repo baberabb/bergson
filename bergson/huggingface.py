@@ -5,8 +5,6 @@ from itertools import chain
 from typing import Sized
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 import torch
 import torch.distributed as dist
 from datasets import Dataset
@@ -41,7 +39,6 @@ class GradientCollectorCallback(TrainerCallback):
         Args:
             path: The path to save the gradients
             projection_dim: The dimension to project the gradients onto
-            dtype: The dtype of the on-disk gradient store
             accumulate_grads: Whether to take the sum of the gradients
                 of the same example across epochs. If `False`, the
                 gradients for each epoch are stored separately.
@@ -72,8 +69,9 @@ class GradientCollectorCallback(TrainerCallback):
 
         self.mod_grads = {}
         self.batch_indices: Tensor | None = None
-        self.training_order: list[dict] = []
-        self.torch_dtype = torch_dtype
+
+        # TODO: Handle this more elegantly
+        self.torch_dtype = torch.float32 if self.dtype == np.float32 else torch.float16
 
         # TODO: Handle this more elegantly
         self.torch_dtype = torch.float32 if self.dtype == np.float32 else torch.float16
@@ -88,7 +86,7 @@ class GradientCollectorCallback(TrainerCallback):
 
     def on_step_begin(self, args, state, control, **kwargs):
         """Track the current step and epoch for training order recording."""
-        if self.track_training_order:
+        if self.order:
             self._current_step = state.global_step
             self._current_epoch = int(state.epoch or 0)
 
@@ -222,12 +220,6 @@ class GradientCollectorCallback(TrainerCallback):
             device="cpu", dtype=self.torch_dtype, non_blocking=True
         )
 
-        if (self.mod_grads[name].pow(2).sum(dim=1) == 0).any():
-            print(
-                f"{self.mod_grads[name].pow(2).sum(dim=1).eq(0).sum().item()} "
-                f"sum of squares == 0 rows found in gradients after {self.torch_dtype}"
-            )
-
     def on_substep_end(
         self,
         args: TrainingArguments,
@@ -275,17 +267,14 @@ class GradientCollectorCallback(TrainerCallback):
             return
 
         # Record training order if enabled
-        if self.training_order is not None:
-            if self.batch_indices is None:
-                raise ValueError(
-                    "Batch indices are not available for training order tracking"
-                )
+        if self.order:
+            assert (
+                self.batch_indices is not None
+            ), "Batch indices are not available for training order tracking"
 
-            rank = dist.get_rank() if dist.is_initialized() else 0
-            self.training_order.extend(
+            self.order.extend(
                 {
                     "_idx": int(idx),
-                    "rank": rank,
                     "global_step": getattr(self, "_current_step", 0),
                     "epoch": getattr(self, "_current_epoch", 0),
                 }
@@ -356,6 +345,7 @@ class GradientCollectorCallback(TrainerCallback):
 
     def _save_order(self):
         """Save the training order to disk, handling distributed training."""
+        assert self.order is not None
         os.makedirs(self.path, exist_ok=True)
 
         if dist.is_initialized():

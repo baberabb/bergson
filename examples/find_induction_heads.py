@@ -10,22 +10,33 @@ This script:
 4. Uploads the trained model to HF hub
 """
 
+# attn_only.py
+import math
+import os
+import random
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from datasets import Dataset, load_dataset
 from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
-    GPTNeoConfig,
-    GPTNeoForCausalLM,
+    PretrainedConfig,
+    PreTrainedModel,
     Trainer,
     TrainingArguments,
 )
+from transformers.generation.utils import GenerationMixin
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import wandb
 from bergson.attributor import Attributor
@@ -37,6 +48,233 @@ from bergson.huggingface import (
     GradientCollectorCallback,
     prepare_for_gradient_collection,
 )
+
+
+class AttnOnlyConfig(PretrainedConfig):
+    model_type = "attn_only"
+
+    def __init__(
+        self,
+        vocab_size=50257,
+        hidden_size=768,
+        num_hidden_layers=12,
+        num_attention_heads=12,
+        max_position_embeddings=2048,
+        layer_norm_epsilon=1e-5,
+        resid_pdrop=0.0,
+        embd_pdrop=0.0,
+        attn_pdrop=0.0,
+        use_cache=True,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.max_position_embeddings = max_position_embeddings
+        self.layer_norm_epsilon = layer_norm_epsilon
+        self.resid_pdrop = resid_pdrop
+        self.embd_pdrop = embd_pdrop
+        self.attn_pdrop = attn_pdrop
+        self.use_cache = use_cache
+
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, config: AttnOnlyConfig):
+        super().__init__()
+        assert config.hidden_size % config.num_attention_heads == 0
+        self.n_head = config.num_attention_heads
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.c_attn = nn.Linear(config.hidden_size, 3 * config.hidden_size, bias=True)
+        self.c_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
+        self.attn_drop = nn.Dropout(config.attn_pdrop)
+        self.resid_drop = nn.Dropout(config.resid_pdrop)
+        self.register_buffer(
+            "mask",
+            torch.tril(
+                torch.ones(
+                    config.max_position_embeddings, config.max_position_embeddings
+                )
+            ).view(
+                1, 1, config.max_position_embeddings, config.max_position_embeddings
+            ),
+            persistent=False,
+        )
+
+    def _split_heads(self, x):
+        B, T, C = x.shape
+        x = x.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        return x
+
+    def _merge_heads(self, x):
+        B, _, T, _ = x.shape
+        return x.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_dim)
+
+    def forward(
+        self,
+        x,
+        pos_emb,
+        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache: bool = True,
+        attn_mask: Optional[torch.Tensor] = None,
+    ):
+        B, T, C = x.shape
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(C, dim=2)
+
+        # add position to q and k only
+        q = q + pos_emb
+        k = k + pos_emb
+
+        q = self._split_heads(q)
+        k = self._split_heads(k)
+        v = self._split_heads(v)
+
+        if layer_past is not None:
+            pk, pv = layer_past
+            k = torch.cat([pk, k], dim=2)
+            v = torch.cat([pv, v], dim=2)
+
+        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        causal = self.mask[:, :, :T, : k.size(-2)]
+        att = att.masked_fill(causal == 0, float("-inf"))
+        if attn_mask is not None:
+            att = att + attn_mask
+        att = F.softmax(att, dim=-1)
+        att = self.attn_drop(att)
+        y = att @ v
+        y = self._merge_heads(y)
+        y = self.resid_drop(self.c_proj(y))
+
+        present = (k, v) if use_cache else None
+        return y, present
+
+
+class AttnOnlyBlock(nn.Module):
+    def __init__(self, config: AttnOnlyConfig):
+        super().__init__()
+        # self.ln_1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.attn = CausalSelfAttention(config)
+
+    def forward(
+        self,
+        x,
+        pos_emb,
+        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache: bool = True,
+        attn_mask: Optional[torch.Tensor] = None,
+    ):
+        # self.ln_1(x)
+        a, present = self.attn(
+            x, pos_emb, layer_past=layer_past, use_cache=use_cache, attn_mask=attn_mask
+        )
+        x = x + a
+        return x, present
+
+
+class AttnOnlyForCausalLM(PreTrainedModel, GenerationMixin):
+    config_class = AttnOnlyConfig
+
+    def __init__(self, config: AttnOnlyConfig):
+        super().__init__(config)
+        self.wte = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.wpe = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.drop = nn.Dropout(config.embd_pdrop)
+        self.h = nn.ModuleList(
+            [AttnOnlyBlock(config) for _ in range(config.num_hidden_layers)]
+        )
+        # self.ln_f = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        if isinstance(module, nn.Linear) and module.bias is not None:
+            nn.init.zeros_(module.bias)
+        if isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+
+    # HF helpers
+    def get_input_embeddings(self):
+        return self.wte
+
+    def set_input_embeddings(self, new_emb):
+        self.wte = new_emb
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_lm_head):
+        self.lm_head = new_lm_head
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        **kwargs,
+    ):
+        if past_key_values is not None:
+            input_ids = input_ids[:, -1:]
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "past_key_values": past_key_values,
+            "use_cache": True,
+        }
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        use_cache: Optional[bool] = None,
+    ) -> CausalLMOutputWithPast:
+        B, T = input_ids.size()
+        pos = torch.arange(0, T, dtype=torch.long, device=input_ids.device).unsqueeze(0)
+        x = self.wte(input_ids)  # + self.wpe(pos)
+        x = self.drop(x)
+
+        pos_emb = self.wpe(pos)
+        presents = []
+        for i, block in enumerate(self.h):
+            layer_past = None if past_key_values is None else past_key_values[i]
+            x, present = block(
+                x,
+                pos_emb,
+                layer_past=layer_past,
+                use_cache=self.config.use_cache if use_cache is None else use_cache,
+            )
+            if present is not None:
+                presents.append(present)
+
+        # x = self.ln_f(x)
+        logits = self.lm_head(x)
+
+        loss = None
+        if labels is not None:
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            )
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=presents if presents else None,
+            hidden_states=None,
+            attentions=None,
+        )
+
+
+AutoConfig.register("attn_only", AttnOnlyConfig)
+AutoModelForCausalLM.register(AttnOnlyConfig, AttnOnlyForCausalLM)
 
 
 def check_logins():
@@ -64,31 +302,42 @@ def check_logins():
 
 def create_transformer():
     """Create a transformer model using GPTNeo architecture."""
-    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/TinyStories-restricted")
+    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B")
+    # Alternative: use the EleutherAI 10k token tokenizer custom-built for TinyStories
 
-    # TODO use the EleutherAI 10k token tokenizer custom-built for TinyStories
-    # Padding and truncation = True
-    config = GPTNeoConfig(
+    # config = GPTNeoConfig(
+    #     vocab_size=len(tokenizer),
+    #     hidden_size=768,
+    #     intermediate_size=2,
+    #     num_layers=2,
+    #     num_heads=2,
+    #     max_position_embeddings=1024,
+    #     attention_types=[[["global"], 2]],
+    #     window_size=256,
+    #     resid_pdrop=0.0,
+    #     embd_pdrop=0.0,
+    #     attn_pdrop=0.0,
+    #     layer_norm_epsilon=1e-5,
+    #     initializer_range=0.02,
+    #     use_cache=True,
+    #     # Token IDs from the tokenizer
+    #     pad_token_id=tokenizer.pad_token_id,
+    #     bos_token_id=tokenizer.bos_token_id,
+    #     eos_token_id=tokenizer.eos_token_id,
+    # )
+    # model = GPTNeoForCausalLM(config)
+
+    cfg = AttnOnlyConfig(
         vocab_size=len(tokenizer),
-        hidden_size=256,
-        intermediate_size=1024,
-        num_layers=2,
-        num_heads=4,
+        hidden_size=768,
+        num_hidden_layers=2,
+        num_attention_heads=12,
         max_position_embeddings=1024,
-        attention_types=[[["global"], 2]],
-        window_size=256,
-        resid_pdrop=0.0,
-        embd_pdrop=0.0,
-        attn_pdrop=0.0,
-        layer_norm_epsilon=1e-5,
-        initializer_range=0.02,
-        use_cache=True,
-        # Token IDs from the tokenizer
-        pad_token_id=tokenizer.pad_token_id,
-        bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
     )
-    model = GPTNeoForCausalLM(config)
+    model = AttnOnlyForCausalLM(cfg)
+
+    # AutoConfig.register("attn_only", AttnOnlyConfig)
+    # AutoModelForCausalLM.register(AttnOnlyConfig, AttnOnlyForCausalLM)
 
     # Set pad token
     if tokenizer.pad_token is None:
@@ -102,8 +351,9 @@ def create_transformer():
 
 def load_tinystories_data(tokenizer, max_length=512, N=10000):
     """Load and preprocess TinyStories dataset."""
-    dataset = load_dataset("roneneldan/TinyStories", split="train")
-    dataset = dataset.select(range(min(N, len(dataset))))
+    dataset = load_dataset("EleutherAI/SmolLM2-135M-10B", split="train")
+    # dataset = load_dataset("roneneldan/TinyStories", split="train")
+    # dataset = dataset.select(range(min(N, len(dataset))))
 
     def tokenize_function(examples):
         # Tokenize the text
@@ -140,62 +390,124 @@ def load_tinystories_data(tokenizer, max_length=512, N=10000):
     return train_dataset, eval_dataset
 
 
-def create_induction_head_dataset(tokenizer, num_prompts=10):
-    """Create synthetic induction head dataset for building the query index."""
-    print(f"Creating {num_prompts} synthetic induction head prompts...")
+def build_single_token_vocab(tokenizer, wordlist, max_words=500):
+    singles = []
+    for w in wordlist:
+        toks = tokenizer(w, add_special_tokens=False)["input_ids"]
+        if len(toks) == 1:
+            singles.append(w)
+        if len(singles) >= max_words:
+            break
+    return singles
 
-    # Create induction head patterns: [A][B] ... [A] -> [B]
-    # These are designed to test if the model learns to copy tokens
-    # from earlier in the sequence
 
-    # Generate diverse induction head patterns
+def create_induction_head_dataset(tokenizer, seed, num_prompts=100):
+    random.seed(seed)
+
+    # crude word list, can be expanded
+    base_words = [
+        "cat",
+        "dog",
+        "bird",
+        "wolf",
+        "bear",
+        "sun",
+        "moon",
+        "star",
+        "book",
+        "tree",
+        "car",
+        "road",
+        "sky",
+        "song",
+        "color",
+        "blue",
+        "green",
+        "red",
+        "gold",
+        "day",
+        "night",
+        "king",
+        "queen",
+        "child",
+        "story",
+    ]
+    vocab = build_single_token_vocab(tokenizer, base_words)
+    print(f"Vocab size: {len(vocab)}")
+
     patterns = [
-        "The cat sat on the mat. The cat",
-        "Once upon a time, there was a princess. Once upon a time",
-        "In the forest, the wolf howled. In the forest",
-        "The sun shines bright today. The sun",
-        "My favorite color is blue. My favorite color",
-        "The dog ran in the park. The dog",
-        "She loves to read books. She loves",
-        "The moon is full tonight. The moon",
-        "He plays guitar every day. He plays",
-        "The bird sings a sweet song. The bird",
+        "The {A} saw the {B}. The {A}",
+        "Once the {A} met the {B}, later the {A}",
+        "In the story the {A} followed the {B}. The {A}",
+        "My favorite is the {A} with the {B}. The {A}",
+        "Everyone said the {A} remembers the {B}. The {A}",
     ]
 
-    # Take the requested number of prompts
-    selected_prompts = patterns[:num_prompts]
+    dataset = []
+    for _ in range(num_prompts):
+        try:
+            A, B = random.sample(vocab, 2)
+        except ValueError:
+            print(f"Vocab size: {len(vocab)}")
+            breakpoint()
+            raise ValueError("Not enough unique tokens in vocab")
 
-    # Tokenize the prompts
-    tokenized_prompts = []
-    for prompt in selected_prompts:
-        # Split into input and target (everything after the last space)
-        parts = prompt.rsplit(" ", 1)
-        if len(parts) == 2:
-            input_text, target = parts
-            tokenized = tokenizer(
-                input_text,
-                return_tensors="pt",
-                padding=False,
-                truncation=True,
-                max_length=512,
-            )
-            # Get the target token ID
-            target_tokens = tokenizer(
-                target, return_tensors="pt", add_special_tokens=False
-            )
-            if target_tokens["input_ids"].numel() > 0:
-                target_token_id = target_tokens["input_ids"][0, 0].item()
-                tokenized_prompts.append(
-                    {
-                        "input_ids": tokenized["input_ids"][0],
-                        "attention_mask": tokenized["attention_mask"][0],
-                        "target_token": target_token_id,
-                        "text": prompt,
-                    }
-                )
+        template = random.choice(patterns)
+        text = template.format(A=A, B=B)
+        toks = tokenizer(text, return_tensors="pt", add_special_tokens=False)
+        input_ids = toks["input_ids"][0]
+        labels = torch.full_like(input_ids, -100)
 
-    print(f"Created {len(tokenized_prompts)} induction head prompts")
-    return tokenized_prompts
+        A_id = tokenizer(A, add_special_tokens=False)["input_ids"][0]
+        B_id = tokenizer(B, add_special_tokens=False)["input_ids"][0]
+
+        # mask all A and B positions
+        matches_A = (input_ids == A_id).nonzero(as_tuple=True)[0]
+        matches_B = (input_ids == B_id).nonzero(as_tuple=True)[0]
+        labels[matches_A] = A_id
+        labels[matches_B] = B_id
+
+        # explicitly make sure final label is B
+        labels[-1] = B_id
+
+        dataset.append(
+            {
+                "input_ids": input_ids,
+                "attention_mask": toks["attention_mask"][0],
+                "labels": labels,
+                "A": A,
+                "B": B,
+                "text": text,
+            }
+        )
+    return dataset
+
+
+def test_induction_head_labels():
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    dataset = create_induction_head_dataset(tokenizer, seed=0, num_prompts=3)
+
+    for ex in dataset:
+        input_ids = ex["input_ids"]
+        labels = ex["labels"]
+
+        A_id = tokenizer(ex["A"], add_special_tokens=False)["input_ids"][0]
+        B_id = tokenizer(ex["B"], add_special_tokens=False)["input_ids"][0]
+
+        # check only {A, B, -100} appear
+        allowed = {A_id, B_id, -100}
+        assert set(labels.tolist()).issubset(allowed)
+
+        # every A in input_ids must be in labels
+        for pos in (input_ids == A_id).nonzero(as_tuple=True)[0]:
+            assert labels[pos] == A_id
+
+        # every B in input_ids must be in labels
+        for pos in (input_ids == B_id).nonzero(as_tuple=True)[0]:
+            assert labels[pos] == B_id
+
+        # final token must be B
+        assert labels[-1].item() == B_id
 
 
 def setup_training(
@@ -216,11 +528,11 @@ def setup_training(
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=True,
-        num_train_epochs=2,
-        per_device_train_batch_size=16,
-        # per_device_eval_batch_size=16,
+        num_train_epochs=1,
+        per_device_train_batch_size=8,
+        # per_device_eval_batch_size=8,
         gradient_accumulation_steps=1,
-        warmup_steps=100,
+        warmup_steps=1000,
         learning_rate=5e-4,
         weight_decay=0.01,
         logging_dir=f"{output_dir}/logs",
@@ -232,7 +544,7 @@ def setup_training(
         # metric_for_best_model="train_loss",
         # greater_is_better=False,
         report_to="wandb" if wandb else None,
-        run_name="2-layer-transformer-tinystories",
+        run_name="2-layer-transformer-smollm2-corpus",
         seed=42,
         fp16=False,
         dataloader_drop_last=True,
@@ -244,7 +556,7 @@ def setup_training(
         dtype=np.float32,
         torch_dtype=torch.float32,
         accumulate_grads=False,
-        track_training_order=True,
+        track_order=True,
     )
 
     # Create trainer
@@ -263,7 +575,9 @@ def setup_training(
     return trainer
 
 
-def build_induction_index(model, induction_prompts, output_dir, projection_dim):
+def build_induction_index(
+    model, induction_prompts, output_dir, projection_dim, unit_norm
+):
     """Build static query Bergson index using synthetic induction head data."""
     print("Building Bergson index for induction head queries...")
 
@@ -309,6 +623,7 @@ def build_induction_index(model, induction_prompts, output_dir, projection_dim):
         index_path=f"{output_dir}/induction_gradients",
         device="cuda" if torch.cuda.is_available() else "cpu",
         dtype=torch.float32,
+        unit_norm=unit_norm,
     )
 
     # Collect mean gradient from attributor index
@@ -319,6 +634,7 @@ def build_induction_index(model, induction_prompts, output_dir, projection_dim):
         device="cuda" if torch.cuda.is_available() else "cpu",
         dtype=torch.float32,
         modules=True,
+        unit_norm=unit_norm,
     )
 
     mean_module_gradients = {
@@ -343,10 +659,14 @@ def upload_to_hub(model, tokenizer, model_name="2layer-transformer-tinystories")
         raise e
 
 
-def main(projection_dim=128):
-    tag = "mask_query"
-    k = 1000
-    unit_norm = True
+def main(args):
+    unit_norm = args.unit_norm
+    tag = args.tag
+
+    projection_dim = args.projection_dim
+    seed = args.seed
+    train = args.train
+    plot = False
 
     print(
         "Starting 2-layer transformer pretraining with Bergson gradient collection..."
@@ -361,13 +681,15 @@ def main(projection_dim=128):
 
     # Create model and tokenizer
     model, tokenizer = create_transformer()
-    model = model.to(device)
 
     # # Load TinyStories data
     train_dataset, eval_dataset = load_tinystories_data(tokenizer)
 
     # # Create induction head dataset
-    induction_prompts = create_induction_head_dataset(tokenizer)
+    test_induction_head_labels()
+    induction_prompts = create_induction_head_dataset(
+        tokenizer, seed=seed, num_prompts=10
+    )
 
     # # Set up training
     trainer = setup_training(
@@ -380,125 +702,52 @@ def main(projection_dim=128):
         wandb=False,
     )
 
-    # trainer.train()
+    if train:
+        trainer.train()
+        trainer.save_model(trainer.args.output_dir)
+        tokenizer.save_pretrained(trainer.args.output_dir)
 
-    trainer.save_model(trainer.args.output_dir)
-    tokenizer.save_pretrained(trainer.args.output_dir)
+    if not plot:
+        return
 
     # upload_to_hub(model, tokenizer)
 
     # Reload model and tokenizer
-    model = GPTNeoForCausalLM.from_pretrained(trainer.args.output_dir)
+    # model = AutoModelForCausalLM.from_pretrained(trainer.args.output_dir)
+    model = AttnOnlyForCausalLM.from_pretrained(trainer.args.output_dir)
     tokenizer = AutoTokenizer.from_pretrained(trainer.args.output_dir)
     model = model.to(device)
 
     # Build Bergson index for induction head queries
     mean_induction_gradients, module_induction_gradients = build_induction_index(
-        model, induction_prompts, trainer.args.output_dir, projection_dim
+        model, induction_prompts, trainer.args.output_dir, projection_dim, unit_norm
     )
     model = model.cpu()
 
-    # Read Bergson index from training
-    epoch_attributors = [
-        Attributor(
+    # Load parquet table containing training order
+    training_order = pq.read_table(
+        str(Path(trainer.args.output_dir) / "gradients" / "training_order.parquet")
+    ).to_pandas()
+
+    # Plots
+    os.makedirs("figures", exist_ok=True)
+
+    # Calculate the inner products with the training gradients
+    data = []
+    for epoch_idx in range(trainer.args.num_train_epochs):
+        # Read Bergson index from training
+        attributor = Attributor(
             str(
-                Path(trainer.args.output_dir) / "gradients" / "train" / f"epoch_{epoch}"
+                Path(trainer.args.output_dir)
+                / "gradients"
+                / "train"
+                / f"epoch_{epoch_idx}"
             ),
             device=device,
             unit_norm=unit_norm,
             dtype=torch.float32,
             # faiss_cfg=FaissConfig(
         )
-        for epoch in range(trainer.args.num_train_epochs)
-    ]
-    # Load parquet table containing training order
-    training_order = pq.read_table(
-        str(Path(trainer.args.output_dir) / "gradients" / "training_order.parquet")
-    ).to_pandas()
-
-    # Test the attributor with a sample query
-    print("Testing Bergson index with sample query...")
-    test_prompt = "The cat sat on the mat. The cat"
-    test_input = tokenizer(test_prompt, return_tensors="pt").to(device)
-
-    # Mask out everything except the last token in the labels
-    test_input["labels"] = test_input["input_ids"].clone()
-    test_input["labels"][:, :-1] = -100
-
-    top_data = []
-
-    model = model.to(device)
-    for epoch_idx, epoch_attributor in enumerate(epoch_attributors):
-        # print(f"Top {k} most influential training examples for epoch {epoch_idx}:")
-
-        with epoch_attributor.trace(model.base_model, k=k) as result:
-            outputs = model(**test_input)
-            outputs.loss.backward()
-            model.zero_grad()
-
-        skips = 0
-        for i, (score, idx) in enumerate(
-            zip(result.scores.squeeze(), result.indices.squeeze())
-        ):
-
-            if idx.item() != -1:
-                # Get the training order
-                training_metadata = training_order[
-                    (training_order["_idx"] == idx.item())
-                    & (training_order["epoch"] == epoch_idx)
-                ]
-                if training_metadata.empty:
-                    skips += 1
-                    continue
-                for row in training_metadata.itertuples(index=False):
-                    # print(f"{i+1}. Score: {score.item():.4f},
-                    # Global step: {row.global_step}, Index: {idx.item()}")
-                    top_data.append(
-                        {
-                            "epoch": epoch_idx,
-                            "global_step": row.global_step,
-                            "index": idx.item(),
-                            "score": score.item(),
-                        }
-                    )
-        print(f"Skipped {skips} examples for epoch {epoch_idx}")
-
-    top_data = pd.DataFrame(top_data)
-
-    # Scatter plot of scores over time
-    plt.figure(figsize=(12, 8))
-
-    for epoch in sorted(top_data["epoch"].unique()):
-        epoch_data = top_data[top_data["epoch"] == epoch]
-        plt.scatter(
-            epoch_data["global_step"],
-            epoch_data["score"],
-            alpha=0.6,
-            s=20,
-            label=f"Epoch {epoch}",
-        )
-
-    plt.xlabel("Cumulative Training Steps")
-    plt.ylabel("Influence Score")
-    plt.title(
-        f"Most Influential Training Examples Per Epoch "
-        f"({'Normalized' if unit_norm else 'Unnormalized'})"
-    )
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    fig_name = (
-        f'training_dynamics{"_" + tag if tag else ""}{"_norm" if unit_norm else ""}.pdf'
-    )
-    plt.savefig(
-        fig_name,
-        format="pdf",
-        bbox_inches="tight",
-    )
-    plt.show()
-
-    # Calculate the inner products with the training gradients
-    data = []
-    for epoch_idx, attributor in enumerate(epoch_attributors):
         inner_products = attributor.grads.float() @ mean_induction_gradients.float()
         for i, score in enumerate(inner_products.squeeze()):
             training_metadata = training_order[
@@ -519,28 +768,22 @@ def main(projection_dim=128):
     data = pd.DataFrame(data)
 
     plt.figure(figsize=(12, 8))
-    for epoch in sorted(data["epoch"].unique()):
-        epoch_data = data[data["epoch"] == epoch]
-        plt.scatter(
-            epoch_data["global_step"],
-            epoch_data["score"],
-            alpha=0.6,
-            s=20,
-            label=f"Epoch {epoch}",
-        )
-
+    plt.scatter(
+        data["global_step"],
+        data["score"],
+        alpha=0.6,
+        s=20,
+        # Use epoch for color
+        c=data["epoch"],
+    )
     plt.xlabel("Cumulative Training Steps")
     plt.ylabel("Influence Score")
     plt.title(
-        f"Most Influential Training Examples Per Epoch "
+        f"Most Influential Training Examples "
         f"({'Normalized' if unit_norm else 'Unnormalized'})"
     )
-    plt.legend()
     plt.grid(True, alpha=0.3)
-    fig_name = (
-        f'training_dynamics_mean_induction{"_" + tag if tag else ""}'
-        f'{"_norm" if unit_norm else ""}.pdf'
-    )
+    fig_name = f"figures/scores_{tag}" f'{"_norm" if unit_norm else ""}.pdf'
     plt.savefig(
         fig_name,
         format="pdf",
@@ -548,22 +791,22 @@ def main(projection_dim=128):
     )
 
     # Produce the same plot but split out by module (i.e. key in the grads mmap)
-
-    # Second, produce the module-wise scores
-    del epoch_attributors
-    import os
-
-    os.makedirs("module_figures", exist_ok=True)
-
+    data = []
     for epoch_idx in range(trainer.args.num_train_epochs):
         module_attributor = Attributor(
             index_path=f"{trainer.args.output_dir}/gradients/train/epoch_{epoch_idx}",
             device=device,
             dtype=torch.float32,
             modules=True,
+            unit_norm=unit_norm,
         )
         for name, grads in module_attributor.grads.items():
-            data = []
+            if "attention" not in name and "attn" not in name:
+                print(f"Skipping {name}")
+                continue
+            else:
+                print(f"Processing {name}")
+
             inner_products = grads.float() @ module_induction_gradients[name].float()
             for i, score in enumerate(inner_products.squeeze()):
                 training_metadata = training_order[
@@ -581,87 +824,81 @@ def main(projection_dim=128):
                             "score": score.item(),
                         }
                     )
-            data = pd.DataFrame(data)
-            module_data = data
 
-            plt.figure(figsize=(12, 8))
+    df = pd.DataFrame(data)
+    print(df)
 
-            plt.scatter(
-                module_data["global_step"],
-                module_data["score"],
-                alpha=0.6,
-                s=20,
-                label=f"Module {name}",
-            )
-            plt.xlabel("Training Step")
-            plt.ylabel("Influence Score")
-            plt.title(
-                f"Most Influential Training Examples for {name} "
-                f"({'Normalized' if unit_norm else 'Unnormalized'})"
-            )
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            fig_name = (
-                f'training_dynamics_induction{"_" + tag if tag else ""}'
-                f'{"_norm" if unit_norm else ""}_{name}.pdf'
-            )
-            plt.savefig(
-                os.path.join("module_figures", fig_name),
-                format="pdf",
-                bbox_inches="tight",
-            )
-            plt.close()
+    for module in df["module"].unique():
+        name = module
+        module_data = df[df["module"] == module]
+        print(module_data)
 
-            # Add a line plot with absolute sum of the gradients for each module
-            plt.figure(figsize=(12, 8))
+        plt.figure(figsize=(12, 8))
 
-            module_data = module_data.groupby("global_step", as_index=False).agg(
-                score=("score", lambda s: s.abs().sum())
-            )
-            plt.plot(
-                module_data["global_step"], module_data["score"], label=f"Module {name}"
-            )
-            plt.xlabel("Training Step")
-            plt.ylabel("Absolute Sum of Gradients")
-            plt.title(f"Absolute Sum of Gradients for {name}")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            fig_name = (
-                f'training_dynamics_induction_abs_sum{"_" + tag if tag else ""}'
-                f'{"_norm" if unit_norm else ""}_{name}.pdf'
-            )
-            plt.savefig(
-                os.path.join("module_figures", fig_name),
-                format="pdf",
-                bbox_inches="tight",
-            )
-            plt.close()
+        plt.scatter(
+            module_data["global_step"],
+            module_data["score"],
+            # c=module_data["epoch"],
+            alpha=0.6,
+            s=20,
+            label=f"Module {name}",
+        )
+        plt.xlabel("Training Step")
+        plt.ylabel("Influence Score")
+        plt.title(
+            f"Most Influential Training Examples for {name} "
+            f"({'Normalized' if unit_norm else 'Unnormalized'})"
+        )
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        fig_name = (
+            f"figures/module_scores_{tag}" f'{"_norm" if unit_norm else ""}_{name}.pdf'
+        )
+        plt.savefig(
+            fig_name,
+            format="pdf",
+            bbox_inches="tight",
+        )
+        plt.close()
 
-            # Add a line plot with the sum of the gradients for each module
-            # Sum points at each global step
-            module_data = module_data.groupby("global_step", as_index=False).agg(
-                score=("score", lambda s: s.sum())
-            )
-            plt.figure(figsize=(12, 8))
-            plt.plot(
-                module_data["global_step"], module_data["score"], label=f"Module {name}"
-            )
-            plt.xlabel("Training Step")
-            plt.ylabel("Sum of Gradients")
-            plt.title(f"Sum of Gradients for {name}")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            fig_name = (
-                f'training_dynamics_induction_sum{"_" + tag if tag else ""}'
-                f'{"_norm" if unit_norm else ""}_{name}.pdf'
-            )
-            plt.savefig(
-                os.path.join("module_figures", fig_name),
-                format="pdf",
-                bbox_inches="tight",
-            )
-            plt.close()
+        # Add a line plot with the sum of the gradients for each module
+        # Sum points at each global step
+        module_data = module_data.groupby(["global_step", "epoch"], as_index=False).agg(
+            score=("score", "sum")
+        )
+        plt.figure(figsize=(12, 8))
+        plt.plot(
+            module_data["global_step"],
+            module_data["score"],
+            label=f"Module {name}",  # c=module_data["epoch"]
+        )
+        plt.xlabel("Training Step")
+        plt.ylabel("Sum of Gradients")
+        plt.title(f"Sum of Gradients for {name}")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        fig_name = (
+            f'figures/sum{"_" + tag if tag else ""}'
+            f'{"_norm" if unit_norm else ""}_{name}.pdf'
+        )
+        plt.savefig(
+            fig_name,
+            format="pdf",
+            bbox_inches="tight",
+        )
+        plt.close()
+
+    # Can we use SVCCA to align the gradients?
 
 
 if __name__ == "__main__":
-    main()
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser()
+    parser.add_argument("--projection_dim", type=int, default=128)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--train", action="store_true")
+    parser.add_argument("--unit_norm", action="store_true")
+    parser.add_argument("--tag", type=str, default="")
+    args = parser.parse_args()
+    main(args)
