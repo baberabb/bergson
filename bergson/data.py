@@ -54,38 +54,11 @@ class IndexConfig:
     projection_dim: int = 16
     """Dimension of the random projection for the index, or 0 to disable it."""
 
-    reshape_to_square: bool = False
-    """Whether to reshape the gradients to a square matrix."""
-
     token_batch_size: int = 8192
     """Batch size in tokens for building the index."""
 
-    normalizer: Literal["adafactor", "adam", "none"] = "adafactor"
-    """Type of normalizer to use for the gradients."""
-
-    fisher_fourth_root: bool = False
-    """Whether to use the fourth root of the Fisher information matrix."""
-
     processor_path: str = ""
     """Path to a precomputed processor."""
-
-    skip_preconditioners: bool = False
-    """Whether to skip computing preconditioners for the gradients."""
-
-    stats_sample_size: int | None = 10_000
-    """Number of examples to use for estimating processor statistics."""
-
-    drop_columns: bool = False
-    """Only return the new dataset columns."""
-
-    streaming: bool = False
-    """Whether to use streaming mode for the dataset."""
-
-    streaming_chunk_size: int = 100_000
-    """Chunk size for streaming the dataset into Dataset objects."""
-
-    revision: str | None = None
-    """Revision of the model."""
 
     world_size: int | None = None
     """Number of distributed workers. If None, uses maximum available GPUs."""

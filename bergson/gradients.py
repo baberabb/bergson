@@ -175,32 +175,9 @@ class AdamNormalizer(Normalizer):
 class GradientProcessor:
     """Configuration for processing and compressing gradients."""
 
-    normalizers: Mapping[str, Normalizer] = field(default_factory=dict)
-    """
-    Dictionary of normalizers for each matrix-valued parameter in the model. The keys
-    should match the names of the parameters in the model. If a parameter does not have
-    a normalizer, it will be skipped.
-    """
-
-    preconditioners: Mapping[str, Tensor] = field(default_factory=dict)
-    """
-    Dictionary of preconditioners for each matrix-valued parameter in the model.
-    These are applied after the normalization and random projection steps.
-    """
-
-    fisher_fourth_root: bool = False
-    """
-    Whether to use the fourth root of the inverse Fisher information matrix when
-    normalizing gradients. This means any inner product between normalized gradients
-    will implicitly use the square root of the inverse Fisher, rather than the inverse
-    Fisher itself.
-    """
-
     projection_dim: int | None = None
     """Number of rows and columns to project the gradients to. If `None`, keep the
     original shape of the gradients."""
-
-    reshape_to_square: bool = False
 
     @classmethod
     def load(
@@ -213,28 +190,12 @@ class GradientProcessor:
         Load the normalizers and preconditioners from a file.
         """
         cfg_path = os.path.join(path, "processor_config.json")
-        norm_path = os.path.join(path, "normalizers.pth")
-        precond_path = os.path.join(path, "preconditioners.pth")
 
         # Load configuration
         with open(cfg_path, "r") as f:
             cfg = json.load(f)
 
-        # Load normalizers
-        norm_state = torch.load(
-            norm_path,
-            map_location=map_location,
-            weights_only=True,
-        )
-        normalizers = {name: Normalizer.from_state_dict(state) for name, state in norm_state.items()}
-
         return cls(
-            normalizers=normalizers,
-            preconditioners=torch.load(
-                precond_path,
-                map_location=map_location,
-                weights_only=True,
-            ),
             projection_dim=cfg.get("projection_dim"),
         )
 
@@ -245,20 +206,14 @@ class GradientProcessor:
         os.makedirs(path, exist_ok=True)
 
         cfg_path = os.path.join(path, "processor_config.json")
-        norm_path = os.path.join(path, "normalizers.pth")
-        precond_path = os.path.join(path, "preconditioners.pth")
 
         # Save configuration separately
         cfg = asdict(self)
-        del cfg["normalizers"]
-        del cfg["preconditioners"]
         with open(cfg_path, "w") as f:
             json.dump(cfg, f, indent=2)
 
-        # Save normalizers
-        norm_state = {name: normalizer.state_dict() for name, normalizer in self.normalizers.items()}
-        torch.save(norm_state, norm_path)
-        torch.save(self.preconditioners, precond_path)
+
+
 
 
 @dataclass

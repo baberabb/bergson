@@ -1,6 +1,9 @@
+import hashlib
+import json
 import os
 import random
 import socket
+from dataclasses import asdict
 from datetime import timedelta
 from typing import Callable
 
@@ -18,10 +21,8 @@ from datasets import (
 from peft import PeftConfig, PeftModel, get_peft_model_state_dict
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from torch.distributed.fsdp import fully_shard
-from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-from bergson.collection import fit_normalizers
 from bergson.data import IndexConfig, allocate_batches, tokenize
 from bergson.gradients import GradientProcessor
 from bergson.utils import assert_type, get_layer_list
@@ -60,7 +61,7 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
         ds = assert_type(Dataset, Dataset.from_json(data_str))
     else:
         try:
-            ds = load_dataset(data_str, split="train", streaming=cfg.streaming)
+            ds = load_dataset(data_str, split="train")
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
                 raise NotImplementedError("DatasetDicts and IterableDatasetDicts are not supported.")
@@ -71,16 +72,9 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
             else:
                 raise e
 
-    remove_columns = ds.column_names if cfg.drop_columns else None
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model, model_max_length=cfg.token_batch_size)
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model, model_max_length=cfg.token_batch_size, revision=cfg.revision)
-
-    ds = ds.map(
-        tokenize,
-        batched=True,
-        fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
-        remove_columns=remove_columns,
-    )
+    ds = ds.map(tokenize, batched=True, fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer))
 
     return ds
 
@@ -117,7 +111,6 @@ def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tup
             device_map=device_map,
             quantization_config=quantization_config,
             torch_dtype=dtype,
-            revision=cfg.revision,
         )
         target_modules = None
 
@@ -128,7 +121,6 @@ def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tup
             device_map=device_map,
             quantization_config=quantization_config,
             torch_dtype=dtype,
-            revision=cfg.revision,
         )
 
         model = PeftModel.from_pretrained(
@@ -153,7 +145,7 @@ def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tup
 
     # Configure gradients
     model.requires_grad_(False)
-    model.get_input_embeddings().requires_grad_(True)
+    model.get_input_embeddings().requires_grad_(True)  # type: ignore
 
     # Apply FSDP if needed
     if cfg.fsdp:
@@ -161,7 +153,7 @@ def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tup
             fully_shard(layer)
         fully_shard(model)
 
-    return model, target_modules
+    return model, target_modules  # type: ignore
 
 
 def create_processor(
@@ -181,35 +173,8 @@ def create_processor(
             map_location=f"cuda:{rank}",
         )
     else:
-        if cfg.normalizer != "none":
-            # Evenly sample `stats_sample_size` examples to compute statistics
-            if isinstance(ds, Dataset):
-                if cfg.stats_sample_size is not None and cfg.stats_sample_size < len(ds):
-                    stats_ds = ds.shuffle(seed=0).select(range(cfg.stats_sample_size))
-                else:
-                    stats_ds = ds
-            else:
-                if cfg.stats_sample_size is not None:
-                    stats_iterable_ds = ds.shuffle(seed=0).take(cfg.stats_sample_size)
-                    stats_ds = assert_type(Dataset, Dataset.from_generator(lambda: iter(stats_iterable_ds)))
-                else:
-                    stats_ds = assert_type(Dataset, Dataset.from_generator(lambda: iter(ds)))
-
-            normalizers = fit_normalizers(
-                model,
-                stats_ds,
-                batches=allocate_batches(stats_ds["length"], cfg.token_batch_size),
-                kind=cfg.normalizer,
-                target_modules=target_modules,
-            )
-        else:
-            normalizers = {}
-
         processor = GradientProcessor(
-            normalizers,
-            fisher_fourth_root=cfg.fisher_fourth_root,
             projection_dim=cfg.projection_dim or None,
-            reshape_to_square=cfg.reshape_to_square,
         )
         if rank == 0:
             processor.save(cfg.run_path)
@@ -272,48 +237,31 @@ def worker_wrapper(
             processor = create_processor(cfg, model, ds, rank, target_modules)
 
         if setup_model and setup_processor:
-            if isinstance(ds, Dataset):
-                batches = allocate_batches(ds["length"], cfg.token_batch_size)
-                worker_fn(
-                    model,
-                    ds,
-                    processor,
-                    batches=batches,
-                    target_modules=target_modules,
-                    cfg=cfg,
-                )
-            else:
-                # Convert each chunk of the IterableDataset to Dataset then collect their gradients
-                buf, chunk_id = [], 0
-
-                def flush():
-                    nonlocal buf, chunk_id
-                    if not buf:
-                        return
-                    sub_ds = assert_type(Dataset, Dataset.from_list(buf))
-                    batches = allocate_batches(sub_ds["length"], cfg.token_batch_size)
-                    cfg.run_path = os.path.join(cfg.run_path, f"chunk-{chunk_id:05d}")
-                    worker_fn(
-                        model,
-                        sub_ds,
-                        processor,
-                        batches=batches,
-                        target_modules=target_modules,
-                        cfg=cfg,
-                    )
-                    buf.clear()
-                    chunk_id += 1
-
-                for ex in tqdm(ds, desc="Collecting gradients"):
-                    buf.append(ex)
-                    if len(buf) == cfg.streaming_chunk_size:
-                        flush()
-                flush()
+            assert isinstance(ds, Dataset)
+            batches = allocate_batches(ds["length"], cfg.token_batch_size)
+            worker_fn(
+                model,
+                ds,
+                processor,
+                batches=batches,
+                target_modules=target_modules,
+                cfg=cfg,
+            )
         else:
             # Simplified setup - for compatibility with ekfac_apply style
             worker_fn(cfg)
     finally:
-        dist.destroy_process_group() if dist.is_initialized() else None
+        if dist.is_initialized():
+            try:
+                # Add a barrier to ensure all processes reach this point
+                dist.barrier()
+            except Exception:
+                pass  # Ignore barrier failures during cleanup
+
+            try:
+                dist.destroy_process_group()
+            except Exception:
+                pass  # Ignore cleanup failures
 
 
 def distributed_computing(
@@ -323,6 +271,16 @@ def distributed_computing(
     setup_model: bool = True,
     setup_processor: bool = True,
 ):
+    # save cfg as json
+    if cfg.apply_ekfac:
+        path_hash = hashlib.md5(cfg.ekfac_path.encode("utf-8")).hexdigest()
+        cfg.run_path = os.path.join(cfg.run_path, f"query_{path_hash}")
+
+    os.makedirs(cfg.run_path, exist_ok=True)
+
+    with open(os.path.join(cfg.run_path, "config.json"), "w") as f:
+        json.dump(asdict(cfg), f, indent=4)
+
     # Setup data pipeline if requested
     if setup_data:
         ds = setup_data_pipeline(cfg)

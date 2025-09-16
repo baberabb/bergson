@@ -378,12 +378,9 @@ class EkfacApplicator:
         cfg: IndexConfig,
     ):
         self.cfg = cfg
-        self.path = os.path.join(cfg.run_path, "influence_results")
+        self.path = os.path.join(cfg.ekfac_path, "influence_results")
         self.gradient_path = cfg.gradient_path
-        # hash of self.path
-        path_hash = hashlib.md5(self.path.encode("utf-8")).hexdigest()
-        self.gradient_ekfac_path = self.gradient_path + path_hash
-        os.makedirs(self.gradient_ekfac_path, exist_ok=True)
+
         self.logger = get_logger("EkfacApplicator", level="DEBUG" if cfg.debug else "INFO")
 
         ### Distributed related
@@ -406,6 +403,7 @@ class EkfacApplicator:
                 raise ValueError(f"Unsupported precision: {other}")
 
     def prepare_attribution(self):
+        self.logger.info("Preparing EKFAC factors for attribution...")
         eigen_a = load_file(
             self.path + f"/activation_eigen_sharded/shard_{self.rank}.safetensors",
             device=f"cuda:{self.rank}",
@@ -518,7 +516,7 @@ class EkfacApplicator:
 
         # Allocate structured space ahead of time for the gradients
         grad_buffer = create_index(
-            self.gradient_ekfac_path,
+            self.cfg.run_path,
             num_grads=info["num_grads"],
             grad_sizes=grad_sizes,
             dtype=np.float32,
@@ -534,25 +532,30 @@ class EkfacApplicator:
             batch_slice = slice(
                 i * self.cfg.gradient_batch_size, min((i + 1) * self.cfg.gradient_batch_size, info["num_grads"])
             )
-
-            transformed_gradients_slice = self.compute_ivhp_batch(
-                eigen_a=eigen_a,
-                mmap=mmap,
-                eigen_g=eigen_g,
-                lambda_factor=lambda_factor,
-                random_eigen_a=random_eigen_a,
-                random_eigen_g=random_eigen_g,
-                batch_slice=batch_slice,
-            )
-            torch.cuda.synchronize()
-            for k, v in transformed_gradients_slice.items():
-                v = v.to(device="cpu", non_blocking=True).flatten(1).numpy()
-                grad_buffer[k][batch_slice] = v
-            transformed_gradients_slice.clear()
+            # profile
+            profiler = self._setup_profiler()
+            with profiler as prof:
+                transformed_gradients_slice = self.compute_ivhp_batch(
+                    eigen_a=eigen_a,
+                    mmap=mmap,
+                    eigen_g=eigen_g,
+                    lambda_factor=lambda_factor,
+                    random_eigen_a=random_eigen_a,
+                    random_eigen_g=random_eigen_g,
+                    batch_slice=batch_slice,
+                )
+                torch.cuda.synchronize()
+                for k, v in transformed_gradients_slice.items():
+                    v = v.to(device="cpu", non_blocking=True).flatten(1).numpy()
+                    grad_buffer[k][batch_slice] = v
+                transformed_gradients_slice.clear()
+                if prof is not None:
+                    prof.step()
+                break
 
         grad_buffer.flush()
 
-        self.logger.info(f"Saved IVHP gradients to {self.gradient_ekfac_path}")
+        self.logger.info(f"Saved IVHP gradients to {self.cfg.run_path}")
 
     def compute_ivhp_batch(self, eigen_a, mmap, eigen_g, lambda_factor, random_eigen_a, random_eigen_g, batch_slice):
         transformed_gradients: dict[str, Tensor] = {}
@@ -634,3 +637,28 @@ class EkfacApplicator:
             raise ValueError(f"Unknown projection type: {projection_type}")
         A /= A.norm(dim=1, keepdim=True)
         return A
+
+    def _setup_profiler(self):
+        """Set up profiler if profiling is enabled."""
+        if not self.cfg.profile:
+            return nullcontext()
+
+        trace_handler = tensorboard_trace_handler(
+            dir_name="profiler_logs", worker_name=f"rank_{self.rank}", use_gzip=True
+        )
+        my_schedule = schedule(wait=0, warmup=0, active=4, repeat=1)
+        prof = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            on_trace_ready=trace_handler,
+            schedule=my_schedule,
+            record_shapes=True,
+            with_stack=True,
+            profile_memory=True,
+            with_modules=True,
+        )
+
+        log_dir = "profiler_logs"
+        os.makedirs(log_dir, exist_ok=True)
+        self.logger.info(f"Profiler logs will be saved to {log_dir}")
+
+        return prof
