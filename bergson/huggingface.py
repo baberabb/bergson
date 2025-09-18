@@ -31,6 +31,7 @@ class GradientCollectorCallback(TrainerCallback):
         path: str,
         head_cfgs: dict[str, HeadConfig],
         projection_dim: int = 16,
+        dtype: DTypeLike = np.float16,
         accumulate_grads: bool = False,
         use_optimizer_state: bool = True,
         track_order: bool = False,
@@ -38,7 +39,10 @@ class GradientCollectorCallback(TrainerCallback):
         """
         Args:
             path: The path to save the gradients
+            head_cfgs: Information used to split matrix-valued parameters into
+                per-head matrices before down projection.
             projection_dim: The dimension to project the gradients onto
+            dtype: The dtype of the on-disk gradient store
             accumulate_grads: Whether to take the sum of the gradients
                 of the same example across epochs. If `False`, the
                 gradients for each epoch are stored separately.
@@ -46,8 +50,6 @@ class GradientCollectorCallback(TrainerCallback):
                 normalize the gradients. If `False`, no normalization is
                 applied.
             track_order: Whether to record the shuffled order of training data.
-        head_cfgs: Information used to split matrix-valued parameters into
-            per-head matrices before down projection.
         """
         super().__init__()
 
@@ -73,9 +75,6 @@ class GradientCollectorCallback(TrainerCallback):
         # TODO: Handle this more elegantly
         self.torch_dtype = torch.float32 if self.dtype == np.float32 else torch.float16
 
-        # TODO: Handle this more elegantly
-        self.torch_dtype = torch.float32 if self.dtype == np.float32 else torch.float16
-
     def write_grads(self, grad_buffer: np.memmap):
         # Ensure the nonblocking copies are all finished
         torch.cuda.synchronize()
@@ -83,12 +82,6 @@ class GradientCollectorCallback(TrainerCallback):
             grad_buffer[layer_name][self.batch_indices, :] = g.numpy()
 
         self.mod_grads.clear()
-
-    def on_step_begin(self, args, state, control, **kwargs):
-        """Track the current step and epoch for training order recording."""
-        if self.order:
-            self._current_step = state.global_step
-            self._current_epoch = int(state.epoch or 0)
 
     def on_train_begin(
         self,
@@ -265,21 +258,6 @@ class GradientCollectorCallback(TrainerCallback):
         # We can skip all this if we're not using the optimizer state
         if not self.use_optimizer_state:
             return
-
-        # Record training order if enabled
-        if self.order:
-            assert (
-                self.batch_indices is not None
-            ), "Batch indices are not available for training order tracking"
-
-            self.order.extend(
-                {
-                    "_idx": int(idx),
-                    "global_step": getattr(self, "_current_step", 0),
-                    "epoch": getattr(self, "_current_epoch", 0),
-                }
-                for idx in self.batch_indices.tolist()
-            )
 
         # The optimizer doesn't actually know the names of the parameters
         model = getattr(model, "base_model", model)

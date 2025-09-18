@@ -39,9 +39,10 @@ from transformers.generation.utils import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import wandb
-from bergson.attributor import Attributor
 
 # from bergson.data import load_gradient_dataset
+from bergson import HeadConfig
+from bergson.attributor import Attributor
 from bergson.collection import collect_gradients
 from bergson.gradients import GradientProcessor
 from bergson.huggingface import (
@@ -349,9 +350,11 @@ def create_transformer():
     return model, tokenizer
 
 
-def load_tinystories_data(tokenizer, max_length=512, N=10000):
+def load_tinystories_data(tokenizer, max_length=512, N: int | None = 10_000):
     """Load and preprocess TinyStories dataset."""
     dataset = load_dataset("EleutherAI/SmolLM2-135M-10B", split="train")
+    if N is not None:
+        dataset = dataset.select(range(min(N, len(dataset))))
     # dataset = load_dataset("roneneldan/TinyStories", split="train")
     # dataset = dataset.select(range(min(N, len(dataset))))
 
@@ -552,9 +555,14 @@ def setup_training(
 
     bergson_callback = GradientCollectorCallback(
         path=f"{output_dir}/gradients",
+        head_cfgs={
+            "h.0.attn.c_attn": HeadConfig(12, 192, 2),
+            "h.0.attn.c_proj": HeadConfig(12, 64, 2),
+            "h.1.attn.c_attn": HeadConfig(12, 192, 2),
+            "h.1.attn.c_proj": HeadConfig(12, 64, 2),
+        },
         projection_dim=projection_dim,
         dtype=np.float32,
-        torch_dtype=torch.float32,
         accumulate_grads=False,
         track_order=True,
     )
@@ -683,7 +691,10 @@ def main(args):
     model, tokenizer = create_transformer()
 
     # # Load TinyStories data
-    train_dataset, eval_dataset = load_tinystories_data(tokenizer)
+    if args.small:
+        train_dataset, eval_dataset = load_tinystories_data(tokenizer, N=1000)
+    else:
+        train_dataset, eval_dataset = load_tinystories_data(tokenizer)
 
     # # Create induction head dataset
     test_induction_head_labels()
@@ -899,6 +910,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--unit_norm", action="store_true")
+    parser.add_argument("--small", action="store_true")
     parser.add_argument("--tag", type=str, default="")
     args = parser.parse_args()
     main(args)
