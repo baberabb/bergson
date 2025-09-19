@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
 Pretrain a two-layer transformer and try to identify the formation of induction heads
-from the influence functions wrt simple induction head completions gradients.
+from the influence functions with respect to simple induction head completion gradients.
 
 This script:
-1. Creates a 2-layer transformer using HF transformers architecture
-2. Trains on TinyStories dataset using HF Trainer with Bergson callback
+1. Creates a 2-layer attention-only transformer
+2. Trains using the HF Trainer with the Bergson callback to collect gradients
 3. Builds a static query Bergson index using synthetic induction head data
-4. Uploads the trained model to HF hub
+4. Plots the influence of the training examples on the induction heads
 """
 
-# attn_only.py
 import math
 import os
 import random
@@ -20,11 +19,10 @@ from typing import List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from datasets import Dataset, load_dataset
+from datasets import Dataset, load_dataset, load_from_disk
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -39,16 +37,12 @@ from transformers.generation.utils import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import wandb
-
-# from bergson.data import load_gradient_dataset
-from bergson import HeadConfig
-from bergson.attributor import Attributor
-from bergson.collection import collect_gradients
-from bergson.gradients import GradientProcessor
+from bergson import Attributor, GradientProcessor, HeadConfig, collect_gradients
 from bergson.huggingface import (
     GradientCollectorCallback,
     prepare_for_gradient_collection,
 )
+from bergson.utils import assert_type
 
 
 class AttnOnlyConfig(PretrainedConfig):
@@ -302,31 +296,10 @@ def check_logins():
 
 
 def create_transformer():
-    """Create a transformer model using GPTNeo architecture."""
+    """Create an attention-only transformer."""
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B")
-    # Alternative: use the EleutherAI 10k token tokenizer custom-built for TinyStories
-
-    # config = GPTNeoConfig(
-    #     vocab_size=len(tokenizer),
-    #     hidden_size=768,
-    #     intermediate_size=2,
-    #     num_layers=2,
-    #     num_heads=2,
-    #     max_position_embeddings=1024,
-    #     attention_types=[[["global"], 2]],
-    #     window_size=256,
-    #     resid_pdrop=0.0,
-    #     embd_pdrop=0.0,
-    #     attn_pdrop=0.0,
-    #     layer_norm_epsilon=1e-5,
-    #     initializer_range=0.02,
-    #     use_cache=True,
-    #     # Token IDs from the tokenizer
-    #     pad_token_id=tokenizer.pad_token_id,
-    #     bos_token_id=tokenizer.bos_token_id,
-    #     eos_token_id=tokenizer.eos_token_id,
-    # )
-    # model = GPTNeoForCausalLM(config)
+    # Alternative: use the EleutherAI 10k token tokenizer custom-built for TinyStories,
+    #  but it's harder to find good single-token words
 
     cfg = AttnOnlyConfig(
         vocab_size=len(tokenizer),
@@ -350,13 +323,14 @@ def create_transformer():
     return model, tokenizer
 
 
-def load_tinystories_data(tokenizer, max_length=512, N: int | None = 10_000):
-    """Load and preprocess TinyStories dataset."""
-    dataset = load_dataset("EleutherAI/SmolLM2-135M-10B", split="train")
+def load_data(
+    tokenizer, N: int | None, name="EleutherAI/SmolLM2-135M-10B", max_length=512
+):
+    """Load and preprocess dataset."""
+    dataset = load_dataset(name, split="train")
+    dataset = assert_type(Dataset, dataset)
     if N is not None:
         dataset = dataset.select(range(min(N, len(dataset))))
-    # dataset = load_dataset("roneneldan/TinyStories", split="train")
-    # dataset = dataset.select(range(min(N, len(dataset))))
 
     def tokenize_function(examples):
         # Tokenize the text
@@ -547,7 +521,7 @@ def setup_training(
         # metric_for_best_model="train_loss",
         # greater_is_better=False,
         report_to="wandb" if wandb else None,
-        run_name="2-layer-transformer-smollm2-corpus",
+        run_name="2-layer-transformer-SmolLM2-corpus",
         seed=42,
         fp16=False,
         dataloader_drop_last=True,
@@ -622,7 +596,13 @@ def build_induction_index(
         data=induction_dataset,
         processor=processor,
         path=f"{output_dir}/induction_gradients",
-        skip_preconditioners=False,
+        skip_preconditioners=True,
+        head_cfgs={
+            "h.0.attn.c_attn": HeadConfig(12, 192, 2),
+            "h.0.attn.c_proj": HeadConfig(12, 64, 2),
+            "h.1.attn.c_attn": HeadConfig(12, 192, 2),
+            "h.1.attn.c_proj": HeadConfig(12, 64, 2),
+        },
     )
 
     # Build the attributor for querying
@@ -635,21 +615,15 @@ def build_induction_index(
     )
 
     # Collect mean gradient from attributor index
-    mean_gradient = attributor.grads.mean(dim=0)
 
-    attributor = Attributor(
-        index_path=f"{output_dir}/induction_gradients",
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        dtype=torch.float32,
-        modules=True,
-        unit_norm=unit_norm,
+    mean_gradient = torch.cat([grad for grad in attributor.grads.values()], dim=1).mean(
+        dim=0
     )
-
     mean_module_gradients = {
         name: attributor.grads[name].mean(dim=0) for name in attributor.grads.keys()
     }
 
-    print("In-context index built successfully! Returning mean gradient...")
+    print("In-context index built successfully! Returning mean gradients...")
     return mean_gradient, mean_module_gradients
 
 
@@ -668,13 +642,15 @@ def upload_to_hub(model, tokenizer, model_name="2layer-transformer-tinystories")
 
 
 def main(args):
+    dataset_name = "EleutherAI/SmolLM2-135M-10B"
+
     unit_norm = args.unit_norm
     tag = args.tag
 
     projection_dim = args.projection_dim
     seed = args.seed
     train = args.train
-    plot = False
+    plot = args.plot
 
     print(
         "Starting 2-layer transformer pretraining with Bergson gradient collection..."
@@ -690,11 +666,11 @@ def main(args):
     # Create model and tokenizer
     model, tokenizer = create_transformer()
 
-    # # Load TinyStories data
+    # Load data
     if args.small:
-        train_dataset, eval_dataset = load_tinystories_data(tokenizer, N=1000)
+        train_dataset, eval_dataset = load_data(tokenizer, name=dataset_name, N=1000)
     else:
-        train_dataset, eval_dataset = load_tinystories_data(tokenizer)
+        train_dataset, eval_dataset = load_data(tokenizer, name=dataset_name)
 
     # # Create induction head dataset
     test_induction_head_labels()
@@ -736,8 +712,8 @@ def main(args):
     model = model.cpu()
 
     # Load parquet table containing training order
-    training_order = pq.read_table(
-        str(Path(trainer.args.output_dir) / "gradients" / "training_order.parquet")
+    training_order = load_from_disk(
+        str(Path(trainer.args.output_dir) / "gradients" / "order.hf")
     ).to_pandas()
 
     # Plots
@@ -747,7 +723,7 @@ def main(args):
     data = []
     for epoch_idx in range(trainer.args.num_train_epochs):
         # Read Bergson index from training
-        attributor = Attributor(
+        grads = Attributor(
             str(
                 Path(trainer.args.output_dir)
                 / "gradients"
@@ -757,9 +733,22 @@ def main(args):
             device=device,
             unit_norm=unit_norm,
             dtype=torch.float32,
-            # faiss_cfg=FaissConfig(
-        )
-        inner_products = attributor.grads.float() @ mean_induction_gradients.float()
+        ).grads
+
+        inner_products = None
+        offset = 0
+        for grad in grads.values():
+            d = grad.shape[1]
+            mean_block = mean_induction_gradients[offset : offset + d]
+            offset += d
+            for i in range(0, grad.shape[0], 1024):
+                batch = grad[i : i + 1024].to(mean_block.device, dtype=torch.float32)
+                contrib = batch @ mean_block.float()
+                if inner_products is None:
+                    inner_products = torch.zeros(grad.shape[0], device=contrib.device)
+                inner_products[i : i + 1024] += contrib
+        inner_products = inner_products.cpu()
+
         for i, score in enumerate(inner_products.squeeze()):
             training_metadata = training_order[
                 (training_order["_idx"] == i) & (training_order["epoch"] == epoch_idx)
@@ -802,47 +791,66 @@ def main(args):
     )
 
     # Produce the same plot but split out by module (i.e. key in the grads mmap)
-    data = []
-    for epoch_idx in range(trainer.args.num_train_epochs):
-        module_attributor = Attributor(
-            index_path=f"{trainer.args.output_dir}/gradients/train/epoch_{epoch_idx}",
-            device=device,
-            dtype=torch.float32,
-            modules=True,
-            unit_norm=unit_norm,
-        )
-        for name, grads in module_attributor.grads.items():
-            if "attention" not in name and "attn" not in name:
-                print(f"Skipping {name}")
-                continue
-            else:
-                print(f"Processing {name}")
+    df_path = f"figures/module_scores_{tag}{'_norm' if unit_norm else ''}.csv"
+    if os.path.exists(df_path):
+        df = pd.read_csv(df_path)
+        print(f"Loaded module scores from {df_path}")
+    else:
+        data = []
+        for epoch_idx in range(trainer.args.num_train_epochs):
+            grads = Attributor(
+                index_path=f"{trainer.args.output_dir}/gradients/train/epoch_{epoch_idx}",
+                device="cpu",
+                dtype=torch.float32,
+                unit_norm=unit_norm,
+            ).grads
 
-            inner_products = grads.float() @ module_induction_gradients[name].float()
-            for i, score in enumerate(inner_products.squeeze()):
-                training_metadata = training_order[
-                    (training_order["_idx"] == i)
-                    & (training_order["epoch"] == epoch_idx)
-                ]
-                if len(training_metadata) != 1:
+            # module_inner_products = {}
+            offset = 0
+            for name, grad in grads.items():
+                if "attention" not in name and "attn" not in name:
+                    print(f"Skipping {name}")
                     continue
-                for row in training_metadata.itertuples(index=False):
-                    data.append(
-                        {
-                            "global_step": row.global_step,
-                            "epoch": epoch_idx,
-                            "module": name,
-                            "score": score.item(),
-                        }
+                else:
+                    print(f"Processing {name}")
+
+                d = grad.shape[1]
+                mean_block = mean_induction_gradients[offset : offset + d]
+                offset += d
+                scores = []
+                for i in range(0, grad.shape[0], 1024):
+                    batch = grad[i : i + 1024].to(
+                        mean_block.device, dtype=torch.float32
                     )
+                    scores.append(batch @ mean_block.float())
+                mod_inner_products = torch.cat(scores, dim=0).cpu()
 
-    df = pd.DataFrame(data)
-    print(df)
+                for i, score in enumerate(mod_inner_products.squeeze()):
+                    training_metadata = training_order[
+                        (training_order["_idx"] == i)
+                        & (training_order["epoch"] == epoch_idx)
+                    ]
+                    if len(training_metadata) != 1:
+                        continue
+                    for row in training_metadata.itertuples(index=False):
+                        data.append(
+                            {
+                                "global_step": row.global_step,
+                                "epoch": epoch_idx,
+                                "module": name,
+                                "score": score.item(),
+                            }
+                        )
 
-    for module in df["module"].unique():
+        df = pd.DataFrame(data)
+        df.to_csv(df_path, index=False)
+
+    attn_modules = [name for name in df["module"].unique() if "attn" in name]
+    non_attn_modules = [name for name in df["module"].unique() if "attn" not in name]
+
+    for module in non_attn_modules:
         name = module
         module_data = df[df["module"] == module]
-        print(module_data)
 
         plt.figure(figsize=(12, 8))
 
@@ -899,7 +907,82 @@ def main(args):
         )
         plt.close()
 
-    # Can we use SVCCA to align the gradients?
+    # Plot all attention heads in one file
+    n = len(attn_modules)
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
+
+    fig, axes = plt.subplots(
+        rows, cols, figsize=(5 * cols, 4 * rows), squeeze=False, sharey=True
+    )
+
+    for ax, module in zip(axes.flatten(), attn_modules):
+        module_data = df[df["module"] == module]
+        ax.scatter(
+            module_data["global_step"],
+            module_data["score"],
+            alpha=0.6,
+            s=20,
+        )
+        ax.set_title(module)
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Score")
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    fig.savefig(f"figures/all_heads_scores_{tag}{'_norm' if unit_norm else ''}.pdf")
+    plt.close(fig)
+
+    # Single figure with each attention modules' sum-of-scores over steps
+    fig, ax = plt.subplots(figsize=(6, 4))
+
+    for module in attn_modules:
+        module_data = df[df["module"] == module]
+        summed = module_data.groupby("global_step")["score"].sum().reset_index()
+        ax.plot(summed["global_step"], summed["score"], label=module, alpha=0.7)
+
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Sum of Scores")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+    ax.legend().remove()
+
+    plt.tight_layout()
+    fig.savefig(f"figures/all_heads_sum_scores_{tag}{'_norm' if unit_norm else ''}.pdf")
+    plt.close(fig)
+
+    # Single figure with each attention modules' sum-of-scores summed over steps
+    sums = [df[df["module"] == m]["score"].sum() for m in attn_modules]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(range(len(attn_modules)), sums)
+    ax.set_xticks(range(len(attn_modules)))
+    ax.set_xticklabels(attn_modules, rotation=90)
+    ax.set_ylabel("Sum of Scores")
+    ax.set_xlabel("Module")
+    ax.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    fig.savefig(
+        f"figures/all_heads_sum_scores_bar_{tag}{'_norm' if unit_norm else ''}.pdf"
+    )
+    plt.close(fig)
+
+    # Step 1: pick checkpoint steps
+    # Step 2: compute a bunch of gradients at this step using the static index build
+    #   and save it
+    # Step 1.5: fix the horrible static index build bug
+
+    # Can we use optimal transport to align the gradients?
+    # Should we transport the activations then transport the gradients in the same way?
+    # Or should we transport the gradients directly?
+
+    # To compute the optimal transport maps we just need a huge dataset of training
+    # gradients at different steps.
+
+    # Once we have optimal transport maps we can optimal transport the gradients to the
+    # trained model distribution. Then we can compute the influence of the training
+    # examples on the induction heads.
 
 
 if __name__ == "__main__":
@@ -912,5 +995,6 @@ if __name__ == "__main__":
     parser.add_argument("--unit_norm", action="store_true")
     parser.add_argument("--small", action="store_true")
     parser.add_argument("--tag", type=str, default="")
+    parser.add_argument("--plot", action="store_true")
     args = parser.parse_args()
     main(args)
