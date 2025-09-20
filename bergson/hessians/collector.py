@@ -39,7 +39,7 @@ class EkfacCollector(ContextDecorator):
     """Closure to call on the activations during forward hook."""
 
     def __post_init__(self):
-        print("WARNING EKFAC IS USING ALL LAYERS, NOT JUST MLP")
+        # print("WARNING EKFAC IS USING ALL LAYERS, NOT JUST MLP")
         self._fwd_hooks: list[RemovableHandle] = []
         self._bwd_hooks: list[RemovableHandle] = []
 

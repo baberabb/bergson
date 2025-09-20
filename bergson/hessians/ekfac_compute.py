@@ -551,7 +551,6 @@ class EkfacApplicator:
                 transformed_gradients_slice.clear()
                 if prof is not None:
                     prof.step()
-                break
 
         grad_buffer.flush()
 
