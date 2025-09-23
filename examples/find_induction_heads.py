@@ -76,6 +76,7 @@ class AttnOnlyConfig(PretrainedConfig):
         self.attn_pdrop = attn_pdrop
         self.use_cache = use_cache
         self.layer_norm = layer_norm
+        self.special_pos_embed = special_pos_embed
 
 
 class CausalSelfAttention(nn.Module):
@@ -88,6 +89,7 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
         self.attn_drop = nn.Dropout(config.attn_pdrop)
         self.resid_drop = nn.Dropout(config.resid_pdrop)
+        self.special_pos_embed = config.special_pos_embed
         self.register_buffer(
             "mask",
             torch.tril(
@@ -122,7 +124,7 @@ class CausalSelfAttention(nn.Module):
         q, k, v = qkv.split(C, dim=2)
 
         # add position to q and k only
-        if self.config.special_pos_embed:
+        if self.special_pos_embed:
             q = q + pos_emb
             k = k + pos_emb
 
@@ -155,6 +157,8 @@ class AttnOnlyBlock(nn.Module):
         super().__init__()
         if config.layer_norm:
             self.ln_1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        else:
+            self.ln_1 = None
         self.attn = CausalSelfAttention(config)
 
     def forward(
@@ -188,6 +192,8 @@ class AttnOnlyForCausalLM(PreTrainedModel, GenerationMixin):
         )
         if config.layer_norm:
             self.ln_f = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        else:
+            self.ln_f = None
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         self.apply(self._init_weights)
@@ -511,6 +517,7 @@ def setup_training(
     output_dir: str,
     projection_dim: int,
     wandb: bool = True,
+    num_train_epochs: int = 1,
 ):
     """Set up the training configuration with Bergson callback."""
     data_collator = DataCollatorForLanguageModeling(
@@ -521,7 +528,7 @@ def setup_training(
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=True,
-        num_train_epochs=1,
+        num_train_epochs=num_train_epochs,
         per_device_train_batch_size=8,
         # per_device_eval_batch_size=8,
         gradient_accumulation_steps=1,
@@ -659,6 +666,7 @@ def upload_to_hub(model, tokenizer, model_name="2layer-transformer-tinystories")
 
 def main(args):
     dataset_name = "EleutherAI/SmolLM2-135M-10B"
+    num_train_epochs = 1
 
     unit_norm = args.unit_norm
     tag = args.tag
@@ -667,6 +675,8 @@ def main(args):
     seed = args.seed
     train = args.train
     plot = args.plot
+
+    output_dir = f"examples/runs/transformer_2_layer{'_' + tag if tag else ''}"
 
     print(
         "Starting 2-layer transformer pretraining with Bergson gradient collection..."
@@ -684,33 +694,36 @@ def main(args):
         special_pos_embed=not args.no_special_pos_embed
     )
 
-    # Load data
-    if args.small:
-        train_dataset, eval_dataset = load_data(tokenizer, name=dataset_name, N=1000)
-    else:
-        train_dataset, eval_dataset = load_data(tokenizer, name=dataset_name)
-
     # # Create induction head dataset
     test_induction_head_labels()
     induction_prompts = create_induction_head_dataset(
         tokenizer, seed=seed, num_prompts=10
     )
 
-    # # Set up training
-    trainer = setup_training(
-        model,
-        tokenizer,
-        train_dataset,
-        eval_dataset,
-        output_dir=f"examples/runs/transformer_2_layer{'_' + tag if tag else ''}",
-        projection_dim=projection_dim,
-        wandb=False,
-    )
-
     if train:
+        # Set up training
+        # Load data
+        if args.small:
+            train_dataset, eval_dataset = load_data(
+                tokenizer, name=dataset_name, N=1000
+            )
+        else:
+            train_dataset, eval_dataset = load_data(tokenizer, name=dataset_name)
+
+        trainer = setup_training(
+            model,
+            tokenizer,
+            train_dataset,
+            eval_dataset,
+            output_dir=output_dir,
+            projection_dim=projection_dim,
+            wandb=False,
+            num_train_epochs=num_train_epochs,
+        )
+
         trainer.train()
-        trainer.save_model(trainer.args.output_dir)
-        tokenizer.save_pretrained(trainer.args.output_dir)
+        trainer.save_model(output_dir)
+        tokenizer.save_pretrained(output_dir)
 
     if not plot:
         return
@@ -718,20 +731,20 @@ def main(args):
     # upload_to_hub(model, tokenizer)
 
     # Reload model and tokenizer
-    # model = AutoModelForCausalLM.from_pretrained(trainer.args.output_dir)
-    model = AttnOnlyForCausalLM.from_pretrained(trainer.args.output_dir)
-    tokenizer = AutoTokenizer.from_pretrained(trainer.args.output_dir)
+    # model = AutoModelForCausalLM.from_pretrained(output_dir)
+    model = AttnOnlyForCausalLM.from_pretrained(output_dir)
+    tokenizer = AutoTokenizer.from_pretrained(output_dir)
     model = model.to(device)
 
     # Build Bergson index for induction head queries
     mean_induction_gradients, module_induction_gradients = build_induction_index(
-        model, induction_prompts, trainer.args.output_dir, projection_dim, unit_norm
+        model, induction_prompts, output_dir, projection_dim, unit_norm
     )
     model = model.cpu()
 
     # Load parquet table containing training order
     training_order = load_from_disk(
-        str(Path(trainer.args.output_dir) / "gradients" / "order.hf")
+        str(Path(output_dir) / "gradients" / "order.hf")
     ).to_pandas()
 
     # Plots
@@ -739,15 +752,10 @@ def main(args):
 
     # Calculate the inner products with the training gradients
     data = []
-    for epoch_idx in range(trainer.args.num_train_epochs):
+    for epoch_idx in range(num_train_epochs):
         # Read Bergson index from training
         grads = Attributor(
-            str(
-                Path(trainer.args.output_dir)
-                / "gradients"
-                / "train"
-                / f"epoch_{epoch_idx}"
-            ),
+            str(Path(output_dir) / "gradients" / "train" / f"epoch_{epoch_idx}"),
             device=device,
             unit_norm=unit_norm,
             dtype=torch.float32,
