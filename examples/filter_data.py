@@ -116,7 +116,7 @@ def worker(rank: int, world_size: int, cfg: FilterConfig, train, eval, run_name)
 
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model,
-        torch_dtype="bfloat16",
+        dtype="bfloat16",
         revision=cfg.revision,
     )
     tokenizer = AutoTokenizer.from_pretrained(cfg.model, max_length=8192)
@@ -362,7 +362,7 @@ def main(
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        torch_dtype="bfloat16",
+        dtype="bfloat16",
         revision=args.revision,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model, max_length=8192)

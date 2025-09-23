@@ -50,7 +50,7 @@ def worker(
 
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model,
-        torch_dtype="bfloat16",
+        dtype="bfloat16",
         revision=cfg.revision,
         device_map=f"cuda:{rank}",
     )

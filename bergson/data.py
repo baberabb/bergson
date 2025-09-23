@@ -116,11 +116,7 @@ def ceildiv(a: int, b: int) -> int:
     return -(-a // b)  # Equivalent to math.ceil(a / b) but faster for integers
 
 
-def allocate_batches(
-    doc_lengths: list[int], 
-    N: int, 
-    seed: int = 42
-) -> list[list[int]]:
+def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[list[int]]:
     """
     Allocate documents into batches that are then distributed evenly across
     a fixed number of workers.
@@ -362,16 +358,47 @@ def load_gradients(root_dir: str) -> np.memmap:
     )
 
 
-# TODO 2025-08-01 Set default concatenate_gradients = False
-def load_gradient_dataset(root_dir: str, concatenate_gradients: bool = True) -> Dataset:
+def merge_shards(root_dir: Path) -> Dataset:
+    """Merge all shards into a single dataset."""
+
+    paths = [path for path in sorted(root_dir.iterdir()) if "shard" in path.name]
+
+    # Concatenate HF dataset
+    ds = concatenate_datasets(
+        [Dataset.load_from_disk(str(path / "data.hf")) for path in paths]
+    )
+    ds.save_to_disk(root_dir)
+
+    # Concatenate memmaps
+    memmaps = [load_gradients(str(path)) for path in paths]
+    mmap = np.concatenate(memmaps, axis=0)
+
+    np.memmap(
+        root_dir / "gradients.bin",
+        dtype=mmap.dtype,
+        mode="w+",
+        shape=mmap.shape,
+    )[:] = mmap
+
+    # Clean up shards
+    for path in sorted(root_dir.iterdir()):
+        if path.is_dir() and "shard" in path.name:
+            shutil.rmtree(path)
+
+    return ds
+
+
+def load_gradient_dataset(
+    root_dir: str, concatenate_gradients: bool = False
+) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
 
     def load_shard(dir: str) -> Dataset:
         mmap = load_gradients(dir)
         ds = Dataset.load_from_disk(dir + "/data.hf")
 
-        # concatenate the extracted module gradients into a single column
         if concatenate_gradients:
+            # Concatenate module gradients into a single column
             unstructured_data = structured_to_unstructured(mmap)
             flat = pa.array(unstructured_data.reshape(-1))
             col_arrow = pa.FixedSizeListArray.from_arrays(
@@ -379,8 +406,8 @@ def load_gradient_dataset(root_dir: str, concatenate_gradients: bool = True) -> 
             )
 
             ds = ds.add_column("gradients", col_arrow, new_fingerprint="gradients")
-        # Add a column for each module's gradient vectors
         else:
+            # Add a column for each module's gradient vectors
             for field_name in mmap.dtype.names:
                 flat = pa.array(mmap[field_name].reshape(-1))
                 col = pa.FixedSizeListArray.from_arrays(flat, mmap[field_name].shape[1])
