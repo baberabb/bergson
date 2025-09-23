@@ -179,3 +179,5 @@ cache/
 
 wandb/
 .vscode/
+figures/
+prototype/

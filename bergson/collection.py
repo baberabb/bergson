@@ -1,4 +1,7 @@
+import json
 import math
+import os
+import time
 from typing import Literal
 
 import numpy as np
@@ -15,6 +18,78 @@ from .gradients import (
     GradientProcessor,
 )
 from .peft import set_peft_enabled
+
+
+class ETALogger:
+    """Logs tqdm ETA over time to a file for plotting performance trends."""
+
+    def __init__(self, log_file: str, total_batches: int):
+        self.log_file = log_file
+        self.total_batches = total_batches
+        self.start_time = time.time()
+        self.eta_data = []
+
+    def log_eta(
+        self,
+        current_batch: int,
+        eta_seconds: float,
+        batch_time: float,
+        memory_usage: float = 0.0,
+    ):
+        """Log current ETA and performance metrics."""
+        elapsed_time = time.time() - self.start_time
+        progress = current_batch / self.total_batches
+
+        entry = {
+            "timestamp": time.time(),
+            "elapsed_time": elapsed_time,
+            "current_batch": current_batch,
+            "total_batches": self.total_batches,
+            "progress": progress,
+            "eta_seconds": eta_seconds,
+            "eta_minutes": eta_seconds / 60,
+            "batch_time": batch_time,
+            "memory_usage_gb": memory_usage,
+            "batches_per_second": 1.0 / batch_time if batch_time > 0 else 0,
+        }
+
+        self.eta_data.append(entry)
+
+        # Write to file periodically (every 10 entries or at the end)
+        if len(self.eta_data) % 10 == 0 or current_batch == self.total_batches - 1:
+            self._write_to_file()
+
+    def _write_to_file(self):
+        """Write current data to the log file."""
+        with open(self.log_file, "w") as f:
+            json.dump(self.eta_data, f, indent=2)
+
+    def get_performance_trends(self):
+        """Analyze performance trends from logged data."""
+        if len(self.eta_data) < 10:
+            return {}
+
+        # Calculate trends
+        early_batches = self.eta_data[: len(self.eta_data) // 4]
+        late_batches = self.eta_data[-len(self.eta_data) // 4 :]
+
+        early_avg_time = sum(entry["batch_time"] for entry in early_batches) / len(
+            early_batches
+        )
+        late_avg_time = sum(entry["batch_time"] for entry in late_batches) / len(
+            late_batches
+        )
+
+        performance_degradation = (
+            (late_avg_time - early_avg_time) / early_avg_time * 100
+        )
+
+        return {
+            "performance_degradation_percent": performance_degradation,
+            "early_avg_batch_time": early_avg_time,
+            "late_avg_batch_time": late_avg_time,
+            "total_entries": len(self.eta_data),
+        }
 
 
 def collect_gradients(
@@ -85,7 +160,28 @@ def collect_gradients(
         fill_value=0.0,
     )
 
-    for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
+    # Performance tracking variables
+    batch_times = []
+    total_batches = len(batches)
+
+    # Initialize ETA logger
+    eta_logger = (
+        ETALogger(os.path.join(path, "eta_log.json"), total_batches)
+        if rank == 0
+        else None
+    )
+
+    if rank == 0:
+        print(f"Starting gradient collection with {total_batches} batches")
+        print(f"Model dtype: {model.dtype}, Gradient dtype: {dtype}")
+        print(f"Gradient buffer shape: {grad_buffer.shape}")
+        print(f"ETA logging to: {os.path.join(path, 'eta_log.json')}")
+
+    for batch_idx, indices in enumerate(
+        tqdm(batches, disable=rank != 0, desc="Building index")
+    ):
+        batch_start_time = time.time()
+
         batch = data[indices]
         x, y = pad_and_tensor(
             batch["input_ids"],  # type: ignore
@@ -139,6 +235,31 @@ def collect_gradients(
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
 
+        # Track performance metrics
+        batch_time = time.time() - batch_start_time
+        batch_times.append(batch_time)
+
+        # Log ETA and performance metrics
+        if eta_logger:
+            # Calculate ETA based on recent performance
+            if len(batch_times) > 0:
+                recent_avg_time = sum(batch_times[-min(10, len(batch_times)) :]) / min(
+                    10, len(batch_times)
+                )
+                remaining_batches = total_batches - batch_idx - 1
+                eta_seconds = remaining_batches * recent_avg_time
+                eta_logger.log_eta(batch_idx, eta_seconds, batch_time)
+
+        # Print diagnostics every 10% of batches or every 100 batches, whichever is smaller
+        print_interval = max(1, min(100, total_batches // 10))
+        if batch_idx % print_interval == 0 or batch_idx == total_batches - 1:
+            if rank == 0:
+                avg_time = sum(batch_times[-10:]) / min(
+                    10, len(batch_times)
+                )  # Last 10 batches
+                print(
+                    f"Batch {batch_idx}/{total_batches}: {batch_time:.3f}s (avg last 10: {avg_time:.3f}s)"
+                )
     process_preconditioners(processor, preconditioners, len(data))
 
     if dist.is_initialized():
@@ -157,6 +278,49 @@ def collect_gradients(
 
     # Make sure the gradients are written to disk
     grad_buffer.flush()
+
+    # Final performance summary and ETA analysis
+    if rank == 0 and batch_times:
+        total_time = sum(batch_times)
+        avg_time = total_time / len(batch_times)
+        print("\nPerformance Summary:")
+        print(f"  Total batches: {len(batch_times)}")
+        print(f"  Total time: {total_time:.2f}s")
+        print(f"  Average time per batch: {avg_time:.3f}s")
+        print(
+            f"  First 10 batches avg: {sum(batch_times[:10]) / min(10, len(batch_times)):.3f}s"
+        )
+        print(
+            f"  Last 10 batches avg: {sum(batch_times[-10:]) / min(10, len(batch_times)):.3f}s"
+        )
+
+        if len(batch_times) > 20:
+            # Check for performance degradation
+            first_quarter = sum(batch_times[: len(batch_times) // 4]) / (
+                len(batch_times) // 4
+            )
+            last_quarter = sum(batch_times[-len(batch_times) // 4 :]) / (
+                len(batch_times) // 4
+            )
+            degradation = (last_quarter - first_quarter) / first_quarter * 100
+            print(
+                f"  Performance degradation: {degradation:.1f}% (first quarter vs last quarter)"
+            )
+            if degradation > 20:
+                print("  WARNING: Significant performance degradation detected!")
+
+        # ETA analysis
+        if eta_logger:
+            trends = eta_logger.get_performance_trends()
+            if trends:
+                print("\nETA Analysis:")
+                print(
+                    f"  Performance degradation: {trends['performance_degradation_percent']:.1f}%"
+                )
+                print(f"  Early avg batch time: {trends['early_avg_batch_time']:.3f}s")
+                print(f"  Late avg batch time: {trends['late_avg_batch_time']:.3f}s")
+                print(f"  Total ETA entries logged: {trends['total_entries']}")
+                print(f"  ETA log saved to: {eta_logger.log_file}")
 
 
 def process_preconditioners(

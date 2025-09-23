@@ -1,5 +1,6 @@
 import json
 import math
+import shutil
 import os
 import random
 from dataclasses import dataclass
@@ -115,7 +116,11 @@ def ceildiv(a: int, b: int) -> int:
     return -(-a // b)  # Equivalent to math.ceil(a / b) but faster for integers
 
 
-def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[list[int]]:
+def allocate_batches(
+    doc_lengths: list[int], 
+    N: int, 
+    seed: int = 42
+) -> list[list[int]]:
     """
     Allocate documents into batches that are then distributed evenly across
     a fixed number of workers.
@@ -237,6 +242,35 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
     # Break any systematic ordering of batches
     random.seed(seed)
     random.shuffle(allocation[rank])
+
+    # Print batching diagnostics
+    if rank == 0:
+        print("Batching diagnostics:")
+        print(f"  Total documents: {len(doc_lengths)}")
+        print(f"  Token budget per batch: {N}")
+        print(f"  Number of batches: {len(batches)}")
+        print(f"  Batches per worker: {len(allocation[0])}")
+        print(
+            f"  Average batch size: "
+            f"{sum(len(batch) for batch in batches) / len(batches):.1f}"
+        )
+        print(f"  Max batch size: {max(len(batch) for batch in batches)}")
+        print(f"  Min batch size: {min(len(batch) for batch in batches)}")
+
+        # Check for potential performance issues
+        batch_costs = [
+            max(doc_lengths[i] for i in batch) * len(batch) for batch in batches
+        ]
+        print(f"  Average batch cost: {sum(batch_costs) / len(batch_costs):.0f}")
+        print(f"  Max batch cost: {max(batch_costs)}")
+        print(f"  Cost utilization: {max(batch_costs) / N * 100:.1f}%")
+
+        # Check for size variation that might cause slowdowns
+        size_variance = np.var([len(batch) for batch in batches])
+        if size_variance > 10:
+            print(
+                f"  WARNING: High batch size variance ({size_variance:.1f})"
+            )
 
     return allocation[rank]
 
