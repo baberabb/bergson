@@ -60,6 +60,8 @@ class AttnOnlyConfig(PretrainedConfig):
         embd_pdrop=0.0,
         attn_pdrop=0.0,
         use_cache=True,
+        layer_norm=False,
+        special_pos_embed=True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -73,6 +75,7 @@ class AttnOnlyConfig(PretrainedConfig):
         self.embd_pdrop = embd_pdrop
         self.attn_pdrop = attn_pdrop
         self.use_cache = use_cache
+        self.layer_norm = layer_norm
 
 
 class CausalSelfAttention(nn.Module):
@@ -119,8 +122,9 @@ class CausalSelfAttention(nn.Module):
         q, k, v = qkv.split(C, dim=2)
 
         # add position to q and k only
-        q = q + pos_emb
-        k = k + pos_emb
+        if self.config.special_pos_embed:
+            q = q + pos_emb
+            k = k + pos_emb
 
         q = self._split_heads(q)
         k = self._split_heads(k)
@@ -149,7 +153,8 @@ class CausalSelfAttention(nn.Module):
 class AttnOnlyBlock(nn.Module):
     def __init__(self, config: AttnOnlyConfig):
         super().__init__()
-        # self.ln_1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        if config.layer_norm:
+            self.ln_1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
         self.attn = CausalSelfAttention(config)
 
     def forward(
@@ -160,7 +165,9 @@ class AttnOnlyBlock(nn.Module):
         use_cache: bool = True,
         attn_mask: Optional[torch.Tensor] = None,
     ):
-        # self.ln_1(x)
+        if self.ln_1 is not None:
+            x = self.ln_1(x)
+
         a, present = self.attn(
             x, pos_emb, layer_past=layer_past, use_cache=use_cache, attn_mask=attn_mask
         )
@@ -179,7 +186,8 @@ class AttnOnlyForCausalLM(PreTrainedModel, GenerationMixin):
         self.h = nn.ModuleList(
             [AttnOnlyBlock(config) for _ in range(config.num_hidden_layers)]
         )
-        # self.ln_f = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        if config.layer_norm:
+            self.ln_f = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         self.apply(self._init_weights)
@@ -232,10 +240,14 @@ class AttnOnlyForCausalLM(PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast:
         B, T = input_ids.size()
         pos = torch.arange(0, T, dtype=torch.long, device=input_ids.device).unsqueeze(0)
-        x = self.wte(input_ids)  # + self.wpe(pos)
-        x = self.drop(x)
+        x = self.wte(input_ids)
 
         pos_emb = self.wpe(pos)
+        if not self.config.special_pos_embed:
+            x = x + pos_emb
+
+        x = self.drop(x)
+
         presents = []
         for i, block in enumerate(self.h):
             layer_past = None if past_key_values is None else past_key_values[i]
@@ -248,7 +260,9 @@ class AttnOnlyForCausalLM(PreTrainedModel, GenerationMixin):
             if present is not None:
                 presents.append(present)
 
-        # x = self.ln_f(x)
+        if self.ln_f is not None:
+            x = self.ln_f(x)
+
         logits = self.lm_head(x)
 
         loss = None
@@ -295,7 +309,7 @@ def check_logins():
         raise e
 
 
-def create_transformer():
+def create_transformer(special_pos_embed):
     """Create an attention-only transformer."""
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B")
     # Alternative: use the EleutherAI 10k token tokenizer custom-built for TinyStories,
@@ -307,6 +321,8 @@ def create_transformer():
         num_hidden_layers=2,
         num_attention_heads=12,
         max_position_embeddings=1024,
+        layer_norm=False,
+        special_pos_embed=special_pos_embed,
     )
     model = AttnOnlyForCausalLM(cfg)
 
@@ -324,7 +340,7 @@ def create_transformer():
 
 
 def load_data(
-    tokenizer, N: int | None, name="EleutherAI/SmolLM2-135M-10B", max_length=512
+    tokenizer, N: int | None = None, name="EleutherAI/SmolLM2-135M-10B", max_length=512
 ):
     """Load and preprocess dataset."""
     dataset = load_dataset(name, split="train")
@@ -664,7 +680,9 @@ def main(args):
     print(f"Using device: {device}")
 
     # Create model and tokenizer
-    model, tokenizer = create_transformer()
+    model, tokenizer = create_transformer(
+        special_pos_embed=not args.no_special_pos_embed
+    )
 
     # Load data
     if args.small:
@@ -996,5 +1014,6 @@ if __name__ == "__main__":
     parser.add_argument("--small", action="store_true")
     parser.add_argument("--tag", type=str, default="")
     parser.add_argument("--plot", action="store_true")
+    parser.add_argument("--no_special_pos_embed", action="store_false")
     args = parser.parse_args()
     main(args)
