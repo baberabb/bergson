@@ -1,8 +1,8 @@
 import json
 import math
-import shutil
 import os
 import random
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Sequence
@@ -264,9 +264,7 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
         # Check for size variation that might cause slowdowns
         size_variance = np.var([len(batch) for batch in batches])
         if size_variance > 10:
-            print(
-                f"  WARNING: High batch size variance ({size_variance:.1f})"
-            )
+            print(f"  WARNING: High batch size variance ({size_variance:.1f})")
 
     return allocation[rank]
 
@@ -358,8 +356,14 @@ def load_gradients(root_dir: str) -> np.memmap:
     )
 
 
-def merge_shards(root_dir: Path) -> Dataset:
+def merge_shards(
+    root_dir: Path, out_dir: Path | None = None, remove_shards: bool = False
+) -> Dataset:
     """Merge all shards into a single dataset."""
+    if out_dir is None:
+        out_dir = root_dir
+
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     paths = [path for path in sorted(root_dir.iterdir()) if "shard" in path.name]
 
@@ -367,23 +371,27 @@ def merge_shards(root_dir: Path) -> Dataset:
     ds = concatenate_datasets(
         [Dataset.load_from_disk(str(path / "data.hf")) for path in paths]
     )
-    ds.save_to_disk(root_dir)
+    ds.save_to_disk(out_dir)
 
     # Concatenate memmaps
     memmaps = [load_gradients(str(path)) for path in paths]
-    mmap = np.concatenate(memmaps, axis=0)
 
-    np.memmap(
-        root_dir / "gradients.bin",
-        dtype=mmap.dtype,
-        mode="w+",
-        shape=mmap.shape,
-    )[:] = mmap
+    shapes = [m.shape[0] for m in memmaps]
+    total = sum(shapes)
+    out = np.memmap(
+        out_dir / "gradients.bin", dtype=memmaps[0].dtype, mode="w+", shape=(total,)
+    )
 
-    # Clean up shards
-    for path in sorted(root_dir.iterdir()):
-        if path.is_dir() and "shard" in path.name:
-            shutil.rmtree(path)
+    pos = 0
+    for m in memmaps:
+        out[pos : pos + len(m)] = m
+        pos += len(m)
+    out.flush()
+
+    if remove_shards:
+        for path in sorted(root_dir.iterdir()):
+            if path.is_dir() and "shard" in path.name:
+                shutil.rmtree(path)
 
     return ds
 
