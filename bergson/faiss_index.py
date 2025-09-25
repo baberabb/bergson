@@ -91,7 +91,7 @@ def gradients_loader(root_dir: str):
         yield load_shard(root_dir)
     else:
         for shard_path in sorted(root_path.iterdir()):
-            if shard_path.is_dir():
+            if shard_path.is_dir() and "shard" in shard_path.name:
                 yield load_shard(str(shard_path))
 
 
@@ -160,8 +160,7 @@ class FaissIndex:
             index_idx = 0
 
             for grads in tqdm(dl, desc="Loading gradients"):
-                if grads.dtype.names is not None:
-                    grads = structured_to_unstructured(grads)
+                grads = structured_to_unstructured(grads)
 
                 if unit_norm:
                     grads = normalize_grads(grads, device, faiss_cfg.batch_size)

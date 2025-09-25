@@ -95,7 +95,7 @@ class GradientCollectorCallback(TrainerCallback):
         if not hasattr(args, "__gradient_collection_enabled__"):
             raise RuntimeError(
                 "Gradient collection is not enabled. Please enable it by "
-                "calling bergson.prepare_gradient_collection on the trainer."
+                "calling bergson.prepare_for_gradient_collection on the trainer."
             )
 
         if isinstance(model, PeftModel):
@@ -133,7 +133,7 @@ class GradientCollectorCallback(TrainerCallback):
         state: TrainerState,
         control: TrainerControl,
         *,
-        eval_dataloader: DataLoader | dict[str, DataLoader],
+        eval_dataloader: DataLoader | dict[str, DataLoader] | None,
         train_dataloader: DataLoader,
         **kwargs,
     ):
@@ -158,9 +158,16 @@ class GradientCollectorCallback(TrainerCallback):
 
         # Set up the gradient buffers for the evaluation datasets
         if eval_dataloader is None:
-            print("No evaluation dataloader found")
-            return
-        elif isinstance(eval_dataloader, dict):
+            # HF Trainer doesn't expose the evaluation dataloaders
+            if hasattr(args, "eval_dataset"):
+                eval_dataloader = DataLoader(
+                    args.eval_dataset, batch_size=1, shuffle=False
+                )
+            else:
+                print("Warning: no evaluation dataloader found")
+                return
+
+        if isinstance(eval_dataloader, dict):
             eval_datasets = eval_dataloader
         else:
             eval_datasets = {"eval": eval_dataloader}
@@ -303,9 +310,11 @@ class GradientCollectorCallback(TrainerCallback):
 
         proc.normalizers = normalizers
 
+    def on_evaluate(self, args, state, control, **kwargs):
+        print("on_evaluate")
+
     def on_prediction_step(self, args, state, control, **kwargs):
-        dataset_name = kwargs["inputs"]["dataset_name"]
-        self.write_grads(self.eval_grad_buffers[dataset_name])
+        print("on_prediction_step")
 
     def on_train_end(
         self,
@@ -365,6 +374,8 @@ def prepare_for_gradient_collection(trainer: Trainer):
             trainer.eval_dataset = trainer.eval_dataset.map(
                 lambda ex, idx: {"_idx": idx}, with_indices=True
             )
+
+        trainer.args.eval_dataset = trainer.eval_dataset
 
     trainer._set_signature_columns_if_needed()
     trainer._signature_columns.append("_idx")
