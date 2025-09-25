@@ -349,10 +349,9 @@ def load_data(
     tokenizer, N: int | None = None, name="EleutherAI/SmolLM2-135M-10B", max_length=512
 ):
     """Load and preprocess dataset."""
-    dataset = load_dataset(name, split="train")
+    split = f"train[:{N}]" if N is not None else "train"
+    dataset = load_dataset(name, split=split)
     dataset = assert_type(Dataset, dataset)
-    if N is not None:
-        dataset = dataset.select(range(min(N, len(dataset))))
 
     def tokenize_function(examples):
         # Tokenize the text
@@ -403,8 +402,26 @@ def build_single_token_vocab(tokenizer, wordlist, max_words=500):
 def create_induction_head_dataset(tokenizer, seed, num_prompts=100):
     random.seed(seed)
 
-    # crude word list, can be expanded
-    base_words = [
+    # Separate words into appropriate A and B categories for sensible bigrams
+    A_words = [
+        "blue",
+        "green",
+        "red",
+        "gold",
+        "happy",
+        "sad",
+        "big",
+        "small",
+        "fast",
+        "slow",
+        "smart",
+        "kind",
+        "brave",
+        "wise",
+        "young",
+        "old",
+    ]
+    B_words = [
         "cat",
         "dog",
         "bird",
@@ -419,71 +436,73 @@ def create_induction_head_dataset(tokenizer, seed, num_prompts=100):
         "road",
         "sky",
         "song",
-        "color",
-        "blue",
-        "green",
-        "red",
-        "gold",
-        "day",
-        "night",
         "king",
         "queen",
         "child",
         "story",
+        "house",
+        "river",
+        "mountain",
+        "flower",
+        "cloud",
     ]
-    vocab = build_single_token_vocab(tokenizer, base_words)
-    print(f"Vocab size: {len(vocab)}")
+
+    A_vocab = build_single_token_vocab(tokenizer, A_words)
+    B_vocab = build_single_token_vocab(tokenizer, B_words)
+    print(f"A vocab size: {len(A_vocab)}")
+    print(f"B vocab size: {len(B_vocab)}")
+
+    # Verify that all words are indeed single tokens
+    print("A vocab:", A_vocab)
+    print("B vocab:", B_vocab)
 
     patterns = [
-        "The {A} saw the {B}. The {A}",
-        "Once the {A} met the {B}, later the {A}",
-        "In the story the {A} followed the {B}. The {A}",
-        "My favorite is the {A} with the {B}. The {A}",
-        "Everyone said the {A} remembers the {B}. The {A}",
+        "The {A} {B} was happy. The {A} {B}",
+        "Once the {A} {B} played, later the {A} {B}",
+        "In the story the {A} {B} ran fast. The {A} {B}",
+        "My favorite is the {A} {B} that sings. The {A} {B}",
+        "Everyone said the {A} {B} is smart. The {A} {B}",
     ]
 
     dataset = []
     for _ in range(num_prompts):
         try:
-            A, B = random.sample(vocab, 2)
+            A = random.choice(A_vocab)
+            B = random.choice(B_vocab)
         except ValueError:
-            print(f"Vocab size: {len(vocab)}")
-            breakpoint()
+            print(f"A vocab size: {len(A_vocab)}, B vocab size: {len(B_vocab)}")
             raise ValueError("Not enough unique tokens in vocab")
 
         template = random.choice(patterns)
         text = template.format(A=A, B=B)
-        toks = tokenizer(text, return_tensors="pt", add_special_tokens=False)
-        input_ids = toks["input_ids"][0]
-        labels = torch.full_like(input_ids, -100)
+        toks = tokenizer(
+            text,
+            add_special_tokens=False,
+            padding="max_length",
+            truncation=True,
+            max_length=16,
+        )
+        input_ids = toks["input_ids"]
+        labels = [-100] * len(input_ids)
 
-        A_id = tokenizer(A, add_special_tokens=False)["input_ids"][0]
-        B_id = tokenizer(B, add_special_tokens=False)["input_ids"][0]
-
-        # mask all A and B positions
-        matches_A = (input_ids == A_id).nonzero(as_tuple=True)[0]
-        matches_B = (input_ids == B_id).nonzero(as_tuple=True)[0]
-        labels[matches_A] = A_id
-        labels[matches_B] = B_id
-
-        # explicitly make sure final label is B
-        labels[-1] = B_id
+        # Set the last non-padding token as the target
+        for i in range(len(input_ids) - 1, -1, -1):
+            if input_ids[i] != tokenizer.pad_token_id:
+                labels[i] = input_ids[i]
+                break
 
         dataset.append(
             {
                 "input_ids": input_ids,
-                "attention_mask": toks["attention_mask"][0],
+                "attention_mask": toks["attention_mask"],
                 "labels": labels,
-                "A": A,
-                "B": B,
                 "text": text,
             }
         )
     return dataset
 
 
-def test_induction_head_labels():
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+def test_induction_head_labels(tokenizer):
     dataset = create_induction_head_dataset(tokenizer, seed=0, num_prompts=3)
 
     for ex in dataset:
@@ -520,6 +539,18 @@ def setup_training(
     num_train_epochs: int = 1,
 ):
     """Set up the training configuration with Bergson callback."""
+
+    def compute_metrics(eval_preds):
+        accuracy = (
+            (eval_preds.label_ids == eval_preds.predictions)
+            .astype(np.float32)
+            .mean()
+            .item()
+        )
+        return {
+            "accuracy": accuracy,
+        }
+
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False,
@@ -530,16 +561,18 @@ def setup_training(
         overwrite_output_dir=True,
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=8,
-        # per_device_eval_batch_size=8,
+        per_device_eval_batch_size=128,
         gradient_accumulation_steps=1,
         warmup_steps=1000,
         learning_rate=5e-4,
         weight_decay=0.01,
         logging_dir=f"{output_dir}/logs",
         logging_steps=10,
-        # save_strategy="steps",
-        # save_steps=1000,
-        # save_total_limit=3,
+        eval_steps=10,
+        eval_strategy="steps",
+        save_strategy="steps",
+        save_steps=1000,
+        save_total_limit=3,
         # load_best_model_at_end=True,
         # metric_for_best_model="train_loss",
         # greater_is_better=False,
@@ -569,9 +602,10 @@ def setup_training(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        # eval_dataset=eval_dataset,
+        eval_dataset=eval_dataset,
         data_collator=data_collator,
         callbacks=[bergson_callback],
+        compute_metrics=compute_metrics,
     )
 
     # Prepare for gradient collection
@@ -587,23 +621,7 @@ def build_induction_index(
     print("Building Bergson index for induction head queries...")
 
     # Convert induction prompts to dataset format
-    induction_data = []
-    for prompt_data in induction_prompts:
-        # Create a simple dataset entry
-        induction_data.append(
-            {
-                "input_ids": prompt_data["input_ids"].tolist(),
-                "attention_mask": prompt_data["attention_mask"].tolist(),
-                "labels": prompt_data["input_ids"].tolist(),  # For language modeling
-                "text": prompt_data["text"],
-            }
-        )
-        # Mask out everything except the last token in the labels
-        labels = [-100] * len(prompt_data["input_ids"])
-        labels[-1] = prompt_data["input_ids"][-1]
-        induction_data[-1]["labels"] = labels
-
-    induction_dataset = Dataset.from_list(induction_data)
+    induction_dataset = Dataset.from_list(induction_prompts)
 
     # Create gradient processor
     processor = GradientProcessor(
@@ -665,7 +683,8 @@ def upload_to_hub(model, tokenizer, model_name="2layer-transformer-tinystories")
 
 
 def main(args):
-    dataset_name = "EleutherAI/SmolLM2-135M-10B"
+    # dataset_name = "EleutherAI/SmolLM2-135M-10B"
+    dataset_name = "RonenEldan/TinyStories"
     num_train_epochs = 1
 
     unit_norm = args.unit_norm
@@ -695,20 +714,20 @@ def main(args):
     )
 
     # # Create induction head dataset
-    test_induction_head_labels()
+    # test_induction_head_labels(tokenizer)
     induction_prompts = create_induction_head_dataset(
-        tokenizer, seed=seed, num_prompts=10
+        tokenizer, seed=seed, num_prompts=100
     )
 
     if train:
         # Set up training
         # Load data
         if args.small:
-            train_dataset, eval_dataset = load_data(
-                tokenizer, name=dataset_name, N=1000
-            )
+            train_dataset, _ = load_data(tokenizer, name=dataset_name, N=10_000)
         else:
-            train_dataset, eval_dataset = load_data(tokenizer, name=dataset_name)
+            train_dataset, _ = load_data(tokenizer, name=dataset_name)
+
+        eval_dataset = Dataset.from_list(induction_prompts)
 
         trainer = setup_training(
             model,
