@@ -44,6 +44,13 @@ from bergson.huggingface import (
 )
 from bergson.utils import assert_type
 
+HEAD_CFGS = {
+    "h.0.attn.c_attn": HeadConfig(12, 192, 2),
+    "h.0.attn.c_proj": HeadConfig(12, 64, 2),
+    "h.1.attn.c_attn": HeadConfig(12, 192, 2),
+    "h.1.attn.c_proj": HeadConfig(12, 64, 2),
+}
+
 
 class AttnOnlyConfig(PretrainedConfig):
     model_type = "attn_only"
@@ -542,7 +549,7 @@ def setup_training(
 
     def compute_metrics(eval_preds):
         accuracy = (
-            (eval_preds.label_ids == eval_preds.predictions)
+            (eval_preds.label_ids == eval_preds.predictions.argmax(axis=-1))
             .astype(np.float32)
             .mean()
             .item()
@@ -568,29 +575,21 @@ def setup_training(
         weight_decay=0.01,
         logging_dir=f"{output_dir}/logs",
         logging_steps=10,
-        eval_steps=10,
+        eval_steps=100,
         eval_strategy="steps",
         save_strategy="steps",
-        save_steps=1000,
-        save_total_limit=3,
-        # load_best_model_at_end=True,
-        # metric_for_best_model="train_loss",
-        # greater_is_better=False,
+        save_steps=10_000,
+        # save_total_limit=3,
         report_to="wandb" if wandb else None,
         run_name="2-layer-transformer-SmolLM2-corpus",
         seed=42,
         fp16=False,
-        dataloader_drop_last=True,
+        dataloader_drop_last=False,
     )
 
     bergson_callback = GradientCollectorCallback(
         path=f"{output_dir}/gradients",
-        head_cfgs={
-            "h.0.attn.c_attn": HeadConfig(12, 192, 2),
-            "h.0.attn.c_proj": HeadConfig(12, 64, 2),
-            "h.1.attn.c_attn": HeadConfig(12, 192, 2),
-            "h.1.attn.c_proj": HeadConfig(12, 64, 2),
-        },
+        head_cfgs=HEAD_CFGS,
         projection_dim=projection_dim,
         dtype=np.float32,
         accumulate_grads=False,
@@ -618,8 +617,6 @@ def build_induction_index(
     model, induction_prompts, output_dir, projection_dim, unit_norm
 ):
     """Build static query Bergson index using synthetic induction head data."""
-    print("Building Bergson index for induction head queries...")
-
     # Convert induction prompts to dataset format
     induction_dataset = Dataset.from_list(induction_prompts)
 
@@ -638,12 +635,7 @@ def build_induction_index(
         processor=processor,
         path=f"{output_dir}/induction_gradients",
         skip_preconditioners=True,
-        head_cfgs={
-            "h.0.attn.c_attn": HeadConfig(12, 192, 2),
-            "h.0.attn.c_proj": HeadConfig(12, 64, 2),
-            "h.1.attn.c_attn": HeadConfig(12, 192, 2),
-            "h.1.attn.c_proj": HeadConfig(12, 64, 2),
-        },
+        head_cfgs=HEAD_CFGS,
     )
 
     # Build the attributor for querying
@@ -656,7 +648,6 @@ def build_induction_index(
     )
 
     # Collect mean gradient from attributor index
-
     mean_gradient = torch.cat([grad for grad in attributor.grads.values()], dim=1).mean(
         dim=0
     )
@@ -683,8 +674,8 @@ def upload_to_hub(model, tokenizer, model_name="2layer-transformer-tinystories")
 
 
 def main(args):
-    # dataset_name = "EleutherAI/SmolLM2-135M-10B"
-    dataset_name = "RonenEldan/TinyStories"
+    dataset_name = "EleutherAI/SmolLM2-135M-10B"
+    # dataset_name = "RonenEldan/TinyStories"
     num_train_epochs = 1
 
     unit_norm = args.unit_norm
@@ -723,7 +714,7 @@ def main(args):
         # Set up training
         # Load data
         if args.small:
-            train_dataset, _ = load_data(tokenizer, name=dataset_name, N=10_000)
+            train_dataset, _ = load_data(tokenizer, name=dataset_name, N=20_000)
         else:
             train_dataset, _ = load_data(tokenizer, name=dataset_name)
 
