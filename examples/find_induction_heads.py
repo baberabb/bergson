@@ -506,7 +506,7 @@ def create_induction_head_dataset(tokenizer, seed, num_prompts=100):
                 "text": text,
             }
         )
-    return dataset
+    return Dataset.from_list(dataset)
 
 
 def test_induction_head_labels(tokenizer):
@@ -547,16 +547,83 @@ def setup_training(
 ):
     """Set up the training configuration with Bergson callback."""
 
+    pad_id = -100
+
     def compute_metrics(eval_preds):
-        accuracy = (
-            (eval_preds.label_ids == eval_preds.predictions.argmax(axis=-1))
-            .astype(np.float32)
-            .mean()
-            .item()
-        )
-        return {
-            "accuracy": accuracy,
-        }
+        # predictions: (B, T, V)
+        # label_ids: with your collator, this equals input_ids: (B, T)
+        preds = eval_preds.predictions
+        input_ids = eval_preds.label_ids
+
+        correct = 0
+        total = 0
+        # for each sequence, evaluate the final next-token prediction
+        for i in range(input_ids.shape[0]):
+            seq = input_ids[i]
+            # last non-pad index j
+            non_pad = np.where(seq != pad_id)[0]
+            if len(non_pad) == 0:
+                continue
+            j = non_pad[-1]
+            if j == 0:
+                continue  # nothing to predict
+            pred_tok = preds[i, j - 1].argmax(-1)
+            tgt_tok = seq[j]
+            correct += int(pred_tok == tgt_tok)
+            total += 1
+
+        # avoid div-by-zero
+        acc = (correct / total) if total > 0 else 0.0
+        return {"accuracy": acc}
+
+    # def compute_metrics(eval_preds):
+    #     print("compute_metrics")
+    #     # predictions: (B, T, V)
+    #     preds = eval_preds.predictions
+    #     label_ids = eval_preds.label_ids
+
+    #     correct = 0
+    #     total = 0
+
+    #     # how many examples to print
+    #     max_print = 5
+    #     printed = 0
+
+    #     for i in range(label_ids.shape[0]):
+    #         seq = label_ids[i]
+    #         # last non-pad index j
+    #         non_pad = np.where(seq != pad_id)[0]
+    #         if len(non_pad) == 0:
+    #             continue
+    #         j = non_pad[-1]
+    #         if j == 0:
+    #             continue
+
+    #         # predicted token at position j-1 (predicting token j)
+    #         pred_logits = preds[i, j - 1]
+    #         pred_tok = pred_logits.argmax(-1)
+    #         tgt_tok = seq[j]
+
+    #         correct += int(pred_tok == tgt_tok)
+    #         total += 1
+
+    #         # Trigger additional info approximately 1% of the time
+    #         if random.random() < 0.01:
+    #             if printed < max_print:
+    #                 seq_str = tokenizer.decode(seq[:j + 1], skip_special_tokens=True)
+    #                 pred_str = tokenizer.decode([pred_tok])
+    #                 tgt_str = tokenizer.decode([tgt_tok])
+    #                 print("=" * 40)
+    #                 print(f"Example {i}")
+    #                 print(f"Context up to target: {seq_str}")
+    #                 print(f"Target token id: {tgt_tok} ({tgt_str})")
+    #                 print(f"Predicted token id: {pred_tok} ({pred_str})")
+    #                 print(f"Match? {pred_tok == tgt_tok}")
+    #                 printed += 1
+
+    #     acc = correct / total
+
+    #     return {"accuracy": acc}
 
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
@@ -614,12 +681,9 @@ def setup_training(
 
 
 def build_induction_index(
-    model, induction_prompts, output_dir, projection_dim, unit_norm
+    model, induction_dataset, output_dir, projection_dim, unit_norm
 ):
     """Build static query Bergson index using synthetic induction head data."""
-    # Convert induction prompts to dataset format
-    induction_dataset = Dataset.from_list(induction_prompts)
-
     # Create gradient processor
     processor = GradientProcessor(
         {},
@@ -706,7 +770,7 @@ def main(args):
 
     # # Create induction head dataset
     # test_induction_head_labels(tokenizer)
-    induction_prompts = create_induction_head_dataset(
+    induction_dataset = create_induction_head_dataset(
         tokenizer, seed=seed, num_prompts=100
     )
 
@@ -718,20 +782,18 @@ def main(args):
         else:
             train_dataset, _ = load_data(tokenizer, name=dataset_name)
 
-        eval_dataset = Dataset.from_list(induction_prompts)
-
         trainer = setup_training(
             model,
             tokenizer,
             train_dataset,
-            eval_dataset,
+            eval_dataset=induction_dataset,
             output_dir=output_dir,
             projection_dim=projection_dim,
             wandb=False,
             num_train_epochs=num_train_epochs,
         )
 
-        trainer.train()
+        trainer.train()  # resume_from_checkpoint=True)
         trainer.save_model(output_dir)
         tokenizer.save_pretrained(output_dir)
 
@@ -748,7 +810,7 @@ def main(args):
 
     # Build Bergson index for induction head queries
     mean_induction_gradients, module_induction_gradients = build_induction_index(
-        model, induction_prompts, output_dir, projection_dim, unit_norm
+        model, induction_dataset, output_dir, projection_dim, unit_norm
     )
     model = model.cpu()
 
@@ -833,7 +895,7 @@ def main(args):
         print(f"Loaded module scores from {df_path}")
     else:
         data = []
-        for epoch_idx in range(trainer.args.num_train_epochs):
+        for epoch_idx in range(num_train_epochs):
             grads = Attributor(
                 index_path=f"{trainer.args.output_dir}/gradients/train/epoch_{epoch_idx}",
                 device="cpu",
@@ -1025,7 +1087,7 @@ if __name__ == "__main__":
     from argparse import ArgumentParser
 
     parser = ArgumentParser()
-    parser.add_argument("--projection_dim", type=int, default=128)
+    parser.add_argument("--projection_dim", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--unit_norm", action="store_true")
