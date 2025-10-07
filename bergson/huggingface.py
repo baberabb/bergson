@@ -35,6 +35,7 @@ class GradientCollectorCallback(TrainerCallback):
         accumulate_grads: bool = False,
         use_optimizer_state: bool = True,
         track_order: bool = False,
+        shard_size: int | None = 200_000,
     ):
         """
         Args:
@@ -50,6 +51,8 @@ class GradientCollectorCallback(TrainerCallback):
                 normalize the gradients. If `False`, no normalization is
                 applied.
             track_order: Whether to record the shuffled order of training data.
+            head_cfgs: Information used to split matrix-valued parameters into
+                per-head matrices before down projection.
         """
         super().__init__()
 

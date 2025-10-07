@@ -74,7 +74,10 @@ class Attributor:
                     self.grads[name] /= norm
 
     def search(
-        self, queries: dict[str, Tensor], k: int, modules: list[str] | None = None
+        self,
+        queries: dict[str, Tensor],
+        k: int | None,
+        modules: list[str] | None = None,
     ) -> tuple[Tensor, Tensor]:
         """
         Search for the `k` nearest examples in the index based on the query or queries.
@@ -112,7 +115,7 @@ class Attributor:
             )
 
         modules = modules or list(q.keys())
-        k = min(k, self.N)
+        k = min(k or self.N, self.N)
 
         scores = torch.stack(
             [q[name] @ self.grads[name].mT for name in modules], dim=-1

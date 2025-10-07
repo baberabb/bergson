@@ -1,9 +1,8 @@
 import json
-import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from time import time
+from time import perf_counter
 from typing import Protocol
 
 import numpy as np
@@ -124,9 +123,11 @@ def index_to_device(index: Index, device: str) -> Index:
 
 
 class FaissIndex:
-    """FAISS index."""
+    """Shard-based FAISS index."""
 
     shards: list[Index]
+
+    faiss_cfg: FaissConfig
 
     def __init__(self, path: str, faiss_cfg: FaissConfig, device: str, unit_norm: bool):
         try:
@@ -145,19 +146,73 @@ class FaissIndex:
                 f"{'_unit_norm' if unit_norm else ''}"
             )
         )
+        faiss_path.mkdir(exist_ok=True, parents=True)
 
-        if not (faiss_path.exists() and any(faiss_path.iterdir())):
+        if not any(faiss_path.iterdir()):
             print("Building FAISS index...")
-            start = time()
+            start = perf_counter()
 
-            faiss_path.mkdir(exist_ok=True, parents=True)
+            root_path = Path(path)
+            if (root_path / "info.json").exists():
+                info_paths = [root_path / "info.json"]
+            else:
+                info_paths = [
+                    shard_path / "info.json"
+                    for shard_path in sorted(root_path.iterdir())
+                    if shard_path.is_dir() and (shard_path / "info.json").exists()
+                ]
 
-            num_dataset_shards = len(list(Path(path).iterdir()))
-            shards_per_index = math.ceil(num_dataset_shards / faiss_cfg.num_shards)
+            if not info_paths:
+                raise FileNotFoundError(f"No gradient metadata found under {path}")
+
+            total_grads = sum(
+                [json.load(open(info_path))["num_grads"] for info_path in info_paths]
+            )
+
+            assert faiss_cfg.num_shards <= total_grads and faiss_cfg.num_shards > 0
+
+            # Set the number of grads for each faiss index shard
+            base_shard_size = total_grads // faiss_cfg.num_shards
+            remainder = total_grads % faiss_cfg.num_shards
+            shard_sizes = [base_shard_size] * (faiss_cfg.num_shards)
+            shard_sizes[-1] += remainder
+
+            # Verify all gradients will be consumed
+            assert (
+                sum(shard_sizes) == total_grads
+            ), f"Shard sizes {shard_sizes} don't sum to total_grads {total_grads}"
 
             dl = gradients_loader(path)
-            buffer = []
-            index_idx = 0
+            buffer: list[NDArray] = []
+            buffer_size = 0
+            shard_idx = 0
+
+            def build_shard_from_buffer(
+                buffer_parts: list[NDArray], shard_idx: int
+            ) -> None:
+                print(f"Building shard {shard_idx}...")
+                grads_chunk = np.concatenate(buffer_parts, axis=0)
+                buffer_parts.clear()
+
+                index = faiss.index_factory(
+                    grads_chunk.shape[1],
+                    faiss_cfg.index_factory,
+                    faiss.METRIC_INNER_PRODUCT,
+                )
+                index = index_to_device(index, device)
+                if faiss_cfg.max_train_examples is not None:
+                    train_examples = min(
+                        faiss_cfg.max_train_examples, grads_chunk.shape[0]
+                    )
+                else:
+                    train_examples = grads_chunk.shape[0]
+                index.train(grads_chunk[:train_examples])
+                index.add(grads_chunk)
+
+                del grads_chunk
+
+                index = index_to_device(index, "cpu")
+                faiss.write_index(index, str(faiss_path / f"{shard_idx}.faiss"))
 
             for grads in tqdm(dl, desc="Loading gradients"):
                 grads = structured_to_unstructured(grads)
@@ -165,54 +220,37 @@ class FaissIndex:
                 if unit_norm:
                     grads = normalize_grads(grads, device, faiss_cfg.batch_size)
 
-                buffer.append(grads)
+                batch_idx = 0
+                batch_size = grads.shape[0]
+                while batch_idx < batch_size and shard_idx < faiss_cfg.num_shards:
+                    remaining_in_shard = shard_sizes[shard_idx] - buffer_size
+                    take = min(remaining_in_shard, batch_size - batch_idx)
 
-                if len(buffer) == shards_per_index:
-                    # Build index shard
-                    print(f"Building shard {index_idx}...")
+                    if take > 0:
+                        buffer.append(grads[batch_idx : batch_idx + take])
+                        buffer_size += take
+                        batch_idx += take
 
-                    grads = np.concatenate(buffer, axis=0)
-                    buffer = []
+                    if buffer_size == shard_sizes[shard_idx]:
+                        build_shard_from_buffer(buffer, shard_idx)
+                        buffer = []
+                        buffer_size = 0
+                        shard_idx += 1
 
-                    index = faiss.index_factory(
-                        grads.shape[1],
-                        faiss_cfg.index_factory,
-                        faiss.METRIC_INNER_PRODUCT,
-                    )
-                    index = index_to_device(index, device)
-                    train_examples = faiss_cfg.max_train_examples or grads.shape[0]
-                    index.train(grads[:train_examples])
-                    index.add(grads)
-
-                    # Write index to disk
-                    del grads
-                    index = index_to_device(index, "cpu")
-                    faiss.write_index(index, str(faiss_path / f"{index_idx}.faiss"))
-
-                    index_idx += 1
-
-            if buffer:
-                grads = np.concatenate(buffer, axis=0)
-                buffer = []
-                index = faiss.index_factory(
-                    grads.shape[1], faiss_cfg.index_factory, faiss.METRIC_INNER_PRODUCT
-                )
-                index = index_to_device(index, device)
-                index.train(grads)
-                index.add(grads)
-
-                # Write index to disk
                 del grads
-                index = index_to_device(index, "cpu")
-                faiss.write_index(index, str(faiss_path / f"{index_idx}.faiss"))
 
-            print(f"Built index in {(time() - start) / 60:.2f} minutes.")
-            del buffer, index
+            assert shard_idx == faiss_cfg.num_shards
+            print(f"Built index in {(perf_counter() - start) / 60:.2f} minutes.")
+
+        shard_paths = sorted(
+            (c for c in faiss_path.glob("*.faiss") if c.stem.isdigit()),
+            key=lambda p: int(p.stem),
+        )
 
         shards = []
-        for i in range(faiss_cfg.num_shards):
+        for shard_path in shard_paths:
             shard = faiss.read_index(
-                str(faiss_path / f"{i}.faiss"),
+                str(shard_path),
                 faiss.IO_FLAG_MMAP | faiss.IO_FLAG_READ_ONLY,
             )
             if not faiss_cfg.mmap_index:
@@ -220,21 +258,25 @@ class FaissIndex:
 
             shards.append(shard)
 
+        if len(shards) != faiss_cfg.num_shards:
+            faiss_cfg.num_shards = len(shards)
+
         self.shards = shards
 
-    def search(self, q: NDArray, k: int) -> tuple[NDArray, NDArray]:
+    def search(self, q: NDArray, k: int | None) -> tuple[NDArray, NDArray]:
         """Note: if fewer than `k` examples are found FAISS will return items
-        with the index -1 and the maximum negative distance."""
+        with the index -1 and the maximum negative distance. If `k` is `None`,
+        all examples will be returned."""
         shard_distances = []
         shard_indices = []
         offset = 0
 
-        for index in self.shards:
-            index.nprobe = self.faiss_cfg.nprobe
-            distances, indices = index.search(q, k)
+        for shard in self.shards:
+            shard.nprobe = self.faiss_cfg.nprobe
+            distances, indices = shard.search(q, k or shard.ntotal)
 
             indices += offset
-            offset += index.ntotal
+            offset += shard.ntotal
 
             shard_distances.append(distances)
             shard_indices.append(indices)
@@ -244,7 +286,7 @@ class FaissIndex:
 
         # Rerank results overfetched from multiple shards
         if len(self.shards) > 1:
-            topk_indices = np.argsort(distances, axis=1)[:, :k]
+            topk_indices = np.argsort(distances, axis=1)[:, : k or self.ntotal]
             indices = indices[np.arange(indices.shape[0])[:, None], topk_indices]
             distances = distances[np.arange(distances.shape[0])[:, None], topk_indices]
 

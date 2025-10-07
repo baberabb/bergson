@@ -37,7 +37,13 @@ from transformers.generation.utils import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import wandb
-from bergson import Attributor, GradientProcessor, HeadConfig, collect_gradients
+from bergson import (
+    Attributor,
+    FaissConfig,
+    GradientProcessor,
+    HeadConfig,
+    collect_gradients,
+)
 from bergson.huggingface import (
     GradientCollectorCallback,
     prepare_for_gradient_collection,
@@ -681,7 +687,11 @@ def setup_training(
 
 
 def build_induction_index(
-    model, induction_dataset, output_dir, projection_dim, unit_norm
+    model,
+    induction_dataset,
+    output_dir,
+    projection_dim,
+    unit_norm,
 ):
     """Build static query Bergson index using synthetic induction head data."""
     # Create gradient processor
@@ -712,15 +722,13 @@ def build_induction_index(
     )
 
     # Collect mean gradient from attributor index
-    mean_gradient = torch.cat([grad for grad in attributor.grads.values()], dim=1).mean(
-        dim=0
-    )
     mean_module_gradients = {
-        name: attributor.grads[name].mean(dim=0) for name in attributor.grads.keys()
+        name: attributor.grads[name].mean(dim=0, keepdim=True)
+        for name in attributor.grads.keys()
     }
 
     print("In-context index built successfully! Returning mean gradients...")
-    return mean_gradient, mean_module_gradients
+    return mean_module_gradients
 
 
 def upload_to_hub(model, tokenizer, model_name="2layer-transformer-tinystories"):
@@ -809,8 +817,12 @@ def main(args):
     model = model.to(device)
 
     # Build Bergson index for induction head queries
-    mean_induction_gradients, module_induction_gradients = build_induction_index(
-        model, induction_dataset, output_dir, projection_dim, unit_norm
+    mean_module_induction_gradients = build_induction_index(
+        model,
+        induction_dataset,
+        output_dir,
+        projection_dim,
+        unit_norm,
     )
     model = model.cpu()
 
@@ -826,26 +838,25 @@ def main(args):
     data = []
     for epoch_idx in range(num_train_epochs):
         # Read Bergson index from training
-        grads = Attributor(
+        attributor = Attributor(
             str(Path(output_dir) / "gradients" / "train" / f"epoch_{epoch_idx}"),
-            device=device,
+            device="cpu",
             unit_norm=unit_norm,
             dtype=torch.float32,
-        ).grads
+            faiss_cfg=FaissConfig(
+                mmap_index=True, index_factory="IVF1,SQfp16", num_shards=10
+            ),
+        )
 
-        inner_products = None
-        offset = 0
-        for grad in grads.values():
-            d = grad.shape[1]
-            mean_block = mean_induction_gradients[offset : offset + d]
-            offset += d
-            for i in range(0, grad.shape[0], 1024):
-                batch = grad[i : i + 1024].to(mean_block.device, dtype=torch.float32)
-                contrib = batch @ mean_block.float()
-                if inner_products is None:
-                    inner_products = torch.zeros(grad.shape[0], device=contrib.device)
-                inner_products[i : i + 1024] += contrib
-        inner_products = inner_products.cpu()
+        # returns from largest to smallest 3 2 1 ...
+        inner_products, indices = attributor.search(
+            mean_module_induction_gradients, k=None
+        )
+        del attributor
+
+        # put in original order
+        order = indices.argsort(dim=-1)
+        inner_products = torch.gather(inner_products, -1, order)
 
         for i, score in enumerate(inner_products.squeeze()):
             training_metadata = training_order[
@@ -896,32 +907,26 @@ def main(args):
     else:
         data = []
         for epoch_idx in range(num_train_epochs):
-            grads = Attributor(
+            attributor = Attributor(
                 index_path=f"{trainer.args.output_dir}/gradients/train/epoch_{epoch_idx}",
                 device="cpu",
-                dtype=torch.float32,
                 unit_norm=unit_norm,
-            ).grads
+                dtype=torch.float32,
+                faiss_cfg=FaissConfig(
+                    mmap_index=True, index_factory="IVF1,SQfp16", num_shards=10
+                ),
+            )
 
-            # module_inner_products = {}
-            offset = 0
-            for name, grad in grads.items():
+            for name, grad in mean_module_induction_gradients.items():
                 if "attention" not in name and "attn" not in name:
                     print(f"Skipping {name}")
                     continue
                 else:
                     print(f"Processing {name}")
 
-                d = grad.shape[1]
-                mean_block = mean_induction_gradients[offset : offset + d]
-                offset += d
-                scores = []
-                for i in range(0, grad.shape[0], 1024):
-                    batch = grad[i : i + 1024].to(
-                        mean_block.device, dtype=torch.float32
-                    )
-                    scores.append(batch @ mean_block.float())
-                mod_inner_products = torch.cat(scores, dim=0).cpu()
+                mod_inner_products, _ = attributor.search(
+                    {name: grad}, k=None, modules=[name]
+                )
 
                 for i, score in enumerate(mod_inner_products.squeeze()):
                     training_metadata = training_order[
