@@ -113,6 +113,9 @@ class IndexConfig:
     head_cfgs: dict[str, HeadConfig] = field(default_factory=dict)
     """Configuration for each attention module to be split into head matrices."""
 
+    max_tokens: int | None = None
+    """Maximum number of tokens to process. If None, process all available tokens."""
+
 
 def ceildiv(a: int, b: int) -> int:
     """Ceiling division of two integers."""
