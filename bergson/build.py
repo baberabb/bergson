@@ -19,7 +19,7 @@ from transformers import (
     PreTrainedModel,
 )
 
-from .collection import collect_gradients
+from .collection import scan_gradients
 from .data import DataConfig, IndexConfig, allocate_batches, load_data_string, tokenize
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
@@ -142,7 +142,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], cfg.token_batch_size)
-        collect_gradients(
+        scan_gradients(
             model,
             ds,
             processor,
@@ -166,7 +166,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
                 return
             ds_shard = assert_type(Dataset, Dataset.from_list(buf))
             batches = allocate_batches(ds_shard["length"][:], cfg.token_batch_size)
-            collect_gradients(
+            scan_gradients(
                 model,
                 ds_shard,
                 processor,

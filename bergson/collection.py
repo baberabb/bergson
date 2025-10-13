@@ -1,5 +1,5 @@
 import math
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 import torch
@@ -14,7 +14,7 @@ from .gradients import GradientCollector, GradientProcessor, HeadConfig
 from .peft import set_peft_enabled
 
 
-def collect_gradients(
+def scan_gradients(
     model: PreTrainedModel,
     data: Dataset,
     processor: GradientProcessor,
@@ -28,6 +28,7 @@ def collect_gradients(
     head_cfgs: dict[str, HeadConfig] | None = None,
     save_index: bool = True,
     save_processor: bool = True,
+    query_callback: Callable | None = None,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -90,6 +91,12 @@ def collect_gradients(
         dtype=dtype,
         fill_value=0.0,
     )
+    per_doc_scores = torch.full(
+        (len(data),),
+        device=model.device,
+        dtype=dtype,
+        fill_value=0.0,
+    )
 
     for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
         batch = data[indices]
@@ -146,6 +153,10 @@ def collect_gradients(
             for module_name in mod_grads.keys():
                 grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
 
+        if query_callback is not None:
+            scores = query_callback(mod_grads, indices)
+            per_doc_scores[indices] = scores.detach().type_as(per_doc_scores)
+
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
 
@@ -155,11 +166,18 @@ def collect_gradients(
         dist.reduce(per_doc_losses, dst=0)
 
     if rank == 0:
+        # TODO do not save the original data, just the scores and loss columns
         data = data.add_column(
             "loss",
             per_doc_losses.cpu().numpy(),
             feature=Value("float16" if dtype == torch.float16 else "float32"),
             new_fingerprint="loss",
+        )
+        data = data.add_column(
+            "scores",
+            per_doc_scores.cpu().numpy(),
+            feature=Value("float16" if dtype == torch.float16 else "float32"),
+            new_fingerprint="scores",
         )
         data.save_to_disk(path + "/data.hf")
 

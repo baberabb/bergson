@@ -56,11 +56,19 @@ class DataConfig:
 class QueryConfig:
     """Config for querying an index on the fly."""
 
+    run_path: str = ""
+    """Path to the query dataset. If empty, a new dataset will be built
+    using the query_data config and an index config."""
+
     query_data: DataConfig = field(default_factory=DataConfig)
     """Data to use for the query."""
 
     query_method: Literal["mean", "nearest"] = "mean"
     """Method to use for computing the query."""
+
+    save_processor: bool = True
+    """Whether to write the query dataset gradient processor
+    to disk."""
 
     apply_query_preconditioner: Literal["none", "existing", "precompute"] = "none"
     """Whether to apply (or compute and apply) a preconditioner
@@ -86,6 +94,12 @@ class QueryConfig:
     """Coefficient to weight the application of the query preconditioner
     and the pre-computed index preconditioner. 0.0 means only use the
     query preconditioner and 1.0 means only use the index preconditioner."""
+
+    modules: list[str] = field(default_factory=list)
+    """Modules to use for the query. If empty, all modules will be used."""
+
+    unit_normalize: bool = False
+    """Whether to unit normalize the gradients before computing the scores."""
 
 
 @dataclass
@@ -374,8 +388,9 @@ def load_gradients(root_dir: str) -> np.memmap:
     )
 
 
-# TODO 2025-08-01 Set default concatenate_gradients = False
-def load_gradient_dataset(root_dir: str, concatenate_gradients: bool = True) -> Dataset:
+def load_gradient_dataset(
+    root_dir: str, concatenate_gradients: bool = False
+) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
 
     def load_shard(dir: str) -> Dataset:

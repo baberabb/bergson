@@ -24,7 +24,7 @@ from bergson import (
     GradientProcessor,
     HeadConfig,
     IndexConfig,
-    collect_gradients,
+    scan_gradients,
 )
 from bergson.data import tokenize
 
@@ -60,7 +60,7 @@ def test_disk_build_linear(tmp_path: Path):
         remove_columns=data.column_names,
     )
 
-    collect_gradients(
+    scan_gradients(
         model=model,
         data=data,
         processor=processor,
