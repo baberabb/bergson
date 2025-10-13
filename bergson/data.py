@@ -148,7 +148,7 @@ class IndexConfig:
     stats_sample_size: int | None = 10_000
     """Number of examples to use for estimating processor statistics."""
 
-    drop_columns: bool = False
+    drop_columns: bool = True
     """Only return the new dataset columns."""
 
     loss_fn: Literal["ce", "kl"] = "ce"
