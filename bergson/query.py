@@ -161,7 +161,6 @@ def build_query_callback(query_cfg: QueryConfig, query_ds: Dataset):
     )
 
     def get_mean_query_callback():
-        # Get mean query gradient
         query_gradient = query_gradients.mean(dim=0)
         if query_cfg.unit_normalize:
             query_gradient /= query_gradient.norm(dim=0)
@@ -324,7 +323,7 @@ def worker(
             projection_type=index_cfg.projection_type,
         )
         if rank == 0 and index_cfg.save_processor:
-            processor.save(index_cfg.run_path)
+            processor.save(index_cfg.partial_run_path)
 
     query_callback = build_query_callback(query_cfg, query_ds)
 
@@ -334,7 +333,7 @@ def worker(
             model,
             ds,
             processor,
-            index_cfg.run_path,
+            index_cfg.partial_run_path,
             batches=batches,
             kl_divergence=index_cfg.loss_fn == "kl",
             loss_reduction=index_cfg.loss_reduction,
@@ -360,7 +359,7 @@ def worker(
                 model,
                 ds_shard,
                 processor,
-                os.path.join(index_cfg.run_path, f"shard-{shard_id:05d}"),
+                os.path.join(index_cfg.partial_run_path, f"shard-{shard_id:05d}"),
                 batches=batches,
                 kl_divergence=index_cfg.loss_fn == "kl",
                 loss_reduction=index_cfg.loss_reduction,
@@ -458,3 +457,5 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
             logs_specs=DefaultLogsSpecs(),
         )
         ctx.wait()
+
+    os.rename(index_cfg.partial_run_path, index_cfg.run_path)

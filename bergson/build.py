@@ -43,7 +43,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             world_size=world_size,
         )
 
-    partial_run_path = f"{cfg.run_path}.part"
+    partial_run_path = cfg.partial_run_path
 
     match cfg.precision:
         case "bf16":
@@ -197,9 +197,6 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
         if cfg.save_processor:
             processor.save(partial_run_path)
 
-        # Finalize build
-        os.rename(partial_run_path, cfg.run_path)
-
 
 def dist_worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
     try:
@@ -273,3 +270,5 @@ def build_gradient_dataset(cfg: IndexConfig):
             logs_specs=DefaultLogsSpecs(),
         )
         ctx.wait()
+
+    os.rename(cfg.partial_run_path, cfg.run_path)

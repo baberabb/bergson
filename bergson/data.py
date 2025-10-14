@@ -169,6 +169,11 @@ class IndexConfig:
     head_cfgs: dict[str, HeadConfig] = field(default_factory=dict)
     """Configuration for each attention module to be split into head matrices."""
 
+    @property
+    def partial_run_path(self) -> str:
+        """Temporary path used while writing build artifacts."""
+        return f"{self.run_path}.part"
+
 
 def ceildiv(a: int, b: int) -> int:
     """Ceiling division of two integers."""
