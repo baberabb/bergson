@@ -686,14 +686,14 @@ def setup_training(
     return trainer
 
 
-def build_induction_index(
+def mean_query_gradients(
     model,
     induction_dataset,
     output_dir,
     projection_dim,
     unit_norm,
 ):
-    """Build static query Bergson index using synthetic induction head data."""
+    """Build on-disk Bergson index using synthetic induction head data."""
     # Create gradient processor
     processor = GradientProcessor(
         {},
@@ -746,6 +746,8 @@ def upload_to_hub(model, tokenizer, model_name="2layer-transformer-tinystories")
 
 
 def main(args):
+    check_logins()
+
     dataset_name = "EleutherAI/SmolLM2-135M-10B"
     # dataset_name = "RonenEldan/TinyStories"
     num_train_epochs = 1
@@ -756,7 +758,7 @@ def main(args):
     projection_dim = args.projection_dim
     seed = args.seed
     train = args.train
-    plot = args.plot
+    analyze = args.analyze
 
     output_dir = f"examples/runs/transformer_2_layer{'_' + tag if tag else ''}"
 
@@ -764,27 +766,20 @@ def main(args):
         "Starting 2-layer transformer pretraining with Bergson gradient collection..."
     )
 
-    # Check authentication
-    check_logins()
-
-    # Set device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Create model and tokenizer
     model, tokenizer = create_transformer(
         special_pos_embed=not args.no_special_pos_embed
     )
 
     # # Create induction head dataset
-    # test_induction_head_labels(tokenizer)
+    # test_induction_head_labels(tokenizer) # Outdated
     induction_dataset = create_induction_head_dataset(
         tokenizer, seed=seed, num_prompts=100
     )
 
     if train:
-        # Set up training
-        # Load data
         if args.small:
             train_dataset, _ = load_data(tokenizer, name=dataset_name, N=20_000)
         else:
@@ -805,19 +800,14 @@ def main(args):
         trainer.save_model(output_dir)
         tokenizer.save_pretrained(output_dir)
 
-    if not plot:
+    if not analyze:
         return
 
     # upload_to_hub(model, tokenizer)
 
-    # Reload model and tokenizer
-    # model = AutoModelForCausalLM.from_pretrained(output_dir)
-    model = AttnOnlyForCausalLM.from_pretrained(output_dir)
-    tokenizer = AutoTokenizer.from_pretrained(output_dir)
-    model = model.to(device)
-
-    # Build Bergson index for induction head queries
-    mean_module_induction_gradients = build_induction_index(
+    # Get mean module gradients for induction head queries
+    model = model.to(device)  # type: ignore
+    mean_module_induction_gradients = mean_query_gradients(
         model,
         induction_dataset,
         output_dir,
@@ -827,14 +817,15 @@ def main(args):
     model = model.cpu()
 
     # Load parquet table containing training order
-    training_order = load_from_disk(
-        str(Path(output_dir) / "gradients" / "order.hf")
-    ).to_pandas()
+    training_order_ds = assert_type(
+        Dataset, load_from_disk(str(Path(output_dir) / "gradients" / "order.hf"))
+    )
+    training_order = assert_type(pd.DataFrame, training_order_ds.to_pandas())
 
-    # Plots
+    # Analyze data
     os.makedirs("figures", exist_ok=True)
 
-    # Calculate the inner products with the training gradients
+    # Calculate the mean query gradients' inner products with the training gradients
     data = []
     for epoch_idx in range(num_train_epochs):
         # Read Bergson index from training
@@ -848,15 +839,12 @@ def main(args):
             ),
         )
 
-        # returns from largest to smallest 3 2 1 ...
+        # Ordered from largest to smallest like (3 2 1 ...)
         inner_products, indices = attributor.search(
             mean_module_induction_gradients, k=None
         )
-        del attributor
-
-        # put in original order
-        order = indices.argsort(dim=-1)
-        inner_products = torch.gather(inner_products, -1, order)
+        # Restore original order
+        inner_products = torch.gather(inner_products, -1, indices.argsort(dim=-1))
 
         for i, score in enumerate(inner_products.squeeze()):
             training_metadata = training_order[
@@ -876,6 +864,7 @@ def main(args):
                 )
     data = pd.DataFrame(data)
 
+    # Visualize the influence scores
     plt.figure(figsize=(12, 8))
     plt.scatter(
         data["global_step"],
@@ -898,6 +887,9 @@ def main(args):
         format="pdf",
         bbox_inches="tight",
     )
+
+    print("Module-wise scores not yet supported for FAISS index")
+    exit()
 
     # Produce the same plot but split out by module (i.e. key in the grads mmap)
     df_path = f"figures/module_scores_{tag}{'_norm' if unit_norm else ''}.csv"
@@ -1074,7 +1066,7 @@ def main(args):
     # Step 1: pick checkpoint steps
     # Step 2: compute a bunch of gradients at this step using the static index build
     #   and save it
-    # Step 1.5: fix the horrible static index build bug
+    # Step 1.5: fix the static index build bug
 
     # Can we use optimal transport to align the gradients?
     # Should we transport the activations then transport the gradients in the same way?
@@ -1098,7 +1090,7 @@ if __name__ == "__main__":
     parser.add_argument("--unit_norm", action="store_true")
     parser.add_argument("--small", action="store_true")
     parser.add_argument("--tag", type=str, default="")
-    parser.add_argument("--plot", action="store_true")
+    parser.add_argument("--analyze", action="store_true")
     parser.add_argument("--no_special_pos_embed", action="store_false")
     args = parser.parse_args()
     main(args)
