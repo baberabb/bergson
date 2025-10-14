@@ -22,6 +22,7 @@ from transformers import (
 )
 
 from .build import build_gradient_dataset, estimate_advantage
+from .collection import collect_gradients
 from .data import (
     IndexConfig,
     QueryConfig,
@@ -33,7 +34,6 @@ from .data import (
 )
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
-from .scan import scan_gradients
 from .utils import assert_type, get_layer_list
 
 
@@ -79,8 +79,8 @@ def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
             )
         else:
             print(
-                "Building index dataset gradient processor. "
-                "Warning: this will take as long as the query scan itself."
+                "Building index dataset gradient processor. Warning: "
+                "this will take approximately as long as the query itself."
             )
             build_gradient_dataset(index_cfg)
             processor_dir = index_cfg.processor_path or index_cfg.run_path
@@ -122,8 +122,8 @@ def build_query_callback(
     query_cfg: QueryConfig,
     query_ds: Dataset,
     *,
-    grad_dtype: torch.dtype,
-    grad_device: torch.device | str,
+    dtype: torch.dtype,
+    device: torch.device | str,
 ):
     # TODO do we want to support returning per-module scores?
 
@@ -131,7 +131,7 @@ def build_query_callback(
     Build a function to query the gradients on-the-fly.
     """
 
-    target_device = torch.device(grad_device)
+    device = torch.device(device)
 
     if not query_cfg.modules:
         query_cfg.modules = load_gradients(query_cfg.run_path).dtype.names
@@ -141,7 +141,7 @@ def build_query_callback(
     def get_mean_query_callback():
         acc = {
             module: torch.zeros_like(
-                query_ds[0][module], device=target_device, dtype=torch.float32
+                query_ds[0][module], device=device, dtype=torch.float32
             )
             for module in query_cfg.modules
         }
@@ -150,7 +150,7 @@ def build_query_callback(
             for module, x in zip(query_cfg.modules, cols):
                 if query_cfg.unit_normalize:
                     x = x / (x.norm(dim=1, keepdim=True) + 1e-12)  # avoid div-by-zero
-                acc[module] += x.to(device=target_device, dtype=torch.float32).sum(0)
+                acc[module] += x.to(device=device, dtype=torch.float32).sum(0)
 
         query_ds.map(
             sum_,
@@ -160,9 +160,7 @@ def build_query_callback(
         )
 
         callback_query = {
-            module: (acc[module] / len(query_ds)).to(
-                device=target_device, dtype=grad_dtype
-            )
+            module: (acc[module] / len(query_ds)).to(device=device, dtype=dtype)
             for module in query_cfg.modules
         }
 
@@ -184,7 +182,7 @@ def build_query_callback(
 
     def get_nearest_query_callback():
         queries = assert_type(Tensor, query_ds["gradients"]).to(
-            device=target_device, dtype=grad_dtype
+            device=device, dtype=dtype
         )
 
         if query_cfg.unit_normalize:
@@ -286,7 +284,7 @@ def worker(
             revision=index_cfg.revision,
         )
 
-        model = PeftModel.from_pretrained(
+        model = PeftModel.from_pretrained(  # type: ignore
             base_model,
             index_cfg.model,
             device_map=device_map,
@@ -336,14 +334,13 @@ def worker(
     query_callback = build_query_callback(
         query_cfg,
         query_ds,
-        grad_dtype=dtype if dtype != "auto" else torch.float16,
-        grad_device=f"cuda:{rank}",
+        dtype=dtype if dtype != "auto" else torch.float16,
+        device=f"cuda:{rank}",
     )
-    print("Scanning gradients with save_index:", index_cfg.save_index)
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
-        scan_gradients(
+        collect_gradients(
             model,
             ds,
             processor,
@@ -371,7 +368,7 @@ def worker(
             batches = allocate_batches(
                 ds_shard["length"][:], index_cfg.token_batch_size
             )
-            scan_gradients(
+            collect_gradients(
                 model,
                 ds_shard,
                 processor,

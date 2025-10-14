@@ -19,14 +19,19 @@ from transformers import (
     PreTrainedModel,
 )
 
+from .collection import collect_gradients
 from .data import DataConfig, IndexConfig, allocate_batches, load_data_string, tokenize
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
-from .scan import scan_gradients
 from .utils import assert_type, get_layer_list
 
 
-def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableDataset):
+def worker(
+    rank: int,
+    world_size: int,
+    cfg: IndexConfig,
+    ds: Dataset | IterableDataset,
+):
     torch.cuda.set_device(rank)
 
     # These should be set by the main process
@@ -144,7 +149,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], cfg.token_batch_size)
-        scan_gradients(
+        collect_gradients(
             model,
             ds,
             processor,
@@ -169,7 +174,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
                 return
             ds_shard = assert_type(Dataset, Dataset.from_list(buf))
             batches = allocate_batches(ds_shard["length"][:], cfg.token_batch_size)
-            scan_gradients(
+            collect_gradients(
                 model,
                 ds_shard,
                 processor,

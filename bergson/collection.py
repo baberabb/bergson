@@ -14,7 +14,7 @@ from .gradients import GradientCollector, GradientProcessor, HeadConfig
 from .peft import set_peft_enabled
 
 
-def scan_gradients(
+def collect_gradients(
     model: PreTrainedModel,
     data: Dataset,
     processor: GradientProcessor,

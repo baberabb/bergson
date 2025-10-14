@@ -80,13 +80,13 @@ class QueryConfig:
 
     query_preconditioner_path: str | None = None
     """Path to a precomputed preconditioner. This does not affect
-    the ability to compute a new preconditioner during the scan.
+    the ability to compute a new preconditioner during gradient collection.
     The precomputed preconditioner is applied to the query dataset
     gradients."""
 
     index_preconditioner_path: str | None = None
     """Path to a precomputed preconditioner. This does not affect
-    the ability to compute a new preconditioner during the scan.
+    the ability to compute a new preconditioner during gradient collection.
     The precomputed preconditioner is applied to the query dataset
     gradients."""
 
@@ -103,9 +103,6 @@ class QueryConfig:
 
     batch_size: int = 1024
     """Batch size for processing the query dataset."""
-
-    offload_to_cpu: bool = False
-    """If True, keep value gradients on CPU until the query callback is called."""
 
 
 @dataclass
