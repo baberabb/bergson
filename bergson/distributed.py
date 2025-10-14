@@ -110,7 +110,7 @@ def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tup
             cfg.model,
             device_map=device_map,
             quantization_config=quantization_config,
-            torch_dtype=dtype,
+            dtype=dtype,
         )
         target_modules = None
 
@@ -120,7 +120,7 @@ def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tup
             peft_config.base_model_name_or_path,  # type: ignore
             device_map=device_map,
             quantization_config=quantization_config,
-            torch_dtype=dtype,
+            dtype=dtype,
         )
 
         model = PeftModel.from_pretrained(

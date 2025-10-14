@@ -104,7 +104,7 @@ def main():
         assert os.path.exists(os.path.join(ground_truth_path, file_name)), f"Missing required file: {file_name}"
 
     cfg_json = json.load(open(os.path.join(ground_truth_path, "index_config.json"), "r"))
-
+    print(cfg_json)
     cfg = IndexConfig(**cfg_json)
 
     cfg.data = DataConfig(**(cfg_json["data"]))

@@ -48,7 +48,7 @@ def test_eigenvalue_correction(ground_truth_path, run_path):
             if not v:
                 # Find location of max difference
 
-                coord = max_diff[k].argmax()
+                coord = diff[k].argmax()
                 a, b = coord // lambda_ground_truth[k].shape[1], coord % lambda_ground_truth[k].shape[1]
 
                 print(
