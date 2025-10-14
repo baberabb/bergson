@@ -66,6 +66,7 @@ def test_disk_build_linear(tmp_path: Path):
         processor=processor,
         path=config.run_path,
         head_cfgs=config.head_cfgs,
+        drop_columns=config.drop_columns,
     )
 
     assert any(run_path.iterdir()), "Expected artifacts in the temp run_path"

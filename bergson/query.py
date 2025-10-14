@@ -337,6 +337,7 @@ def worker(
             skip_preconditioners=index_cfg.skip_preconditioners,
             target_modules=target_modules,
             head_cfgs=index_cfg.head_cfgs,
+            drop_columns=index_cfg.drop_columns,
             query_callback=query_callback,
         )
     else:
@@ -362,6 +363,7 @@ def worker(
                 skip_preconditioners=index_cfg.skip_preconditioners,
                 target_modules=target_modules,
                 head_cfgs=index_cfg.head_cfgs,
+                drop_columns=index_cfg.drop_columns,
                 query_callback=query_callback,
             )
             buf.clear()

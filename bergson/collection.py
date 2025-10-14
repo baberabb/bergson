@@ -28,6 +28,7 @@ def scan_gradients(
     head_cfgs: dict[str, HeadConfig] | None = None,
     save_index: bool = True,
     save_processor: bool = True,
+    drop_columns: bool = False,
     query_callback: Callable | None = None,
 ):
     """
@@ -166,7 +167,9 @@ def scan_gradients(
         dist.reduce(per_doc_losses, dst=0)
 
     if rank == 0:
-        # TODO do not save the original data, just the scores and loss columns
+        if drop_columns:
+            data = data.remove_columns(["input_ids"])
+
         data = data.add_column(
             "loss",
             per_doc_losses.cpu().numpy(),
