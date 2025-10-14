@@ -1,10 +1,10 @@
+import json
 import os
 import socket
 from copy import deepcopy
 from datetime import timedelta
 from typing import cast
 
-import numpy as np
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -22,7 +22,6 @@ from transformers import (
 )
 
 from .build import build_gradient_dataset, estimate_advantage
-from .collection import scan_gradients
 from .data import (
     IndexConfig,
     QueryConfig,
@@ -34,50 +33,8 @@ from .data import (
 )
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
+from .scan import scan_gradients
 from .utils import assert_type, get_layer_list
-
-
-def apply_preconditioners_to_concatenated_gradients(
-    ds: Dataset,
-    preconditioners: dict[str, torch.Tensor],
-    run_path: str,
-    *,
-    batch_size: int | None = None,
-) -> Dataset:
-    """Apply module-wise preconditioners to a dataset with flattened gradients."""
-
-    if not preconditioners:
-        return ds
-
-    gradient_memmap = load_gradients(run_path)
-    module_names = list(gradient_memmap.dtype.names)
-    module_shapes = {name: gradient_memmap.dtype[name].shape for name in module_names}
-    del gradient_memmap
-
-    offsets: dict[str, tuple[int, int]] = {}
-    start = 0
-    for name in module_names:
-        shape = module_shapes[name]
-        size = int(np.prod(shape))
-        offsets[name] = (start, start + size)
-        start += size
-
-    def apply(batch: dict[str, list]) -> dict[str, list]:
-        grads = torch.as_tensor(batch["gradients"], dtype=torch.float32)
-
-        for name, (lo, hi) in offsets.items():
-            if name not in preconditioners:
-                continue
-
-            sub = grads[:, lo:hi]
-            preconditioner = preconditioners[name].to(
-                device=sub.device, dtype=sub.dtype
-            )
-            grads[:, lo:hi] = sub @ preconditioner
-
-        return {"gradients": grads.numpy().tolist()}
-
-    return ds.map(apply, batched=True, batch_size=batch_size)
 
 
 def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
@@ -136,59 +93,110 @@ def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
             else:
                 mixed_preconditioner[name] = preconditioner
 
-    # Load the query dataset index
-    query_ds = load_gradient_dataset(query_cfg.run_path, concatenate_gradients=True)
-    query_ds = query_ds.with_format("torch", columns=["gradients"])
-    query_ds = apply_preconditioners_to_concatenated_gradients(
-        query_ds, mixed_preconditioner, query_cfg.run_path
-    )
+    with open(os.path.join(query_cfg.run_path, "info.json"), "r") as f:
+        target_modules = json.load(f)["dtype"]["names"]
+
+    # Load the query dataset
+    query_ds = load_gradient_dataset(query_cfg.run_path, concatenate_gradients=False)
+    query_ds = query_ds.with_format("torch", columns=target_modules)
+
+    if mixed_preconditioner:
+
+        def precondition(batch):
+            for name in target_modules:
+                preconditioner = mixed_preconditioner[name].to(
+                    device=batch.device, dtype=batch.dtype
+                )
+                batch[name] = (batch[name].cuda() @ preconditioner).cpu()
+
+            return batch
+
+        query_ds = query_ds.map(
+            precondition, batched=True, batch_size=query_cfg.batch_size
+        )
 
     return query_ds
 
 
-def build_query_callback(query_cfg: QueryConfig, query_ds: Dataset):
+def build_query_callback(
+    query_cfg: QueryConfig,
+    query_ds: Dataset,
+    *,
+    grad_dtype: torch.dtype,
+    grad_device: torch.device | str,
+):
     # TODO do we want to support returning per-module scores?
 
     """
     Build a function to query the gradients on-the-fly.
     """
 
+    target_device = torch.device(grad_device)
+
     if not query_cfg.modules:
         query_cfg.modules = load_gradients(query_cfg.run_path).dtype.names
 
-    query_gradients = assert_type(
-        Tensor, query_ds.with_format("torch", columns=["gradients"])["gradients"]
-    )
+    query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
 
     def get_mean_query_callback():
-        query_gradient = query_gradients.mean(dim=0)
-        if query_cfg.unit_normalize:
-            query_gradient /= query_gradient.norm(dim=0)
+        acc = {
+            module: torch.zeros_like(
+                query_ds[0][module], device=target_device, dtype=torch.float32
+            )
+            for module in query_cfg.modules
+        }
 
+        def sum_(*cols):
+            for module, x in zip(query_cfg.modules, cols):
+                if query_cfg.unit_normalize:
+                    x = x / (x.norm(dim=1, keepdim=True) + 1e-12)  # avoid div-by-zero
+                acc[module] += x.to(device=target_device, dtype=torch.float32).sum(0)
+
+        query_ds.map(
+            sum_,
+            input_columns=query_cfg.modules,
+            batched=True,
+            batch_size=query_cfg.batch_size,
+        )
+
+        callback_query = {
+            module: (acc[module] / len(query_ds)).to(
+                device=target_device, dtype=grad_dtype
+            )
+            for module in query_cfg.modules
+        }
+
+        @torch.inference_mode()
         def query_callback(mod_grads: dict[str, torch.Tensor]):
+            nonlocal callback_query
             # Cat grads across modules
-            grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=0)
-            if query_cfg.unit_normalize:
-                grads /= grads.norm(dim=0)
-
-            # Calculate scores: inner product with query gradient
-            return grads @ query_gradient.T
+            # grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=1)
+            scores = torch.stack(
+                [
+                    mod_grads[module] @ callback_query[module]
+                    for module in query_cfg.modules
+                ],
+                dim=-1,
+            ).sum(-1)
+            return scores
 
         return query_callback
 
     def get_nearest_query_callback():
-        nonlocal query_gradients
+        queries = assert_type(Tensor, query_ds["gradients"]).to(
+            device=target_device, dtype=grad_dtype
+        )
 
         if query_cfg.unit_normalize:
-            query_gradients /= query_gradients.norm(dim=0)
+            queries /= queries.norm(dim=1, keepdim=True)
 
         def query_callback(mod_grads: dict[str, torch.Tensor]):
             grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=0)
             if query_cfg.unit_normalize:
-                grads /= grads.norm(dim=0)
+                grads /= grads.norm(dim=1, keepdim=True)
 
-            # Calculate scores as the max of the inner products with the query gradients
-            all_scores = grads @ query_gradients.T
+            # Calculate scores as the max of the inner products with the queries
+            all_scores = grads @ queries.T
             return all_scores.max(dim=-1).values
 
         return query_callback
@@ -325,7 +333,13 @@ def worker(
         if rank == 0 and index_cfg.save_processor:
             processor.save(index_cfg.partial_run_path)
 
-    query_callback = build_query_callback(query_cfg, query_ds)
+    query_callback = build_query_callback(
+        query_cfg,
+        query_ds,
+        grad_dtype=dtype if dtype != "auto" else torch.float16,
+        grad_device=f"cuda:{rank}",
+    )
+    print("Scanning gradients with save_index:", index_cfg.save_index)
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
@@ -342,6 +356,8 @@ def worker(
             head_cfgs=index_cfg.head_cfgs,
             drop_columns=index_cfg.drop_columns,
             query_callback=query_callback,
+            save_index=index_cfg.save_index,
+            save_processor=index_cfg.save_processor,
         )
     else:
         # Convert each shard to a Dataset then collect its gradients
@@ -368,6 +384,8 @@ def worker(
                 head_cfgs=index_cfg.head_cfgs,
                 drop_columns=index_cfg.drop_columns,
                 query_callback=query_callback,
+                save_index=index_cfg.save_index,
+                save_processor=index_cfg.save_processor,
             )
             buf.clear()
             shard_id += 1
@@ -424,6 +442,7 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
         )
 
     query_ds = get_query_data(index_cfg, query_cfg)
+    print("Fetched query")
 
     world_size = torch.cuda.device_count()
     if world_size <= 1:

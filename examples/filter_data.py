@@ -15,8 +15,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.modeling_utils import PreTrainedModel
 from trl import SFTConfig, SFTTrainer, setup_chat_format
 
-from bergson.collection import GradientCollector, GradientProcessor
 from bergson.data import DataConfig, load_gradient_dataset, tokenize, unflatten
+from bergson.scan import GradientCollector, GradientProcessor
 from bergson.utils import assert_type
 
 

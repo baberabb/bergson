@@ -19,10 +19,10 @@ from transformers import (
     PreTrainedModel,
 )
 
-from .collection import scan_gradients
 from .data import DataConfig, IndexConfig, allocate_batches, load_data_string, tokenize
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
+from .scan import scan_gradients
 from .utils import assert_type, get_layer_list
 
 

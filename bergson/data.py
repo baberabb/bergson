@@ -101,6 +101,12 @@ class QueryConfig:
     unit_normalize: bool = False
     """Whether to unit normalize the gradients before computing the scores."""
 
+    batch_size: int = 1024
+    """Batch size for processing the query dataset."""
+
+    offload_to_cpu: bool = False
+    """If True, keep value gradients on CPU until the query callback is called."""
+
 
 @dataclass
 class IndexConfig:
@@ -125,7 +131,7 @@ class IndexConfig:
     """Whether to use Fully Sharded Data Parallel (FSDP) for collecing gradients."""
 
     precision: Literal["auto", "bf16", "fp16", "fp32", "int4", "int8"] = "auto"
-    """Precision to use for the model parameters."""
+    """Precision (dtype) to use for the model parameters."""
 
     projection_dim: int = 16
     """Dimension of the random projection for the index, or 0 to disable it."""

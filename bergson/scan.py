@@ -55,9 +55,11 @@ def scan_gradients(
 
     def callback(name: str, g: torch.Tensor):
         g = g.flatten(1).clamp_(lo, hi)
-
-        # Asynchronously move the gradient to CPU and convert to fp16
-        mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
+        if save_index:
+            # Asynchronously move the gradient to CPU and convert to fp16
+            mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
+        else:
+            mod_grads[name] = g.to(dtype=dtype)
 
         # Compute the outer product of the flattened gradient
         if not skip_preconditioners:
