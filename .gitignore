@@ -186,6 +186,7 @@ cython_debug/
 *.arrow
 *.bin
 *.csv
+*.npy
 
 # plots
 *.png
