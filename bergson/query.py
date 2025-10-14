@@ -10,6 +10,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from datasets import Dataset, IterableDataset
 from peft import PeftConfig, PeftModel
+from torch import Tensor
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from torch.distributed.fsdp import fully_shard
 from tqdm.auto import tqdm
@@ -155,15 +156,17 @@ def build_query_callback(query_cfg: QueryConfig, query_ds: Dataset):
     if not query_cfg.modules:
         query_cfg.modules = load_gradients(query_cfg.run_path).dtype.names
 
-    query_ds = query_ds.with_format("torch")
+    query_gradients = assert_type(
+        Tensor, query_ds.with_format("torch", columns=["gradients"])["gradients"]
+    )
 
     def get_mean_query_callback():
         # Get mean query gradient
-        query_gradient = query_ds["gradients"].mean(dim=0)
+        query_gradient = query_gradients.mean(dim=0)
         if query_cfg.unit_normalize:
             query_gradient /= query_gradient.norm(dim=0)
 
-        def query_callback(mod_grads: dict[str, torch.Tensor], indices: list[int]):
+        def query_callback(mod_grads: dict[str, torch.Tensor]):
             # Cat grads across modules
             grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=0)
             if query_cfg.unit_normalize:
@@ -175,17 +178,18 @@ def build_query_callback(query_cfg: QueryConfig, query_ds: Dataset):
         return query_callback
 
     def get_nearest_query_callback():
-        query_gradient = query_ds["gradients"]
-        if query_cfg.unit_normalize:
-            query_gradient /= query_gradient.norm(dim=0)
+        nonlocal query_gradients
 
-        def query_callback(mod_grads: dict[str, torch.Tensor], indices: list[int]):
+        if query_cfg.unit_normalize:
+            query_gradients /= query_gradients.norm(dim=0)
+
+        def query_callback(mod_grads: dict[str, torch.Tensor]):
             grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=0)
             if query_cfg.unit_normalize:
                 grads /= grads.norm(dim=0)
 
             # Calculate scores as the max of the inner products with the query gradients
-            all_scores = grads @ query_gradient.T
+            all_scores = grads @ query_gradients.T
             return all_scores.max(dim=-1).values
 
         return query_callback

@@ -29,7 +29,7 @@ def scan_gradients(
     save_index: bool = True,
     save_processor: bool = True,
     drop_columns: bool = False,
-    query_callback: Callable | None = None,
+    query_callback: Callable[[dict[str, torch.Tensor]], torch.Tensor] | None = None,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -155,7 +155,7 @@ def scan_gradients(
                 grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
 
         if query_callback is not None:
-            scores = query_callback(mod_grads, indices)
+            scores = query_callback(mod_grads)
             per_doc_scores[indices] = scores.detach().type_as(per_doc_scores)
 
         mod_grads.clear()
