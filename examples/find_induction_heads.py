@@ -857,7 +857,9 @@ def main(args):
                 data.append(
                     {
                         "epoch": epoch_idx,
-                        "global_step": row.global_step,
+                        "global_step": row[
+                            training_metadata.columns.get_loc("global_step")
+                        ],
                         "index": i,
                         "score": score.item(),
                     }
