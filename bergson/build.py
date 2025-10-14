@@ -43,6 +43,8 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             world_size=world_size,
         )
 
+    partial_run_path = f"{cfg.run_path}.part"
+
     match cfg.precision:
         case "bf16":
             dtype = torch.bfloat16
@@ -138,7 +140,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             projection_type=cfg.projection_type,
         )
         if rank == 0 and cfg.save_processor:
-            processor.save(cfg.run_path)
+            processor.save(partial_run_path)
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], cfg.token_batch_size)
@@ -146,7 +148,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             model,
             ds,
             processor,
-            cfg.run_path,
+            partial_run_path,
             batches=batches,
             kl_divergence=cfg.loss_fn == "kl",
             loss_reduction=cfg.loss_reduction,
@@ -155,6 +157,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             head_cfgs=cfg.head_cfgs,
             save_index=cfg.save_index,
             save_processor=cfg.save_processor,
+            drop_columns=cfg.drop_columns,
         )
     else:
         # Convert each shard to a Dataset then map over its gradients
@@ -170,7 +173,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
                 model,
                 ds_shard,
                 processor,
-                os.path.join(cfg.run_path, f"shard-{shard_id:05d}"),
+                os.path.join(partial_run_path, f"shard-{shard_id:05d}"),
                 batches=batches,
                 kl_divergence=cfg.loss_fn == "kl",
                 loss_reduction=cfg.loss_reduction,
@@ -180,6 +183,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
                 save_index=cfg.save_index,
                 # Save a processor state checkpoint after each shard
                 save_processor=cfg.save_processor,
+                drop_columns=cfg.drop_columns,
             )
             buf.clear()
             shard_id += 1
@@ -191,7 +195,10 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
         flush()
 
         if cfg.save_processor:
-            processor.save(cfg.run_path)
+            processor.save(partial_run_path)
+
+        # Finalize build
+        os.rename(partial_run_path, cfg.run_path)
 
 
 def dist_worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
