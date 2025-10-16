@@ -36,11 +36,7 @@ class Query:
     def execute(self):
         """Query the gradient dataset."""
 
-        if (
-            os.path.exists(self.index_cfg.run_path)
-            and self.index_cfg.save_index
-            and not self.index_cfg.run_path == "Sdfs"
-        ):
+        if os.path.exists(self.index_cfg.run_path) and self.index_cfg.save_index:
             raise ValueError(
                 "Index path already exists and save_index is True - "
                 "running this query will overwrite the existing gradients. "
