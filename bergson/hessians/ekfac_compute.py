@@ -12,7 +12,6 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import Dataset
-from jaxtyping import Float
 from safetensors.torch import load_file, save_file
 from torch import Tensor
 from torch.profiler import (
@@ -26,7 +25,7 @@ from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
 from bergson.data import IndexConfig, create_index, load_gradients, pad_and_tensor
-from bergson.hessians.collector import EkfacCollector
+from bergson.hessians.collector import CovarianceCollector, HookCollectorBase, LambdaCollector
 from bergson.hessians.logger import get_logger
 from bergson.hessians.sharded_computation import ShardedMul
 
@@ -61,8 +60,7 @@ class EkfacComputer:
 
         self.device = model.device
         self.dtype = model.dtype
-        self.ekfac_collector = EkfacCollector(model.base_model, target_modules=target_modules)
-        self.target_info = self.ekfac_collector.target_info
+        self.target_info = HookCollectorBase.discover_targets(model.base_model, target_modules)  # type: ignore
 
         self.target_modules = target_modules  # which modules to compute EKFAC for, by default uses all MLPs
         self.data = data
@@ -82,91 +80,20 @@ class EkfacComputer:
         self.logger.info(f"Computing EKFAC for {list(self.target_info)} target modules.")
 
     def compute_covariance(self):
-        """
-        Computes Eq.16 from above reference.
-        """
-
-        # These will be sharded
-        A_cov_dict = {}
-        S_cov_dict = {}
-
-        self.shard_computer._init_covariance_dict(
-            activation_covariance_dict=A_cov_dict,
-            gradient_covariance_dict=S_cov_dict,
-            dtype=self.dtype,
-        )
-
-        def callback_activation(name: str, a: Float[Tensor, "N S I"]):
-            """Forward hook to compute the covariance of activations A_l."""
-
-            A_cov_ki = A_cov_dict[name]  # Our stored slice
-
-            a_bi = a.reshape(-1, a.shape[-1])  # [N*S, i]
-
-            local_update_ii = a_bi.mT @ a_bi
-
-            dist.all_reduce(local_update_ii, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
-
-            # Manually sharding
-            start_row = self.rank * A_cov_ki.shape[0]
-            end_row = (self.rank + 1) * A_cov_ki.shape[0]
-            update_slice_ki = local_update_ii[start_row:end_row, :]
-
-            # Add it to permanently stored slice
-            A_cov_ki.add_(update_slice_ki)
-
-        def callback_gradient(name: str, g: Float[Tensor, "N S O"]):
-            """Backward hook to compute the covariance of pseudo-gradients S_{l-1}."""
-            S_cov_po = S_cov_dict[name]
-
-            g_bo = g.reshape(-1, g.shape[-1])  # [N*S, O]
-            local_update_oo = g_bo.mT @ g_bo
-            dist.all_reduce(local_update_oo, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
-
-            start_row = self.rank * S_cov_po.shape[0]
-            end_row = (self.rank + 1) * S_cov_po.shape[0]
-            update_slice_po = local_update_oo[start_row:end_row, :]
-            # Add it to permanently stored slice
-            S_cov_po.add_(update_slice_po)
-
-        collector = EkfacCollector(
+        cov_collector = CovarianceCollector(
             self.model.base_model,
-            closure=callback_gradient,
-            target_modules=self.target_modules,
-            fwd_closure=callback_activation,
+            dtype=self.dtype,
+            shard_computer=self.shard_computer,
+            rank=self.rank,
+            path=self.path,
         )
 
-        # main computation takes place here
-        total_processed = self._collector(collector, desc="covariances")
-
-        if dist.is_initialized():
-            dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
-
-        if self.rank == 0:
-            torch.save(total_processed, os.path.join(self.path, "total_processed.pt"))
-        self.logger.info(f"Total processed: {total_processed.item()}")
-
-        activation_path = os.path.join(self.path, "activation_covariance_sharded")
-        gradient_path = os.path.join(self.path, "gradient_covariance_sharded")
-
-        os.makedirs(activation_path, exist_ok=True)
-        os.makedirs(gradient_path, exist_ok=True)
-
-        # Save the sharded covariance matrices
-        save_file(A_cov_dict, os.path.join(activation_path, f"shard_{self.rank}.safetensors"))
-        save_file(S_cov_dict, os.path.join(gradient_path, f"shard_{self.rank}.safetensors"))
-
-        self.logger.info(f"Saved activation covariance to {activation_path}")
-        self.logger.info(f"Saved gradient covariance to {gradient_path}")
-        self.logger.info("-*-" * 50)
-        # Clean up
-        torch.cuda.empty_cache()
-        gc.collect()
+        self._collector(cov_collector, desc="covariances")
 
     def compute_eigendecomposition(self, covariance_type: Literal["activation", "gradient"]):
         """This is Eq. 18 from above reference."""
         total_processed = torch.load(
-            os.path.join(self.path, "total_processed.pt"),
+            os.path.join(self.path, "total_processed_covariances.pt"),
             map_location=f"cuda:{self.rank}",
         )
 
@@ -231,67 +158,16 @@ class EkfacComputer:
         This is Eq. 20 from above reference.
         """
 
-        self.logger.info(f"Computing eigenvalue correction for {len(self.data)} documents...")
-
-        eigen_a = load_file(
-            self.path + f"/activation_eigen_sharded/shard_{self.rank}.safetensors",
-            device=f"cuda:{self.rank}",
-        )
-        eigen_g = load_file(
-            self.path + f"/gradient_eigen_sharded/shard_{self.rank}.safetensors",
-            device=f"cuda:{self.rank}",
-        )
-
-        eigenvalue_corrections = {}
-        transformed_a_cache = {}
-
-        def callback_activation(name: str, a: torch.Tensor):
-            a_nsi = a  # [N, S, I]
-
-            transformed_a_cache[name] = self.shard_computer._matmul(
-                vector_nsa=a_nsi, matrix_cb=eigen_a[name]
-            )  # shape [N, S, I]
-
-        def callback_gradient(name: str, g: torch.Tensor):
-            g_nso = g  # [N, S, O]
-            result_nso = self.shard_computer._matmul(vector_nsa=g_nso, matrix_cb=eigen_g[name])  # [N, S, O]
-
-            transformed_grad_shard = torch.einsum("N S I, N S O -> N O I", transformed_a_cache[name], result_nso)
-
-            transformed_grad_shard = (transformed_grad_shard**2).sum(dim=0).contiguous()
-
-            dist.all_reduce(transformed_grad_shard, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
-
-            shard_size = transformed_grad_shard.shape[0] // self.world_size
-            start_row = self.rank * shard_size
-            end_row = (self.rank + 1) * shard_size
-            if name not in eigenvalue_corrections:
-                eigenvalue_corrections[name] = transformed_grad_shard[start_row:end_row, :].contiguous()
-            else:
-                eigenvalue_corrections[name] = eigenvalue_corrections[name].to(device=self.device)
-                eigenvalue_corrections[name].add_(transformed_grad_shard[start_row:end_row, :].contiguous())
-                eigenvalue_corrections[name] = eigenvalue_corrections[name].to(device="cpu", non_blocking=False)
-
-        collector = EkfacCollector(
-            self.model.base_model,
-            closure=callback_gradient,
+        ev_correction_collector = LambdaCollector(
+            model=self.model.base_model,
             target_modules=self.target_modules,
-            fwd_closure=callback_activation,
+            shard_computer=self.shard_computer,
+            rank=self.rank,
+            path=self.path,
+            world_size=self.world_size,
+            device=self.device,
         )
-
-        total_processed = self._collector(collector, desc="eigenvalue correction")
-
-        if dist.is_initialized():
-            dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
-        if self.rank == 0:
-            torch.save(total_processed, os.path.join(self.path, "total_processed_lambda.pt"))
-        self.logger.info(f"Total processed: {total_processed.item()}")
-
-        os.makedirs(self.path + "/eigenvalue_correction_sharded", exist_ok=True)
-        save_file(
-            eigenvalue_corrections,
-            self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
-        )
+        self._collector(ev_correction_collector, desc="lambda_correction")
 
     def _setup_profiler(self):
         """Set up profiler if profiling is enabled."""
@@ -317,7 +193,7 @@ class EkfacComputer:
 
         return prof
 
-    def _collector(self, collector, desc: Optional[str] = None) -> Float[Tensor, " "]:
+    def _collector(self, collector, desc: Optional[str] = None):
         total_processed = torch.tensor(0, device=self.model.device)
         prof = self._setup_profiler()
         step = 0
@@ -369,7 +245,12 @@ class EkfacComputer:
                     prof.step()
                 step += 1
 
-        return total_processed
+        if dist.is_initialized():
+            dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
+
+        if self.rank == 0:
+            torch.save(total_processed, os.path.join(self.path, f"total_processed_{desc}.pt"))
+        self.logger.info(f"Total processed: {total_processed.item()}")
 
 
 class EkfacApplicator:
