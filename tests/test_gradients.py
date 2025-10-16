@@ -9,6 +9,7 @@ from bergson.gradients import (
     AdamNormalizer,
     GradientCollector,
     GradientProcessor,
+    LayerAdapter,
 )
 
 
@@ -43,7 +44,8 @@ def test_phi3():
         for name, collected_grad in collected_grads.items():
             layer = model.get_submodule(name)
 
-            o, i = layer.out_features, layer.in_features
+            i = getattr(layer, LayerAdapter.in_attr(layer))
+            o = getattr(layer, LayerAdapter.out_attr(layer))
             g = layer.weight.grad
             assert g is not None
 
@@ -77,8 +79,8 @@ def test_phi3():
 
                 for name, collected_grad in collected_grads.items():
                     layer = model.get_submodule(name)
-
-                    o, i = layer.out_features, layer.in_features
+                    i = getattr(layer, LayerAdapter.in_attr(layer))
+                    o = getattr(layer, LayerAdapter.out_attr(layer))
                     g = layer.weight.grad
                     assert g is not None
 
