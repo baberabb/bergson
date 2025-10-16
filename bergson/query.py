@@ -10,7 +10,6 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from datasets import Dataset, IterableDataset
 from peft import PeftConfig, PeftModel
-from torch import Tensor
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from torch.distributed.fsdp import fully_shard
 from tqdm.auto import tqdm
@@ -39,10 +38,10 @@ from .utils import assert_type, get_layer_list
 
 def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
     """
-    Assemble the preconditioners for the query dataset. Because they are tensors,
-    they can be combined according to https://arxiv.org/html/2410.17413v1
+    Assemble the preconditioners for the query dataset. Preconditioners
+    can be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
     """
-    # Save the query gradients if they don't already exist
+    # Collect the query gradients if they don't exist
     if not os.path.exists(query_cfg.run_path):
         # Create a copy of the index configuration that uses the query dataset
         cfg = deepcopy(index_cfg)
@@ -54,61 +53,58 @@ def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
         cfg.save_index = True
         cfg.streaming = False
 
+        print("Building query dataset...")
         build_gradient_dataset(cfg)
 
-    # Apply specified preconditioners to the query dataset
-    mixed_preconditioner = {}
-    if query_cfg.apply_query_preconditioner != "none":
-        if query_cfg.query_preconditioner_path is not None:
-            query_processor = GradientProcessor.load(
-                query_cfg.query_preconditioner_path, map_location="cuda"
-            )
-        else:
-            query_processor = GradientProcessor.load(
-                query_cfg.run_path, map_location="cuda"
-            )
+    # Collect the index preconditioner if it doesn't exist
+    if (
+        query_cfg.apply_index_preconditioner != "none"
+        and query_cfg.index_preconditioner_path is None
+    ):
+        print(
+            "Building index dataset gradient processor. Warning: "
+            "this will take approximately as long as the query itself."
+        )
+        build_gradient_dataset(index_cfg)
 
-        for name, preconditioner in query_processor.preconditioners.items():
-            mixed_preconditioner[name] = preconditioner
-            if query_cfg.apply_index_preconditioner != "none":
-                mixed_preconditioner[name] *= query_cfg.mixing_coefficient
-
-    if query_cfg.apply_index_preconditioner != "none":
-        if query_cfg.index_preconditioner_path is not None:
-            index_processor = GradientProcessor.load(
-                query_cfg.index_preconditioner_path, map_location="cuda"
-            )
-        else:
-            print(
-                "Building index dataset gradient processor. Warning: "
-                "this will take approximately as long as the query itself."
-            )
-            build_gradient_dataset(index_cfg)
-            processor_dir = index_cfg.processor_path or index_cfg.run_path
-            index_processor = GradientProcessor.load(processor_dir, map_location="cuda")
-
-        for name, preconditioner in index_processor.preconditioners.items():
-            if query_cfg.apply_query_preconditioner != "none":
-                preconditioner *= 1 - query_cfg.mixing_coefficient
-                mixed_preconditioner[name] += preconditioner
-            else:
-                mixed_preconditioner[name] = preconditioner
-
+    # Load the query dataset
     with open(os.path.join(query_cfg.run_path, "info.json"), "r") as f:
         target_modules = json.load(f)["dtype"]["names"]
 
-    # Load the query dataset
     query_ds = load_gradient_dataset(query_cfg.run_path, concatenate_gradients=False)
     query_ds = query_ds.with_format("torch", columns=target_modules)
 
-    if mixed_preconditioner:
+    use_q = query_cfg.apply_query_preconditioner != "none"
+    use_i = query_cfg.apply_index_preconditioner != "none"
+
+    if use_q or use_i:
+        if use_q:
+            q = GradientProcessor.load(
+                query_cfg.query_preconditioner_path or query_cfg.run_path,
+                map_location="cuda",
+            ).preconditioners
+        if use_i:
+            i_path = (
+                query_cfg.index_preconditioner_path
+                or index_cfg.processor_path
+                or index_cfg.run_path
+            )
+            i = GradientProcessor.load(i_path, map_location="cuda").preconditioners
+
+        mixed_preconditioner = (
+            {
+                k: q[k] * query_cfg.mixing_coefficient
+                + i[k] * (1 - query_cfg.mixing_coefficient)
+                for k in q
+            }
+            if (use_q and use_i)
+            else (q if use_q else i)
+        )
+        mixed_preconditioner = {k: v.cuda() for k, v in mixed_preconditioner.items()}
 
         def precondition(batch):
             for name in target_modules:
-                preconditioner = mixed_preconditioner[name].to(
-                    device=batch.device, dtype=batch.dtype
-                )
-                batch[name] = (batch[name].cuda() @ preconditioner).cpu()
+                batch[name] = (batch[name].cuda() @ mixed_preconditioner[name]).cpu()
 
             return batch
 
@@ -119,93 +115,68 @@ def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
     return query_ds
 
 
-def build_query_callback(
-    query_cfg: QueryConfig,
-    query_ds: Dataset,
-    *,
-    dtype: torch.dtype,
-    device: torch.device | str,
+def get_mean_query(
+    query_ds: Dataset, query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype
 ):
-    # TODO do we want to support returning per-module scores?
-
-    """
-    Build a function to query the gradients on-the-fly.
-    """
-
-    device = torch.device(device)
-
-    if not query_cfg.modules:
-        query_cfg.modules = load_gradients(query_cfg.run_path).dtype.names
-
-    query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
-
-    def get_mean_query_callback():
-        acc = {
-            module: torch.zeros_like(
-                query_ds[0][module], device=device, dtype=torch.float32
-            )
-            for module in query_cfg.modules
-        }
-
-        def sum_(*cols):
-            for module, x in zip(query_cfg.modules, cols):
-                if query_cfg.unit_normalize:
-                    x = x / (x.norm(dim=1, keepdim=True) + 1e-12)  # avoid div-by-zero
-                acc[module] += x.to(device=device, dtype=torch.float32).sum(0)
-
-        query_ds.map(
-            sum_,
-            input_columns=query_cfg.modules,
-            batched=True,
-            batch_size=query_cfg.batch_size,
+    acc = {
+        module: torch.zeros_like(
+            query_ds[0][module], device=device, dtype=torch.float32
         )
+        for module in query_cfg.modules
+    }
 
-        callback_query = {
-            module: (acc[module] / len(query_ds)).to(device=device, dtype=dtype)
-            for module in query_cfg.modules
-        }
-
-        @torch.inference_mode()
-        def query_callback(mod_grads: dict[str, torch.Tensor]):
-            nonlocal callback_query
-            # Cat grads across modules
-            # grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=1)
-            scores = torch.stack(
-                [
-                    mod_grads[module] @ callback_query[module]
-                    for module in query_cfg.modules
-                ],
-                dim=-1,
-            ).sum(-1)
-            return scores
-
-        return query_callback
-
-    def get_nearest_query_callback():
-        queries = assert_type(Tensor, query_ds["gradients"]).to(
-            device=device, dtype=dtype
-        )
-
-        if query_cfg.unit_normalize:
-            queries /= queries.norm(dim=1, keepdim=True)
-
-        def query_callback(mod_grads: dict[str, torch.Tensor]):
-            grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=0)
+    def sum_(*cols):
+        for module, x in zip(query_cfg.modules, cols):
             if query_cfg.unit_normalize:
-                grads /= grads.norm(dim=1, keepdim=True)
+                x = x / (x.norm(dim=1, keepdim=True) + 1e-12)
+            acc[module] += x.to(device=device, dtype=torch.float32).sum(0)
 
-            # Calculate scores as the max of the inner products with the queries
-            all_scores = grads @ queries.T
-            return all_scores.max(dim=-1).values
+    query_ds.map(
+        sum_,
+        input_columns=query_cfg.modules,
+        batched=True,
+        batch_size=query_cfg.batch_size,
+    )
 
-        return query_callback
+    callback_query = torch.cat(
+        [
+            (acc[module] / len(query_ds)).to(device=device, dtype=dtype)
+            for module in query_cfg.modules
+        ],
+        dim=1,
+    )
 
-    if query_cfg.query_method == "mean":
-        return get_mean_query_callback()
-    elif query_cfg.query_method == "nearest":
-        return get_nearest_query_callback()
-    else:
-        raise ValueError(f"Invalid query method: {query_cfg.query_method}")
+    @torch.inference_mode()
+    def callback(mod_grads: dict[str, torch.Tensor]):
+        grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=1)
+        if query_cfg.unit_normalize:
+            grads /= grads.norm(dim=1, keepdim=True)
+        return grads @ callback_query
+
+    return callback
+
+
+def get_nearest_query(
+    query_ds: Dataset, query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype
+):
+
+    queries = torch.cat([query_ds[:][name] for name in query_cfg.modules], dim=1).to(
+        device=device, dtype=dtype
+    )
+
+    if query_cfg.unit_normalize:
+        queries /= queries.norm(dim=1, keepdim=True)
+
+    def callback(mod_grads: dict[str, torch.Tensor]):
+        grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=1)
+        if query_cfg.unit_normalize:
+            grads /= grads.norm(dim=1, keepdim=True)
+
+        # Calculate scores as the max of the inner products with the queries
+        all_scores = grads @ queries.T
+        return all_scores.max(dim=-1).values
+
+    return callback
 
 
 def worker(
@@ -332,12 +303,22 @@ def worker(
         if rank == 0 and index_cfg.save_processor:
             processor.save(index_cfg.partial_run_path)
 
-    query_callback = build_query_callback(
-        query_cfg,
-        query_ds,
-        dtype=dtype if dtype != "auto" else torch.float16,
-        device=f"cuda:{rank}",
-    )
+    if not query_cfg.modules:
+        query_cfg.modules = load_gradients(query_cfg.run_path).dtype.names
+
+    query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
+
+    query_device = torch.device(f"cuda:{rank}")
+    query_dtype = dtype if dtype != "auto" else torch.float16
+
+    if query_cfg.query_method == "mean":
+        query_callback = get_mean_query(query_ds, query_cfg, query_device, query_dtype)
+    elif query_cfg.query_method == "nearest":
+        query_callback = get_nearest_query(
+            query_ds, query_cfg, query_device, query_dtype
+        )
+    else:
+        raise ValueError(f"Invalid query method: {query_cfg.query_method}")
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
@@ -440,7 +421,6 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
         )
 
     query_ds = get_query_data(index_cfg, query_cfg)
-    print("Fetched query")
 
     world_size = torch.cuda.device_count()
     if world_size <= 1:
