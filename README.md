@@ -5,12 +5,16 @@ We view attribution as a counterfactual question: **_If we "unlearned" this trai
 
 # Announcements
 
+**October 2025**
+- Support convolution modules: https://github.com/EleutherAI/bergson/pull/50/files
+- Query datasets on-the-fly, without saving gradients to disk: https://github.com/EleutherAI/bergson/pull/47
+
 **September 2025**
-- Saving per-head gradients: https://github.com/EleutherAI/bergson/pull/40
-- Eigendecompositions of preconditioners: https://github.com/EleutherAI/bergson/pull/34
+- Save per-head attention gradients: https://github.com/EleutherAI/bergson/pull/40
+- Eigendecompose preconditioners: https://github.com/EleutherAI/bergson/pull/34
 - Dr. GRPO-based loss gradients: https://github.com/EleutherAI/bergson/pull/35
-- Choosing between summing and averaging losses across tokens: https://github.com/EleutherAI/bergson/pull/36
-- Saving the order training data is seen in while using the gradient collector callback for HF's Trainer/SFTTrainer: https://github.com/EleutherAI/bergson/pull/40
+- Choose between summing and averaging losses across tokens: https://github.com/EleutherAI/bergson/pull/36
+- Save the order training data is seen in while using the gradient collector callback for HF's Trainer/SFTTrainer: https://github.com/EleutherAI/bergson/pull/40
   - Saving training gradients adds a ~17% wall clock overhead
 - Improved static index build ETA accuracy: https://github.com/EleutherAI/bergson/pull/41
 - Several small quality of life improvements for querying indexes: https://github.com/EleutherAI/bergson/pull/38
@@ -24,14 +28,14 @@ pip install bergson
 # Quickstart
 
 ```
-bergson run/test --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
+bergson build runs/test --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
 ```
 
 # Usage
 The first step is to build an index of gradients for each training sample. You can do this from the command line, using `bergson` as a CLI tool:
 
 ```bash
-bergson <output_path> --model <model_name> --dataset <dataset_name>
+bergson build <output_path> --model <model_name> --dataset <dataset_name>
 ```
 
 This will create a directory at `<output_path>` containing the gradients for each training sample in the specified dataset. The `--model` and `--dataset` arguments should be compatible with the Hugging Face `transformers` library. By default it assumes that the dataset has a `text` column, but you can specify other columns using `--prompt_column` and optionally `--completion_column`. The `--help` flag will show you all available options.
@@ -53,7 +57,6 @@ from bergson import GradientCollectorCallback, prepare_for_gradient_collection
 callback = GradientCollectorCallback(
     path="runs/example",
     track_order=True,
-    use_optimizer_state=False,
 )
 trainer = Trainer(
     model=model,
@@ -68,10 +71,10 @@ trainer.train()
 
 ## Attention Head Gradients
 
-By default Bergson collects gradients for named parameter matrices, but gradients for individual attention heads within a named matrix can be collected too. To collect head gradients add a `head_cfgs` dictionary to the training calllback or static index config.
+By default Bergson collects gradients for named parameter matrices, but gradients for individual attention heads within an attention module can be collected too. To collect per-head gradients configure an AttentionConfig for each module of interest.
 
 ```python
-from bergson import HeadConfig, IndexConfig, DataConfig
+from bergson import AttentionConfig, IndexConfig, DataConfig
 from transformers import AutoModelForCausalLM
 
 model = AutoModelForCausalLM.from_pretrained("RonenEldan/TinyStories-1M", trust_remote_code=True, use_safetensors=True)
@@ -80,10 +83,10 @@ collect_gradients(
     model=model,
     data=data,
     processor=processor,
-    path="runs/example_with_heads",
-    head_cfgs={
+    path="runs/split_attention",
+    attention_cfgs={
         # Head configuration for the TinyStories-1M transformer
-        "h.0.attn.attention.out_proj": HeadConfig(num_heads=16, head_size=4, head_dim=2),
+        "h.0.attn.attention.out_proj": AttentionConfig(num_heads=16, head_size=4, head_dim=2),
     },
 )
 ```
@@ -93,14 +96,14 @@ collect_gradients(
 Where a reward signal is available we compute gradients using a weighted advantage estimate based on Dr. GRPO:
 
 ```bash
-bergson <output_path> --model <model_name> --dataset <dataset_name> --reward_column <reward_column_name>
+bergson build <output_path> --model <model_name> --dataset <dataset_name> --reward_column <reward_column_name>
 ```
 
 ## Queries
 
 We provide a query Attributor which supports unit normalized gradients and KNN search out of the box.
 
-```
+```python
 from bergson import Attributor, FaissConfig
 
 attr = Attributor(args.index, device="cuda")
@@ -116,7 +119,7 @@ with attr.trace(model.base_model, 5) as result:
 
 To efficiently query on-disk indexes, perform ANN searches, and explore many other scalability features add a FAISS config:
 
-```
+```python
 attr = Attributor(args.index, device="cuda", faiss_cfg=FaissConfig("IVF1,SQfp16", mmap_index=True))
 
 with attr.trace(model.base_model, 5) as result:

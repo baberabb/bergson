@@ -22,7 +22,6 @@ from numpy.lib.recfunctions import structured_to_unstructured
 from numpy.typing import DTypeLike
 from simple_parsing import field
 
-from .gradients import HeadConfig
 from .utils import assert_type
 
 
@@ -53,14 +52,36 @@ class DataConfig:
 
 
 @dataclass
+class AttentionConfig:
+    """Config for splitting an attention module into head matrices."""
+
+    num_heads: int = 0
+    """Number of attention heads."""
+
+    head_size: int = 0
+    """Size of each attention head."""
+
+    head_dim: int = 0
+    """Axis index for `num_heads` in the weight matrix."""
+
+
+@dataclass
 class QueryConfig:
     """Config for querying an index on the fly."""
+
+    run_path: str = ""
+    """Path to the query dataset. If empty, a new dataset will be built
+    using the query_data config and an index config."""
 
     query_data: DataConfig = field(default_factory=DataConfig)
     """Data to use for the query."""
 
     query_method: Literal["mean", "nearest"] = "mean"
     """Method to use for computing the query."""
+
+    save_processor: bool = True
+    """Whether to write the query dataset gradient processor
+    to disk."""
 
     apply_query_preconditioner: Literal["none", "existing", "precompute"] = "none"
     """Whether to apply (or compute and apply) a preconditioner
@@ -72,13 +93,13 @@ class QueryConfig:
 
     query_preconditioner_path: str | None = None
     """Path to a precomputed preconditioner. This does not affect
-    the ability to compute a new preconditioner during the scan.
+    the ability to compute a new preconditioner during gradient collection.
     The precomputed preconditioner is applied to the query dataset
     gradients."""
 
     index_preconditioner_path: str | None = None
     """Path to a precomputed preconditioner. This does not affect
-    the ability to compute a new preconditioner during the scan.
+    the ability to compute a new preconditioner during gradient collection.
     The precomputed preconditioner is applied to the query dataset
     gradients."""
 
@@ -86,6 +107,15 @@ class QueryConfig:
     """Coefficient to weight the application of the query preconditioner
     and the pre-computed index preconditioner. 0.0 means only use the
     query preconditioner and 1.0 means only use the index preconditioner."""
+
+    modules: list[str] = field(default_factory=list)
+    """Modules to use for the query. If empty, all modules will be used."""
+
+    unit_normalize: bool = False
+    """Whether to unit normalize the gradients before computing the scores."""
+
+    batch_size: int = 1024
+    """Batch size for processing the query dataset."""
 
 
 @dataclass
@@ -111,7 +141,7 @@ class IndexConfig:
     """Whether to use Fully Sharded Data Parallel (FSDP) for collecing gradients."""
 
     precision: Literal["auto", "bf16", "fp16", "fp32", "int4", "int8"] = "auto"
-    """Precision to use for the model parameters."""
+    """Precision (dtype) to use for the model parameters."""
 
     projection_dim: int = 16
     """Dimension of the random projection for the index, or 0 to disable it."""
@@ -134,7 +164,7 @@ class IndexConfig:
     stats_sample_size: int | None = 10_000
     """Number of examples to use for estimating processor statistics."""
 
-    drop_columns: bool = False
+    drop_columns: bool = True
     """Only return the new dataset columns."""
 
     loss_fn: Literal["ce", "kl"] = "ce"
@@ -146,14 +176,23 @@ class IndexConfig:
     streaming: bool = False
     """Whether to use streaming mode for the dataset."""
 
-    stream_shard_size: int = 100_000
+    stream_shard_size: int = 400_000
     """Shard size for streaming the dataset into Dataset objects."""
 
     revision: str | None = None
     """Revision of the model."""
 
-    head_cfgs: dict[str, HeadConfig] = field(default_factory=dict)
-    """Configuration for each attention module to be split into head matrices."""
+    split_attention_modules: list[str] = field(default_factory=list)
+    """Modules to split into head matrices."""
+
+    attention: AttentionConfig = field(default_factory=AttentionConfig)
+    """Configuration for each attention module to be split into head matrices.
+    Used for attention modules specified in `split_attention_modules`."""
+
+    @property
+    def partial_run_path(self) -> str:
+        """Temporary path used while writing build artifacts."""
+        return f"{self.run_path}.part"
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -374,8 +413,9 @@ def load_gradients(root_dir: str) -> np.memmap:
     )
 
 
-# TODO 2025-08-01 Set default concatenate_gradients = False
-def load_gradient_dataset(root_dir: str, concatenate_gradients: bool = True) -> Dataset:
+def load_gradient_dataset(
+    root_dir: str, concatenate_gradients: bool = False
+) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
 
     def load_shard(dir: str) -> Dataset:
