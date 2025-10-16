@@ -52,6 +52,7 @@ def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
         if query_cfg.save_processor or query_cfg.apply_query_preconditioner != "none":
             cfg.save_processor = True
         cfg.save_index = True
+        cfg.streaming = False
 
         build_gradient_dataset(cfg)
 
@@ -387,7 +388,7 @@ def worker(
             buf.clear()
             shard_id += 1
 
-        for ex in tqdm(ds, desc="Querying gradients on the fly"):
+        for ex in tqdm(ds, desc="Querying gradients on the fly", disable=rank != 0):
             buf.append(ex)
             if len(buf) == index_cfg.stream_shard_size:
                 flush()
@@ -474,4 +475,7 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
         )
         ctx.wait()
 
-    os.rename(index_cfg.partial_run_path, index_cfg.run_path)
+    try:
+        os.rename(index_cfg.partial_run_path, index_cfg.run_path)
+    except Exception:
+        pass

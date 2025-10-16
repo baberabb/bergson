@@ -163,7 +163,7 @@ class IndexConfig:
     streaming: bool = False
     """Whether to use streaming mode for the dataset."""
 
-    stream_shard_size: int = 100_000
+    stream_shard_size: int = 400_000
     """Shard size for streaming the dataset into Dataset objects."""
 
     revision: str | None = None

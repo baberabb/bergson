@@ -56,7 +56,7 @@ def collect_gradients(
     def callback(name: str, g: torch.Tensor):
         g = g.flatten(1).clamp_(lo, hi)
         if save_index:
-            # Asynchronously move the gradient to CPU and convert to fp16
+            # Asynchronously move the gradient to CPU and convert to the final dtype
             mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
         else:
             mod_grads[name] = g.to(dtype=dtype)

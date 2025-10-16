@@ -48,8 +48,6 @@ def worker(
             world_size=world_size,
         )
 
-    partial_run_path = cfg.partial_run_path
-
     match cfg.precision:
         case "bf16":
             dtype = torch.bfloat16
@@ -145,7 +143,7 @@ def worker(
             projection_type=cfg.projection_type,
         )
         if rank == 0 and cfg.save_processor:
-            processor.save(partial_run_path)
+            processor.save(cfg.partial_run_path)
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], cfg.token_batch_size)
@@ -153,7 +151,7 @@ def worker(
             model,
             ds,
             processor,
-            partial_run_path,
+            cfg.partial_run_path,
             batches=batches,
             kl_divergence=cfg.loss_fn == "kl",
             loss_reduction=cfg.loss_reduction,
@@ -178,7 +176,7 @@ def worker(
                 model,
                 ds_shard,
                 processor,
-                os.path.join(partial_run_path, f"shard-{shard_id:05d}"),
+                os.path.join(cfg.partial_run_path, f"shard-{shard_id:05d}"),
                 batches=batches,
                 kl_divergence=cfg.loss_fn == "kl",
                 loss_reduction=cfg.loss_reduction,
@@ -200,7 +198,7 @@ def worker(
         flush()
 
         if cfg.save_processor:
-            processor.save(partial_run_path)
+            processor.save(cfg.partial_run_path)
 
 
 def dist_worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
@@ -276,4 +274,7 @@ def build_gradient_dataset(cfg: IndexConfig):
         )
         ctx.wait()
 
-    os.rename(cfg.partial_run_path, cfg.run_path)
+    try:
+        os.rename(cfg.partial_run_path, cfg.run_path)
+    except Exception:
+        pass
