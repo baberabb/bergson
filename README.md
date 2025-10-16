@@ -21,6 +21,12 @@ We view attribution as a counterfactual question: **_If we "unlearned" this trai
 pip install bergson
 ```
 
+# Quickstart
+
+```
+bergson run/test --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
+```
+
 # Usage
 The first step is to build an index of gradients for each training sample. You can do this from the command line, using `bergson` as a CLI tool:
 
