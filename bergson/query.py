@@ -38,8 +38,8 @@ from .utils import assert_type, get_layer_list
 
 def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
     """
-    Assemble the preconditioners for the query dataset. Preconditioners
-    can be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
+    Load and optionally precondition the query dataset. Preconditioners
+    may be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
     """
     # Collect the query gradients if they don't exist
     if not os.path.exists(query_cfg.run_path):
@@ -78,6 +78,7 @@ def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
     use_i = query_cfg.apply_index_preconditioner != "none"
 
     if use_q or use_i:
+        q, i = {}, {}
         if use_q:
             q = GradientProcessor.load(
                 query_cfg.query_preconditioner_path or query_cfg.run_path,
@@ -97,8 +98,8 @@ def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
                 + i[k] * (1 - query_cfg.mixing_coefficient)
                 for k in q
             }
-            if (use_q and use_i)
-            else (q if use_q else i)
+            if (q and i)
+            else (q or i)
         )
         mixed_preconditioner = {k: v.cuda() for k, v in mixed_preconditioner.items()}
 
@@ -118,6 +119,10 @@ def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
 def get_mean_query(
     query_ds: Dataset, query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype
 ):
+    """
+    Compute the mean query and return a callback function that scores gradients
+    according to their inner products or cosine similarities with the mean query.
+    """
     acc = {
         module: torch.zeros_like(
             query_ds[0][module], device=device, dtype=torch.float32
@@ -159,6 +164,11 @@ def get_mean_query(
 def get_nearest_query(
     query_ds: Dataset, query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype
 ):
+    """
+    Return a callback function that scores gradients according to their cosine
+    similarities or inner products with the most similar gradient in the query
+    dataset.
+    """
 
     queries = torch.cat([query_ds[:][name] for name in query_cfg.modules], dim=1).to(
         device=device, dtype=dtype
