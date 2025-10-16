@@ -10,7 +10,7 @@ from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
 from .data import create_index, pad_and_tensor
-from .gradients import GradientCollector, GradientProcessor, HeadConfig
+from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
 
 
@@ -25,7 +25,7 @@ def collect_gradients(
     loss_reduction: Literal["mean", "sum"] = "mean",
     skip_preconditioners: bool = False,
     target_modules: set[str] | None = None,
-    head_cfgs: dict[str, HeadConfig] | None = None,
+    attention_cfgs: dict[str, AttentionConfig] | None = None,
     save_index: bool = True,
     save_processor: bool = True,
     drop_columns: bool = False,
@@ -36,8 +36,8 @@ def collect_gradients(
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
 
-    if head_cfgs is None:
-        head_cfgs = {}
+    if attention_cfgs is None:
+        attention_cfgs = {}
 
     # Batch size of one by default
     if batches is None:
@@ -75,7 +75,7 @@ def collect_gradients(
         callback,
         processor,
         target_modules=target_modules,
-        head_cfgs=head_cfgs,
+        attention_cfgs=attention_cfgs,
     )
 
     # Allocate space ahead of time for the gradients

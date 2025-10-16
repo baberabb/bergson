@@ -145,6 +145,13 @@ def worker(
         if rank == 0 and cfg.save_processor:
             processor.save(cfg.partial_run_path)
 
+    if cfg.split_attention_modules:
+        attention_cfgs = {
+            module: cfg.attention for module in cfg.split_attention_modules
+        }
+    else:
+        attention_cfgs = {}
+
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], cfg.token_batch_size)
         collect_gradients(
@@ -157,7 +164,7 @@ def worker(
             loss_reduction=cfg.loss_reduction,
             skip_preconditioners=cfg.skip_preconditioners,
             target_modules=target_modules,
-            head_cfgs=cfg.head_cfgs,
+            attention_cfgs=attention_cfgs,
             save_index=cfg.save_index,
             save_processor=cfg.save_processor,
             drop_columns=cfg.drop_columns,
@@ -182,7 +189,7 @@ def worker(
                 loss_reduction=cfg.loss_reduction,
                 skip_preconditioners=cfg.skip_preconditioners,
                 target_modules=target_modules,
-                head_cfgs=cfg.head_cfgs,
+                attention_cfgs=attention_cfgs,
                 save_index=cfg.save_index,
                 # Save a processor state checkpoint after each shard
                 save_processor=cfg.save_processor,

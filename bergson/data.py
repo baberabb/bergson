@@ -22,7 +22,6 @@ from numpy.lib.recfunctions import structured_to_unstructured
 from numpy.typing import DTypeLike
 from simple_parsing import field
 
-from .gradients import HeadConfig
 from .utils import assert_type
 
 
@@ -50,6 +49,20 @@ class DataConfig:
 
     truncation: bool = False
     """Whether to truncate long documents to fit the token budget."""
+
+
+@dataclass
+class AttentionConfig:
+    """Config for splitting an attention module into head matrices."""
+
+    num_heads: int = 0
+    """Number of attention heads."""
+
+    head_size: int = 0
+    """Size of each attention head."""
+
+    head_dim: int = 0
+    """Axis index for `num_heads` in the weight matrix."""
 
 
 @dataclass
@@ -169,8 +182,12 @@ class IndexConfig:
     revision: str | None = None
     """Revision of the model."""
 
-    head_cfgs: dict[str, HeadConfig] = field(default_factory=dict)
-    """Configuration for each attention module to be split into head matrices."""
+    split_attention_modules: list[str] = field(default_factory=list)
+    """Modules to split into head matrices."""
+
+    attention: AttentionConfig = field(default_factory=AttentionConfig)
+    """Configuration for each attention module to be split into head matrices.
+    Used for attention modules specified in `split_attention_modules`."""
 
     @property
     def partial_run_path(self) -> str:

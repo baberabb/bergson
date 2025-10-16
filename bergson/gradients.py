@@ -2,8 +2,8 @@ import json
 import os
 from abc import ABC, abstractmethod
 from contextlib import ContextDecorator
-from dataclasses import asdict, dataclass, field
-from typing import Callable, Literal, Mapping, NamedTuple
+from dataclasses import asdict, astuple, dataclass, field
+from typing import Callable, Literal, Mapping
 
 import torch
 import torch.nn as nn
@@ -11,6 +11,7 @@ from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 from transformers.pytorch_utils import Conv1D as HFConv1D
 
+from .data import AttentionConfig
 from .math import reshape_to_nearest_square
 from .utils import assert_type, create_projection_matrix
 
@@ -290,15 +291,7 @@ class GradientProcessor:
         torch.save(self.preconditioners_eigen, precond_eigen_path)
 
 
-class HeadConfig(NamedTuple):
-    num_heads: int
-    """The number of heads."""
-    head_size: int
-    """The size of each head."""
-    head_dim: int
-    """The dimension along which heads are tiled."""
-
-class LayerAdapter():
+class LayerAdapter:
     supported_modules = (nn.Linear, HFConv1D, nn.Conv1d, nn.Conv2d, nn.Conv3d)
 
     @staticmethod
@@ -307,9 +300,9 @@ class LayerAdapter():
             case nn.Linear():
                 return "in_features"
             case HFConv1D():
-                return 'nx'
+                return "nx"
             case nn.Conv1d() | nn.Conv2d() | nn.Conv3d():
-                return 'in_channels'
+                return "in_channels"
             case _:
                 raise ValueError(f"Unsupported layer type: {type(layer)}")
 
@@ -319,11 +312,12 @@ class LayerAdapter():
             case nn.Linear():
                 return "out_features"
             case HFConv1D():
-                return 'nf'
+                return "nf"
             case nn.Conv1d() | nn.Conv2d() | nn.Conv3d():
-                return 'out_channels'
+                return "out_channels"
             case _:
                 raise ValueError(f"Unsupported layer type: {type(layer)}")
+
 
 @dataclass
 class GradientCollector(ContextDecorator):
@@ -350,11 +344,11 @@ class GradientCollector(ContextDecorator):
     target_modules: set[str] | None = None
     """
     List of parameter names to collect gradients for. Should consist only of weight
-    matrices in modules supported by LayerAdapter. If `None`, the gradients for all weight matrices
-    will be collected.
+    matrices in modules supported by LayerAdapter. If `None`, the gradients for all
+    weight matrices will be collected.
     """
 
-    head_cfgs: dict[str, HeadConfig] = field(default_factory=dict)
+    attention_cfgs: dict[str, AttentionConfig] = field(default_factory=dict)
     """
     Dictionary of head configurations for each module to be split into head matrices.
     """
@@ -386,20 +380,26 @@ class GradientCollector(ContextDecorator):
 
         shapes = {}
         for name, (_, target_shape) in self.target_info.items():
-            if name in self.head_cfgs:
-                num_heads, head_size, head_dim = self.head_cfgs[name]
-
-                if not proj_shape:
-                    head_shape = list(target_shape)
-                    # Exclude batch and sequence dimensions since we're working
-                    # with the weight shape
-                    head_shape[head_dim - 2] = head_size
-                    shape = torch.Size(head_shape)
+            if name in self.attention_cfgs:
+                attention_cfg = self.attention_cfgs[name]
+                if proj_shape:
+                    head_shape = proj_shape
                 else:
-                    shape = proj_shape
+                    # Mutate the attention module's shape to get the attention
+                    # head shape
+                    attention_shape = list(target_shape)
+                    # - 2 because we're excluding the batch and sequence activation
+                    # dimensions
+                    attention_shape[attention_cfg.head_dim - 2] = (
+                        attention_cfg.head_size
+                    )
+                    head_shape = torch.Size(attention_shape)
 
                 shapes.update(
-                    {self.get_head_name(name, h): shape for h in range(num_heads)}
+                    {
+                        self.get_head_name(name, h): head_shape
+                        for h in range(attention_cfg.num_heads)
+                    }
                 )
             else:
                 shapes[name] = proj_shape or target_shape
@@ -477,16 +477,19 @@ class GradientCollector(ContextDecorator):
     def _process_grad(self, module: nn.Module, _, grad_out):
         """Process the incoming gradient wrt the output of the module."""
         # Sanity checks
-        assert isinstance(module, LayerAdapter.supported_modules), f"Expected a module of type {LayerAdapter.supported_modules}, got {type(module)}"
+        assert isinstance(module, LayerAdapter.supported_modules), (
+            f"Expected a module of type {LayerAdapter.supported_modules}, "
+            f"got {type(module)}"
+        )
         G = grad_out[0]  # [N, S, O]
         I = module._inputs  # [N, S, I/q]
 
         name = assert_type(str, module._name)
 
-        if name in self.head_cfgs:
-            num_heads, head_size, head_dim = self.head_cfgs[name]
-
+        if name in self.attention_cfgs:
             # Recurse into heads with module mutation and restoration
+            num_heads, head_size, head_dim = astuple(self.attention_cfgs[name])
+
             module_name, module_inputs, module_out_features = (
                 module._name,
                 module._inputs,
@@ -502,17 +505,14 @@ class GradientCollector(ContextDecorator):
                 except Exception as e:
                     print(
                         f"Error processing gradient of shape {G.shape} for head {h}"
-                        f"in module {name}. Provided head config may be incorrect. "
+                        f" in module {name}. Provided head config may be incorrect. "
                         f"Head config: head dim {head_dim}, head size {head_size},"
                         f" num heads {num_heads}."
                     )
                     raise e
 
                 self._process_grad(module, None, (head_G,))
-            module._name, module._inputs = (
-                module_name,
-                module_inputs
-            )
+            module._name, module._inputs = (module_name, module_inputs)
             setattr(module, LayerAdapter.out_attr(module), module_out_features)
 
             return

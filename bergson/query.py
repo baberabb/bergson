@@ -303,6 +303,13 @@ def worker(
         if rank == 0 and index_cfg.save_processor:
             processor.save(index_cfg.partial_run_path)
 
+    if index_cfg.split_attention_modules:
+        attention_cfgs = {
+            module: index_cfg.attention for module in index_cfg.split_attention_modules
+        }
+    else:
+        attention_cfgs = {}
+
     if not query_cfg.modules:
         query_cfg.modules = load_gradients(query_cfg.run_path).dtype.names
 
@@ -332,7 +339,7 @@ def worker(
             loss_reduction=index_cfg.loss_reduction,
             skip_preconditioners=index_cfg.skip_preconditioners,
             target_modules=target_modules,
-            head_cfgs=index_cfg.head_cfgs,
+            attention_cfgs=attention_cfgs,
             drop_columns=index_cfg.drop_columns,
             query_callback=query_callback,
             save_index=index_cfg.save_index,
@@ -360,7 +367,7 @@ def worker(
                 loss_reduction=index_cfg.loss_reduction,
                 skip_preconditioners=index_cfg.skip_preconditioners,
                 target_modules=target_modules,
-                head_cfgs=index_cfg.head_cfgs,
+                attention_cfgs=attention_cfgs,
                 drop_columns=index_cfg.drop_columns,
                 query_callback=query_callback,
                 save_index=index_cfg.save_index,
