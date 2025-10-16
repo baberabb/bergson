@@ -1,7 +1,6 @@
 import json
 import os
 import socket
-from copy import deepcopy
 from datetime import timedelta
 from typing import cast
 
@@ -20,7 +19,7 @@ from transformers import (
     PreTrainedModel,
 )
 
-from .build import build_gradient_dataset, estimate_advantage
+from .build import estimate_advantage
 from .collection import collect_gradients
 from .data import (
     IndexConfig,
@@ -28,7 +27,6 @@ from .data import (
     allocate_batches,
     load_data_string,
     load_gradient_dataset,
-    load_gradients,
     tokenize,
 )
 from .gradients import GradientProcessor
@@ -42,55 +40,35 @@ def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
     may be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
     """
     # Collect the query gradients if they don't exist
-    if not os.path.exists(query_cfg.run_path):
-        # Create a copy of the index configuration that uses the query dataset
-        cfg = deepcopy(index_cfg)
-        cfg.data = deepcopy(query_cfg.query_data)
-        cfg.run_path = query_cfg.run_path
-
-        if query_cfg.save_processor or query_cfg.apply_query_preconditioner != "none":
-            cfg.save_processor = True
-        cfg.save_index = True
-        cfg.streaming = False
-
-        print("Building query dataset...")
-        build_gradient_dataset(cfg)
-
-    # Collect the index preconditioner if it doesn't exist
-    if (
-        query_cfg.apply_index_preconditioner != "none"
-        and query_cfg.index_preconditioner_path is None
-    ):
-        print(
-            "Building index dataset gradient processor. Warning: "
-            "this will take approximately as long as the query itself."
+    if not os.path.exists(query_cfg.query_path):
+        raise FileNotFoundError(
+            f"Query dataset not found at {query_cfg.query_path}. "
+            "Please build a query dataset index first."
         )
-        build_gradient_dataset(index_cfg)
 
     # Load the query dataset
-    with open(os.path.join(query_cfg.run_path, "info.json"), "r") as f:
+    with open(os.path.join(query_cfg.query_path, "info.json"), "r") as f:
         target_modules = json.load(f)["dtype"]["names"]
 
-    query_ds = load_gradient_dataset(query_cfg.run_path, concatenate_gradients=False)
+    query_ds = load_gradient_dataset(query_cfg.query_path, concatenate_gradients=False)
     query_ds = query_ds.with_format("torch", columns=target_modules)
 
-    use_q = query_cfg.apply_query_preconditioner != "none"
-    use_i = query_cfg.apply_index_preconditioner != "none"
+    use_q = query_cfg.query_preconditioner_path is not None
+    use_i = query_cfg.index_preconditioner_path is not None
 
     if use_q or use_i:
         q, i = {}, {}
         if use_q:
+            assert query_cfg.query_preconditioner_path is not None
             q = GradientProcessor.load(
-                query_cfg.query_preconditioner_path or query_cfg.run_path,
+                query_cfg.query_preconditioner_path,
                 map_location="cuda",
             ).preconditioners
         if use_i:
-            i_path = (
-                query_cfg.index_preconditioner_path
-                or index_cfg.processor_path
-                or index_cfg.run_path
-            )
-            i = GradientProcessor.load(i_path, map_location="cuda").preconditioners
+            assert query_cfg.index_preconditioner_path is not None
+            i = GradientProcessor.load(
+                query_cfg.index_preconditioner_path, map_location="cuda"
+            ).preconditioners
 
         mixed_preconditioner = (
             {
@@ -148,7 +126,7 @@ def get_mean_query(
             (acc[module] / len(query_ds)).to(device=device, dtype=dtype)
             for module in query_cfg.modules
         ],
-        dim=1,
+        dim=0,
     )
 
     @torch.inference_mode()
@@ -320,8 +298,8 @@ def worker(
     else:
         attention_cfgs = {}
 
-    if not query_cfg.modules:
-        query_cfg.modules = load_gradients(query_cfg.run_path).dtype.names
+    with open(os.path.join(query_cfg.query_path, "info.json"), "r") as f:
+        query_cfg.modules = json.load(f)["dtype"]["names"]
 
     query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
 

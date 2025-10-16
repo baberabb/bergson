@@ -69,12 +69,8 @@ class AttentionConfig:
 class QueryConfig:
     """Config for querying an index on the fly."""
 
-    run_path: str = ""
-    """Path to the query dataset. If empty, a new dataset will be built
-    using the query_data config and an index config."""
-
-    query_data: DataConfig = field(default_factory=DataConfig)
-    """Data to use for the query."""
+    query_path: str = ""
+    """Path to the query dataset."""
 
     query_method: Literal["mean", "nearest"] = "mean"
     """Method to use for computing the query."""
@@ -83,25 +79,15 @@ class QueryConfig:
     """Whether to write the query dataset gradient processor
     to disk."""
 
-    apply_query_preconditioner: Literal["none", "existing", "precompute"] = "none"
-    """Whether to apply (or compute and apply) a preconditioner
-    computed over the query dataset."""
-
-    apply_index_preconditioner: Literal["none", "existing", "precompute"] = "none"
-    """Whether to apply (or compute and apply) a preconditioner
-    computed over the index dataset."""
-
     query_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner. This does not affect
-    the ability to compute a new preconditioner during gradient collection.
-    The precomputed preconditioner is applied to the query dataset
-    gradients."""
+    """Path to a precomputed preconditioner. The precomputed
+    preconditioner is applied to the query dataset gradients."""
 
     index_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner. This does not affect
-    the ability to compute a new preconditioner during gradient collection.
-    The precomputed preconditioner is applied to the query dataset
-    gradients."""
+    """Path to a precomputed preconditioner. The precomputed
+    preconditioner is applied to the query dataset gradients.
+    This does not affect the ability to compute a new
+    preconditioner during gradient collection."""
 
     mixing_coefficient: float = 0.5
     """Coefficient to weight the application of the query preconditioner
@@ -123,10 +109,10 @@ class IndexConfig:
     """Config for building the index and running the model/dataset pipeline."""
 
     run_path: str = field(positional=True)
-    """Name of the run. Used to create a directory for the index."""
+    """Name of the run. Used to create a directory for run artifacts."""
 
     save_index: bool = True
-    """Whether to write the gradients to disk."""
+    """Whether to write the gradient index to disk."""
 
     save_processor: bool = True
     """Whether to write the gradient processor to disk."""
