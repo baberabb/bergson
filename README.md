@@ -71,7 +71,11 @@ trainer.train()
 
 ## Attention Head Gradients
 
-By default Bergson collects gradients for named parameter matrices, but gradients for individual attention heads within an attention module can be collected too. To collect per-head gradients configure an AttentionConfig for each module of interest.
+By default Bergson collects gradients for named parameter matrices, but gradients for individual attention heads within an attention module may also be collected. To collect per-head gradients programmatically configure an AttentionConfig for each module of interest, or specify attention modules and a single shared configuration using the command line tool.
+
+```bash
+bergson build runs/test --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation --split_attention_modules "h.0.attn.attention.out_proj" --attention.num_heads 16 --attention.head_size 4 --attention.head_dim 2
+```
 
 ```python
 from bergson import AttentionConfig, IndexConfig, DataConfig
@@ -99,7 +103,7 @@ Where a reward signal is available we compute gradients using a weighted advanta
 bergson build <output_path> --model <model_name> --dataset <dataset_name> --reward_column <reward_column_name>
 ```
 
-## Queries
+## Index Queries
 
 We provide a query Attributor which supports unit normalized gradients and KNN search out of the box.
 
@@ -125,6 +129,12 @@ attr = Attributor(args.index, device="cuda", faiss_cfg=FaissConfig("IVF1,SQfp16"
 with attr.trace(model.base_model, 5) as result:
     model(query_tokens, labels=query_tokens).loss.backward()
     model.zero_grad()
+```
+
+## On-The-Fly Queries
+
+```bash
+bergson query runs/scores --query_path runs/query_index --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --save_index False --truncation
 ```
 
 # Development

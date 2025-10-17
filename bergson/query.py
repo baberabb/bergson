@@ -306,14 +306,14 @@ def worker(
     query_device = torch.device(f"cuda:{rank}")
     query_dtype = dtype if dtype != "auto" else torch.float16
 
-    if query_cfg.query_method == "mean":
+    if query_cfg.score == "mean":
         query_callback = get_mean_query(query_ds, query_cfg, query_device, query_dtype)
-    elif query_cfg.query_method == "nearest":
+    elif query_cfg.score == "nearest":
         query_callback = get_nearest_query(
             query_ds, query_cfg, query_device, query_dtype
         )
     else:
-        raise ValueError(f"Invalid query method: {query_cfg.query_method}")
+        raise ValueError(f"Invalid query scoring method: {query_cfg.score}")
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)

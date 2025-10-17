@@ -30,6 +30,9 @@ class DataConfig:
     dataset: str = "EleutherAI/SmolLM2-135M-10B"
     """Dataset identifier to build the index from."""
 
+    subset: str | None = None
+    """Subset of the dataset to use for building the index."""
+
     split: str = "train"
     """Split of the dataset to use for building the index."""
 
@@ -70,24 +73,26 @@ class QueryConfig:
     """Config for querying an index on the fly."""
 
     query_path: str = ""
-    """Path to the query dataset."""
+    """Path to the existing query index."""
 
-    query_method: Literal["mean", "nearest"] = "mean"
-    """Method to use for computing the query."""
+    score: Literal["mean", "nearest"] = "mean"
+    """Method for scoring the gradients with the query. If mean
+    gradients will be scored by their similarity with the mean
+    query gradients, otherwise by the most similar query gradient."""
 
     save_processor: bool = True
     """Whether to write the query dataset gradient processor
     to disk."""
 
     query_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner. The precomputed
-    preconditioner is applied to the query dataset gradients."""
+    """Path to a precomputed preconditioner to be applied to 
+    the query dataset gradients."""
 
     index_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner. The precomputed
-    preconditioner is applied to the query dataset gradients.
-    This does not affect the ability to compute a new
-    preconditioner during gradient collection."""
+    """Path to a precomputed preconditioner to be applied to 
+    the query dataset gradients. This does not affect the 
+    ability to compute a new preconditioner during gradient 
+    collection."""
 
     mixing_coefficient: float = 0.5
     """Coefficient to weight the application of the query preconditioner
@@ -357,7 +362,7 @@ def create_index(
 
 
 def load_data_string(
-    data_str: str, split: str = "train", streaming: bool = False
+    data_str: str, split: str = "train", subset: str | None = None, streaming: bool = False
 ) -> Dataset | IterableDataset:
     """Load a dataset from a string identifier or path."""
     if data_str.endswith(".csv"):
@@ -366,7 +371,10 @@ def load_data_string(
         ds = assert_type(Dataset, Dataset.from_json(data_str))
     else:
         try:
-            ds = load_dataset(data_str, split=split, streaming=streaming)
+            if subset:
+                ds = load_dataset(data_str, split=split, subset=subset, streaming=streaming)
+            else:
+                ds = load_dataset(data_str, split=split, streaming=streaming)
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
                 raise NotImplementedError(
