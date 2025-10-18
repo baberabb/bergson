@@ -26,6 +26,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from bergson.data import DataConfig, IndexConfig, pad_and_tensor, tokenize
 from bergson.hessians.utils import TensorDict
 from bergson.utils import assert_type
+from test_utils import set_all_seeds
 
 
 def allocate_batches_test(
@@ -116,26 +117,6 @@ def allocate_batches_test(
 
     assert len({len(b) for b in allocation}) == 1
     return allocation
-
-
-def set_all_seeds(seed: int = 42):
-    """Set all random seeds for reproducibility."""
-    import random
-
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-
-    # Force deterministic behavior
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.use_deterministic_algorithms(True)
-
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 
 def compute_covariance(
