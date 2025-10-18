@@ -227,6 +227,13 @@ def main():
         choices=["fp32", "fp16", "bf16", "int4", "int8"],
         help="Model precision (default: fp32)",
     )
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for ground truth results (default: test_files/pile_100_examples/ground_truth)",
+    )
     args = parser.parse_args()
 
     # Set random seeds for reproducibility
@@ -235,7 +242,10 @@ def main():
     # Setup paths
     current_path = os.getcwd()
     parent_path = os.path.join(current_path, "test_files", "pile_100_examples")
-    test_path = os.path.join(parent_path, "ground_truth")
+    if args.output_dir is not None:
+        test_path = args.output_dir
+    else:
+        test_path = os.path.join(parent_path, "ground_truth")
     os.makedirs(test_path, exist_ok=True)
 
     # Configuration
