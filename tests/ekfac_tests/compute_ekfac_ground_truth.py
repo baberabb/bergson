@@ -4,6 +4,7 @@ This script computes ground truth covariance matrices, eigenvectors, and eigenva
 corrections for EKFAC on a single GPU without sharding.
 """
 
+import argparse
 import gc
 import json
 import os
@@ -218,6 +219,16 @@ def compute_eigenvalue_correction_amortized(
 
 def main():
     """Main function to compute EKFAC ground truth."""
+    parser = argparse.ArgumentParser(description="Compute EKFAC ground truth for testing")
+    parser.add_argument(
+        "--precision",
+        type=str,
+        default="fp32",
+        choices=["fp32", "fp16", "bf16", "int4", "int8"],
+        help="Model precision (default: fp32)",
+    )
+    args = parser.parse_args()
+
     # Set random seeds for reproducibility
     set_all_seeds(42)
 
@@ -230,7 +241,7 @@ def main():
     # Configuration
     cfg = IndexConfig(run_path="")
     cfg.model = "EleutherAI/Pythia-14m"
-    cfg.precision = "fp32"
+    cfg.precision = args.precision
     cfg.fsdp = False
     cfg.data = DataConfig(dataset=os.path.join(parent_path, "data"))
 
