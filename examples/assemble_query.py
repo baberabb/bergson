@@ -1,22 +1,35 @@
 # TODAY
 # Assemble dataset!! 6 queries
 # Try multi node generation
-# I believe the MCQA and Cloze setups are pulled from the same eval and are both roughly 1k rows, like the original wmdp-bio as a whole.
+# I believe the MCQA and Cloze setups are pulled from the same eval and are
+# both roughly 1k rows, like the original wmdp-bio as a whole.
 
 import os
+import shutil
 import socket
 from collections import defaultdict
-import torch.multiprocessing as mp
-from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
-from numpy.lib.recfunctions import structured_to_unstructured
-from datasets import load_dataset, Dataset
-from transformers import AutoTokenizer
-from datasets import get_dataset_config_names, concatenate_datasets
-import torch
+from pathlib import Path
 
+import numpy as np
+import torch
+import torch.multiprocessing as mp
+from datasets import (
+    Dataset,
+    concatenate_datasets,
+    get_dataset_config_names,
+    load_dataset,
+)
+from numpy.lib.recfunctions import (
+    structured_to_unstructured,
+    unstructured_to_structured,
+)
+from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
+from transformers import AutoTokenizer
+
+from bergson import DataConfig, IndexConfig, load_gradients
+from bergson.build import dist_worker, estimate_advantage, worker
+from bergson.data import create_index
 from bergson.utils import assert_type
-from bergson import load_gradients, IndexConfig, DataConfig
-from bergson.build import estimate_advantage, dist_worker, worker
 
 
 def load_mcqa_dataset():
@@ -25,23 +38,103 @@ def load_mcqa_dataset():
         'Which of the following is the correct answer to the question?'"""
 
         choices = [f"{i}. {choice}" for i, choice in enumerate(x["choices"])]
-        prompt = " \n ".join([x["question"]] + ["Choices: "] + choices + ["Answer: "] + [f"{choices[int(x['answer'])]}"])
+        prompt = " \n ".join(
+            [x["question"]]
+            + ["Choices: "]
+            + choices
+            + ["Answer: "]
+            + [f"{choices[int(x['answer'])]}"]
+        )
 
         return {
             "text": prompt,
-            "subset": x["subset"]
+            # "prompt": prompt,
+            # "completion": f"{choices[int(x['answer'])]}",
+            "subset": x["subset"],
         }
+
     mcqa_dataset_name = "EleutherAI/wmdp_bio_robust_mcqa"
     subsets = get_dataset_config_names(mcqa_dataset_name)
     mcqa_datasets = []
     for subset in subsets:
-        ds = assert_type(Dataset, load_dataset(mcqa_dataset_name, subset, split="robust"))
+        ds = assert_type(
+            Dataset, load_dataset(mcqa_dataset_name, subset, split="robust")
+        )
         ds = ds.add_column("subset", [subset] * len(ds))
         mcqa_datasets.append(ds)
 
     mcqa_ds = concatenate_datasets(mcqa_datasets)
-    
+
     return mcqa_ds.map(map, remove_columns=["choices", "answer", "question"])
+
+
+def tokenize(
+    batch: dict, *, args: DataConfig, tokenizer, apply_chat_template: bool = True
+):
+    """Tokenize a batch of data with `tokenizer` according to `args`."""
+    kwargs = dict(
+        return_attention_mask=False,
+        return_length=True,
+        truncation=args.truncation,
+    )
+    if args.completion_column:
+        # We're dealing with a prompt-completion dataset
+        convos = [
+            [
+                {"role": "user", "content": assert_type(str, prompt)},
+                {"role": "assistant", "content": assert_type(str, resp)},
+            ]
+            for prompt, resp in zip(
+                batch[args.prompt_column], batch[args.completion_column]
+            )
+        ]
+    elif args.conversation_column:
+        # We're dealing with a conversation dataset
+        convos = assert_type(list, batch[args.conversation_column])
+    else:
+        # We're dealing with vanilla next-token prediction
+        return tokenizer(batch[args.prompt_column], **kwargs)
+
+    strings = convos
+
+    encodings = tokenizer(strings, **kwargs)
+    labels_list: list[list[int]] = []
+
+    for i, convo in enumerate(convos):
+        # Find the spans of the assistant's responses in the tokenized output
+        pos = 0
+        spans: list[tuple[int, int]] = []
+
+        for msg in convo:
+            if msg["role"] != "assistant":
+                continue
+
+            ans = msg["content"]
+            start = strings[i].rfind(ans, pos)
+            if start < 0:
+                raise RuntimeError(
+                    "Failed to find completion in the chat-formatted conversation. "
+                    "Make sure the chat template does not alter the completion, e.g. "
+                    "by removing leading whitespace."
+                )
+
+            # move past this match
+            pos = start + len(ans)
+
+            start_token = encodings.char_to_token(i, start)
+            end_token = encodings.char_to_token(i, pos)
+            spans.append((start_token, end_token))
+
+        # Labels are -100 everywhere except where the assistant's response is
+        tokens = encodings["input_ids"][i]
+        labels = [-100] * len(tokens)
+        for start, end in spans:
+            if start is not None and end is not None:
+                labels[start:end] = tokens[start:end]
+
+        labels_list.append(labels)
+
+    return dict(**encodings, labels=labels_list)
 
 
 def tokenize_mcqa(
@@ -57,6 +150,8 @@ def tokenize_mcqa(
 
     Codex wrote this.
     """
+    # TODO integrate custom masking into tokenize if necessary
+    return tokenize(batch, args=args, tokenizer=tokenizer, apply_chat_template=False)
 
     if not tokenizer.is_fast:
         raise ValueError("Fast tokenizer required for answer span alignment.")
@@ -116,8 +211,7 @@ def tokenize_mcqa(
 
         if not supervised_indices:
             raise RuntimeError(
-                "Failed to align answer text with any tokens.\n"
-                f"Example:\n{text}"
+                "Failed to align answer text with any tokens.\n" f"Example:\n{text}"
             )
 
         labels.append(example_labels)
@@ -192,65 +286,133 @@ def build_mcqa_index(cfg: IndexConfig, ds_path: str):
         pass
 
 
-def assemble_query(query_ds: Dataset, run_path: str):
-    mmap = load_gradients(run_path)
+def assemble_query(query_ds: Dataset, run_path: str, assembled_dataset_path: str):
+    structured_mmap = load_gradients(run_path)
+    mmap_dtype = structured_mmap.dtype
 
-    target_modules = set(mmap.dtype.names)
+    # Copy into memory
+    gradient_tensor = torch.tensor(structured_to_unstructured(structured_mmap)).to(
+        torch.float32
+    )
 
-    print(f"Full projection dim: {len(target_modules) * 64}")
-
-    mmap = structured_to_unstructured(mmap)
-
-    print("mmap sum", torch.from_numpy(mmap).sum())
+    print("mmap sum", gradient_tensor.sum())
+    print("mmap sum", gradient_tensor.abs().sum())
 
     # Group mmap gradient rows by the subset they came from
     subset_gradients = defaultdict(list)
-    for mmap_row, ds_row in zip(mmap, query_ds):
-        subset_gradients[ds_row["subset"]].append(torch.from_numpy(mmap_row))
+    for grads_row, ds_row in zip(gradient_tensor, query_ds):
+        subset_gradients[ds_row["subset"]].append(grads_row)
 
-    subset_mean_gradients = {}
+    subset_mean_gradients = {"overall": gradient_tensor.mean(dim=0)}
     for subset, gradients in subset_gradients.items():
-        print(f"Subset {subset} has {len(gradients)} gradients")
-        print(f"Computing mean gradient for subset {subset}")
         mean_gradient = torch.stack(gradients).mean(dim=0)
-        print(f"Mean gradient for subset {subset}: {mean_gradient.mean(), mean_gradient.std(), mean_gradient.shape}")
         subset_mean_gradients[subset] = mean_gradient
 
+    # Copy everything from the origin run path to the new path
+    # except data.hf and gradients.bin
+    os.makedirs(assembled_dataset_path, exist_ok=True)
+    for file in os.listdir(run_path):
+        if file != "data.hf" and file != "gradients.bin":
+            dest = Path(assembled_dataset_path) / file
+            shutil.copy(Path(run_path) / file, dest)
 
-    overall_mean_gradient = torch.from_numpy(mmap).mean(dim=0)
-    print(f"Overall mean gradient: {overall_mean_gradient.mean(), overall_mean_gradient.std(), overall_mean_gradient.shape}")
+    # Write the mean queries to data.hf
+    # subset_mean_gradients["overall"] = overall_mean_gradient
+    # means_dataset = Dataset.from_dict(subset_mean_gradients)
+    # means_dataset.save_to_disk(Path(assembled_dataset_path) / "data.hf")
 
-    breakpoint()
+    mean_grad_stack = torch.stack(list(subset_mean_gradients.values()))
+    first_query_grad = gradient_tensor[0].unsqueeze(0).expand_as(mean_grad_stack)
+    cosine_sims = torch.nn.functional.cosine_similarity(
+        mean_grad_stack, first_query_grad, dim=1
+    )
 
-    # Maybe just overwrite the original dataset with the means for each 
-    # subset and the overall mean
+    if torch.any(cosine_sims <= 0.09):
+        raise ValueError(
+            f"Cosine similarity between mean gradients and the first query gradient "
+            f"is not greater than 0.09. Cosine sims: {cosine_sims}"
+        )
+    else:
+        print(f"Cosine sims: {cosine_sims}")
+
+    # Create_index with the 7 gradients
+    index_dtype = np.float16
+
+    mean_gradients_unstructured = np.stack(
+        [v.numpy() for v in subset_mean_gradients.values()],
+        axis=0,
+    ).astype(index_dtype)
+    mean_gradients_structured = unstructured_to_structured(
+        mean_gradients_unstructured, mmap_dtype
+    )
+
+    grad_sizes = {}
+    for name in mmap_dtype.names:
+        field_dtype = mmap_dtype.fields[name][0]
+        subdtype = field_dtype.subdtype
+        assert subdtype is not None
+
+        _, shape = subdtype
+        grad_sizes[name] = int(np.prod(shape))
+
+    index_grads = create_index(
+        str(assembled_dataset_path), len(subset_mean_gradients), grad_sizes, index_dtype
+    )
+    index_grads[:] = mean_gradients_structured
+    index_grads.flush()
+
+    mean_grad_stack = torch.stack(list(subset_mean_gradients.values()))
+    first_query_grad = gradient_tensor[1].unsqueeze(0).expand_as(mean_grad_stack)
+    cosine_sims = torch.nn.functional.cosine_similarity(
+        mean_grad_stack, first_query_grad, dim=1
+    )
+    if torch.any(cosine_sims <= 0.09):
+        raise ValueError(
+            f"Cosine similarity between mean gradients and the first query gradient "
+            f"is not greater than 0.09. Cosine sims: {cosine_sims}"
+        )
+    else:
+        print(f"Cosine sims: {cosine_sims}")
 
 
 def main():
+    projection_dim = 64
+    model_name = "EleutherAI/deep_ignorance_pretraining_baseline_small"
+    ds_path = f"runs/ds_wmdp_bio_robust_mcqa_{projection_dim}"
+    index_path = f"runs/wmdp_bio_robust_mcqa_means_{projection_dim}"
+    assembled_dataset_path = f"runs/mean_biorisk_queries_{projection_dim}"
+
     mcqa_ds = assert_type(Dataset, load_mcqa_dataset())
-    ds_path = "runs/ds_wmdp_bio_robust_mcqa"
     mcqa_ds.save_to_disk(ds_path)
 
     data_config = DataConfig(
         dataset=ds_path,
+        # prompt_column="prompt",
+        # completion_column="completion",
         prompt_column="text",
     )
 
     cfg = IndexConfig(
-        run_path="runs/wmdp_bio_robust_mcqa_means",
+        run_path=index_path,
         save_index=True,
         save_processor=True,
-        precision="fp32",
+        precision="fp16",
         data=data_config,
         fsdp=True,
-        model="EleutherAI/deep-ignorance-unfiltered",
-        projection_dim=64,
+        model=model_name,
+        projection_dim=projection_dim,
         reshape_to_square=True,
     )
 
     build_mcqa_index(cfg, ds_path)
 
-    assemble_query(mcqa_ds, cfg.run_path)
+    # Trackstar uses 2**16 with an 8B model
+    # We are collecting gradients for a ~2.7B model
+    # We are using ~2**13 I think
+    modules = set(load_gradients(cfg.run_path).dtype.names)
+    print(f"Full projection dim: {len(modules) * cfg.projection_dim}")
+
+    assemble_query(mcqa_ds, cfg.run_path, assembled_dataset_path)
 
 
 if __name__ == "__main__":

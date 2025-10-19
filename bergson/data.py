@@ -85,19 +85,19 @@ class QueryConfig:
     to disk."""
 
     query_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner to be applied to 
+    """Path to a precomputed preconditioner to be applied to
     the query dataset gradients."""
 
     index_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner to be applied to 
-    the query dataset gradients. This does not affect the 
-    ability to compute a new preconditioner during gradient 
+    """Path to a precomputed preconditioner to be applied to
+    the query dataset gradients. This does not affect the
+    ability to compute a new preconditioner during gradient
     collection."""
 
-    mixing_coefficient: float = 0.5
+    mixing_coefficient: float = 0.99
     """Coefficient to weight the application of the query preconditioner
     and the pre-computed index preconditioner. 0.0 means only use the
-    query preconditioner and 1.0 means only use the index preconditioner."""
+    index preconditioner and 1.0 means only use the query preconditioner."""
 
     modules: list[str] = field(default_factory=list)
     """Modules to use for the query. If empty, all modules will be used."""
@@ -362,7 +362,10 @@ def create_index(
 
 
 def load_data_string(
-    data_str: str, split: str = "train", subset: str | None = None, streaming: bool = False
+    data_str: str,
+    split: str = "train",
+    subset: str | None = None,
+    streaming: bool = False,
 ) -> Dataset | IterableDataset:
     """Load a dataset from a string identifier or path."""
     if data_str.endswith(".csv"):
@@ -372,7 +375,9 @@ def load_data_string(
     else:
         try:
             if subset:
-                ds = load_dataset(data_str, split=split, subset=subset, streaming=streaming)
+                ds = load_dataset(
+                    data_str, split=split, subset=subset, streaming=streaming
+                )
             else:
                 ds = load_dataset(data_str, split=split, streaming=streaming)
 

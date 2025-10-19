@@ -34,7 +34,7 @@ from .peft import detect_peft_modules
 from .utils import assert_type, get_layer_list
 
 
-def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
+def get_query_data(query_cfg: QueryConfig):
     """
     Load and optionally precondition the query dataset. Preconditioners
     may be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
@@ -415,7 +415,7 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
             new_fingerprint="advantage",  # type: ignore
         )
 
-    query_ds = get_query_data(index_cfg, query_cfg)
+    query_ds = get_query_data(query_cfg)
 
     world_size = torch.cuda.device_count()
     if world_size <= 1:
