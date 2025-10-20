@@ -1,5 +1,5 @@
 import math
-from typing import Callable, Literal
+from typing import Literal
 
 import numpy as np
 import torch
@@ -12,6 +12,7 @@ from transformers import PreTrainedModel
 from .data import create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
+from .query import Query
 
 
 def collect_gradients(
@@ -29,8 +30,7 @@ def collect_gradients(
     save_index: bool = True,
     save_processor: bool = True,
     drop_columns: bool = False,
-    query_callback: Callable[[dict[str, torch.Tensor]], torch.Tensor] | None = None,
-    num_scores: int = 1,
+    query: Query | None = None,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -95,12 +95,6 @@ def collect_gradients(
         dtype=dtype,
         fill_value=0.0,
     )
-    per_doc_scores = torch.full(
-        (len(data), num_scores),
-        device=model.device,
-        dtype=dtype,
-        fill_value=0.0,
-    )
 
     for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
         batch = data[indices]
@@ -157,9 +151,8 @@ def collect_gradients(
             for module_name in mod_grads.keys():
                 grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
 
-        if query_callback is not None:
-            scores = query_callback(mod_grads)
-            per_doc_scores[indices] = scores.detach().type_as(per_doc_scores)
+        if query:
+            query(indices, mod_grads)
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
@@ -178,12 +171,6 @@ def collect_gradients(
             per_doc_losses.cpu().numpy(),
             feature=Value("float16" if dtype == torch.float16 else "float32"),
             new_fingerprint="loss",
-        )
-        data = data.add_column(
-            "scores",
-            per_doc_scores.cpu().numpy(),
-            feature=Value("float16" if dtype == torch.float16 else "float32"),
-            new_fingerprint="scores",
         )
         data.save_to_disk(path + "/data.hf")
 

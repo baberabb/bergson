@@ -1,8 +1,9 @@
 import json
 import os
 import socket
+import uuid
 from datetime import timedelta
-from typing import cast
+from typing import Callable, cast
 
 import torch
 import torch.distributed as dist
@@ -32,6 +33,57 @@ from .data import (
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
 from .utils import assert_type, get_layer_list
+
+
+class Query:
+    """
+    Wraps a query scoring callback and stores the resulting scores in a tensor.
+    """
+
+    def __init__(
+        self,
+        query_callback: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+        num_items: int,
+        num_scores: int,
+        scores_path: str,
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: torch.device | str = "cpu",
+    ):
+        self._query_callback = query_callback
+        self._scores_path = scores_path
+        self.scores = torch.zeros((num_items, num_scores), dtype=dtype, device=device)
+        self.num_written = 0
+
+    def __call__(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
+        scores = self._query_callback(mod_grads).detach()
+        if scores.ndim == 1:
+            scores = scores.unsqueeze(-1)
+        assert scores.shape[0] == len(indices)
+        assert scores.shape[1] == self.scores.shape[1]
+
+        scores = scores.to(device=self.scores.device, dtype=self.scores.dtype)
+        self.scores[indices] = scores
+        self.num_written += len(indices)
+
+        if self.num_written >= len(self.scores):
+            self.flush()
+
+    def flush(self):
+        dataset = Dataset.from_dict(
+            {
+                "scores": self.scores.cpu().numpy().tolist(),
+            }
+        )
+        try:
+            dataset.save_to_disk(self._scores_path)
+        except Exception as e:
+            # Handle collisions with existing datasets
+            print(f"Error writing scores to disk: {e}")
+            random_hash = str(uuid.uuid4())[:8]
+            alternate_path = self._scores_path.replace(".hf", f"_{random_hash}.hf")
+            print(f"Writing to alternate path: {alternate_path}")
+            dataset.save_to_disk(alternate_path)
 
 
 def get_query_data(query_cfg: QueryConfig):
@@ -99,8 +151,8 @@ def get_individual_query(
 ):
     """
     Compute the individual query and return a callback function that scores gradients
-    according to their inner products or cosine similarities with the individual queries.
-    Requires a custom setup in the score saving code.
+    according to their inner products or cosine similarities with the individual
+    queries.
     """
     queries = torch.cat([query_ds[:][name] for name in query_cfg.modules], dim=1).to(
         device=device, dtype=dtype
@@ -333,24 +385,40 @@ def worker(
 
     query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
 
+    print(f"Model device: {model.device}")
     query_device = torch.device(f"cuda:{rank}")
     query_dtype = dtype if dtype != "auto" else torch.float16
 
     if query_cfg.score == "mean":
-        query_callback = get_mean_query(query_ds, query_cfg, query_device, query_dtype)
+        base_query_callback = get_mean_query(
+            query_ds, query_cfg, query_device, query_dtype
+        )
+        num_scores = 1
     elif query_cfg.score == "nearest":
-        query_callback = get_nearest_query(
+        base_query_callback = get_nearest_query(
             query_ds, query_cfg, query_device, query_dtype
         )
+        num_scores = 1
     elif query_cfg.score == "individual":
-        query_callback = get_individual_query(
+        base_query_callback = get_individual_query(
             query_ds, query_cfg, query_device, query_dtype
         )
+        num_scores = len(query_ds)
     else:
         raise ValueError(f"Invalid query scoring method: {query_cfg.score}")
 
+    scores_dtype = torch.float32 if model.dtype == torch.float32 else torch.float16
+
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
+        query = Query(
+            base_query_callback,
+            len(ds),
+            num_scores,
+            query_cfg.scores_path,
+            dtype=scores_dtype,
+            device=query_device,
+        )
         collect_gradients(
             model,
             ds,
@@ -363,10 +431,9 @@ def worker(
             target_modules=target_modules,
             attention_cfgs=attention_cfgs,
             drop_columns=index_cfg.drop_columns,
-            query_callback=query_callback,
+            query=query,
             save_index=index_cfg.save_index,
             save_processor=index_cfg.save_processor,
-            num_scores=1 if query_cfg.score == "individual" else len(query_ds),
         )
     else:
         # Convert each shard to a Dataset then collect its gradients
@@ -380,6 +447,14 @@ def worker(
             batches = allocate_batches(
                 ds_shard["length"][:], index_cfg.token_batch_size
             )
+            query = Query(
+                base_query_callback,
+                len(ds_shard),
+                num_scores,
+                query_cfg.scores_path,
+                dtype=scores_dtype,
+                device=query_device,
+            )
             collect_gradients(
                 model,
                 ds_shard,
@@ -392,10 +467,9 @@ def worker(
                 target_modules=target_modules,
                 attention_cfgs=attention_cfgs,
                 drop_columns=index_cfg.drop_columns,
-                query_callback=query_callback,
+                query=query,
                 save_index=index_cfg.save_index,
                 save_processor=index_cfg.save_processor,
-                num_scores=1 if query_cfg.score == "individual" else len(query_ds),
             )
             buf.clear()
             shard_id += 1

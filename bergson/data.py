@@ -80,6 +80,9 @@ class QueryConfig:
     gradients will be scored by their similarity with the mean
     query gradients, otherwise by the most similar query gradient."""
 
+    scores_path: str = ""
+    """Path to the directory where query scores should be written."""
+
     save_processor: bool = True
     """Whether to write the query dataset gradient processor
     to disk."""

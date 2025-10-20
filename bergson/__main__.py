@@ -7,7 +7,7 @@ from simple_parsing import ArgumentParser, ConflictResolution
 from .build import build_gradient_dataset
 from .data import IndexConfig, QueryConfig
 from .query import query_gradient_dataset
-from .static_query import query_gradient_dataset as query_static_gradient_dataset
+from .query_existing import query_existing
 
 
 @dataclass
@@ -24,7 +24,7 @@ class StaticQuery:
 
     def execute(self):
         """Query an on-disk gradient index."""
-        query_static_gradient_dataset(self.scores_path, self.query_cfg, self.index_cfg, self.k)
+        query_existing(self.scores_path, self.query_cfg, self.index_cfg, self.k)
 
 
 @dataclass
