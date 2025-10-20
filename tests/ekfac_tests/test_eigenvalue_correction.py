@@ -29,7 +29,7 @@ def test_eigenvalue_correction(ground_truth_path, run_path):
 
     lambda_run = TensorDict(lambda_run)
 
-    total_processed_run_path = os.path.join(run_path, "total_processed_lambda.pt")
+    total_processed_run_path = os.path.join(run_path, "total_processed_lambda_correction.pt")
     total = torch.load(total_processed_run_path).to(device=lambda_run[list(lambda_run.keys())[0]].device)
     lambda_run.div_(total)
     rtol = 1e-10

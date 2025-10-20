@@ -1,7 +1,8 @@
 """Compute EKFAC ground truth for testing.
 
 This script computes ground truth covariance matrices, eigenvectors, and eigenvalue
-corrections for EKFAC on a single GPU without sharding.
+corrections for EKFAC on a single GPU without sharding. By specifying the number of
+workers we can simulate distributed computation.
 """
 
 import argparse
@@ -11,7 +12,6 @@ import os
 from dataclasses import asdict
 from typing import Optional
 
-import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -21,18 +21,16 @@ from ground_truth.collector import (
     GroundTruthCovarianceCollector,
 )
 from safetensors.torch import load_file, save_file
+from test_utils import set_all_seeds
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from bergson.data import DataConfig, IndexConfig, pad_and_tensor, tokenize
 from bergson.hessians.utils import TensorDict
 from bergson.utils import assert_type
-from test_utils import set_all_seeds
 
 
-def allocate_batches_test(
-    doc_lengths: list[int], N: int, workers: Optional[int] = None
-) -> list[list[list[int]]]:
+def allocate_batches_test(doc_lengths: list[int], N: int, workers: Optional[int] = None) -> list[list[list[int]]]:
     """
     Modification of allocate_batches to return a flat list of batches for testing.
 

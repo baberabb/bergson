@@ -58,7 +58,7 @@ run_path = os.path.join(test_dir, "run/influence_results")
 
 def test_total_processed_examples():
     total_processed_ground_truth_path = os.path.join(ground_truth_path, "covariances/stats.json")
-    total_processed_run_path = os.path.join(run_path, "total_processed.pt")
+    total_processed_run_path = os.path.join(run_path, "total_processed_covariances.pt")
 
     with open(total_processed_ground_truth_path, "r") as f:
         ground_truth_data = json.load(f)
