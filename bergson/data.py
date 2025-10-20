@@ -75,7 +75,7 @@ class QueryConfig:
     query_path: str = ""
     """Path to the existing query index."""
 
-    score: Literal["mean", "nearest"] = "mean"
+    score: Literal["mean", "nearest", "individual"] = "mean"
     """Method for scoring the gradients with the query. If mean
     gradients will be scored by their similarity with the mean
     query gradients, otherwise by the most similar query gradient."""

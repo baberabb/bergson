@@ -28,8 +28,9 @@ from transformers import AutoTokenizer
 
 from bergson import DataConfig, IndexConfig, load_gradients
 from bergson.build import dist_worker, estimate_advantage, worker
-from bergson.data import create_index
+from bergson.data import create_index, load_gradient_dataset
 from bergson.utils import assert_type
+
 
 
 def load_mcqa_dataset():
@@ -285,8 +286,7 @@ def build_mcqa_index(cfg: IndexConfig, ds_path: str):
     except Exception:
         pass
 
-
-def assemble_query(query_ds: Dataset, run_path: str, assembled_dataset_path: str):
+def create_query_index(query_ds: Dataset, run_path: str, assembled_dataset_path: str, index_dtype: np.dtype):
     structured_mmap = load_gradients(run_path)
     mmap_dtype = structured_mmap.dtype
 
@@ -309,17 +309,32 @@ def assemble_query(query_ds: Dataset, run_path: str, assembled_dataset_path: str
         subset_mean_gradients[subset] = mean_gradient
 
     # Copy everything from the origin run path to the new path
-    # except data.hf and gradients.bin
+    # except gradients.bin and data.hf
     os.makedirs(assembled_dataset_path, exist_ok=True)
-    for file in os.listdir(run_path):
-        if file != "data.hf" and file != "gradients.bin":
-            dest = Path(assembled_dataset_path) / file
-            shutil.copy(Path(run_path) / file, dest)
+    for item in os.listdir(run_path):
+        if item not in ["gradients.bin", "data.hf"]:
+            dest = Path(assembled_dataset_path) / item
+            shutil.copy(Path(run_path) / item, dest)
 
-    # Write the mean queries to data.hf
-    # subset_mean_gradients["overall"] = overall_mean_gradient
-    # means_dataset = Dataset.from_dict(subset_mean_gradients)
-    # means_dataset.save_to_disk(Path(assembled_dataset_path) / "data.hf")
+
+    if (Path(assembled_dataset_path) / "data.hf").exists():
+        if (Path(assembled_dataset_path) / "data.hf").is_file():
+            (Path(assembled_dataset_path) / "data.hf").unlink()
+        else:
+            shutil.rmtree(Path(assembled_dataset_path) / "data.hf")
+
+    # Write structured mean queries to data.hf
+    np_mean_grads = np.stack([item.numpy() for item in list(subset_mean_gradients.values())], axis=0)
+    structured_np_mean_grads = unstructured_to_structured(np_mean_grads, mmap_dtype)
+    # data = [
+    #     {name: structured_np_mean_grads[name][i].tolist() for name in mmap_dtype.names}
+    #     for i in range(structured_np_mean_grads.shape[0])
+    # ]
+
+    means_dataset = Dataset.from_dict({
+        "scores": [0.] * len(subset_mean_gradients),
+    })
+    means_dataset.save_to_disk(Path(assembled_dataset_path) / "data.hf")
 
     mean_grad_stack = torch.stack(list(subset_mean_gradients.values()))
     first_query_grad = gradient_tensor[0].unsqueeze(0).expand_as(mean_grad_stack)
@@ -327,25 +342,7 @@ def assemble_query(query_ds: Dataset, run_path: str, assembled_dataset_path: str
         mean_grad_stack, first_query_grad, dim=1
     )
 
-    if torch.any(cosine_sims <= 0.09):
-        raise ValueError(
-            f"Cosine similarity between mean gradients and the first query gradient "
-            f"is not greater than 0.09. Cosine sims: {cosine_sims}"
-        )
-    else:
-        print(f"Cosine sims: {cosine_sims}")
-
-    # Create_index with the 7 gradients
-    index_dtype = np.float16
-
-    mean_gradients_unstructured = np.stack(
-        [v.numpy() for v in subset_mean_gradients.values()],
-        axis=0,
-    ).astype(index_dtype)
-    mean_gradients_structured = unstructured_to_structured(
-        mean_gradients_unstructured, mmap_dtype
-    )
-
+    # Assemble grad sizes
     grad_sizes = {}
     for name in mmap_dtype.names:
         field_dtype = mmap_dtype.fields[name][0]
@@ -355,11 +352,17 @@ def assemble_query(query_ds: Dataset, run_path: str, assembled_dataset_path: str
         _, shape = subdtype
         grad_sizes[name] = int(np.prod(shape))
 
+    # Create and populate the index
     index_grads = create_index(
         str(assembled_dataset_path), len(subset_mean_gradients), grad_sizes, index_dtype
     )
-    index_grads[:] = mean_gradients_structured
+    structured_mean_grads = unstructured_to_structured(np_mean_grads.astype(index_dtype), mmap_dtype)
+    index_grads[:] = unstructured_to_structured(
+        np_mean_grads.astype(index_dtype), mmap_dtype
+    )
     index_grads.flush()
+
+    ds = load_gradient_dataset(assembled_dataset_path)
 
     mean_grad_stack = torch.stack(list(subset_mean_gradients.values()))
     first_query_grad = gradient_tensor[1].unsqueeze(0).expand_as(mean_grad_stack)
@@ -376,7 +379,7 @@ def assemble_query(query_ds: Dataset, run_path: str, assembled_dataset_path: str
 
 
 def main():
-    projection_dim = 64
+    projection_dim = 16
     model_name = "EleutherAI/deep_ignorance_pretraining_baseline_small"
     ds_path = f"runs/ds_wmdp_bio_robust_mcqa_{projection_dim}"
     index_path = f"runs/wmdp_bio_robust_mcqa_means_{projection_dim}"
@@ -412,7 +415,7 @@ def main():
     modules = set(load_gradients(cfg.run_path).dtype.names)
     print(f"Full projection dim: {len(modules) * cfg.projection_dim}")
 
-    assemble_query(mcqa_ds, cfg.run_path, assembled_dataset_path)
+    create_query_index(mcqa_ds, cfg.run_path, assembled_dataset_path, index_dtype=np.float16)
 
 
 if __name__ == "__main__":

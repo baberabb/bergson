@@ -30,6 +30,7 @@ def collect_gradients(
     save_processor: bool = True,
     drop_columns: bool = False,
     query_callback: Callable[[dict[str, torch.Tensor]], torch.Tensor] | None = None,
+    num_scores: int = 1,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -95,7 +96,7 @@ def collect_gradients(
         fill_value=0.0,
     )
     per_doc_scores = torch.full(
-        (len(data),),
+        (len(data), num_scores),
         device=model.device,
         dtype=dtype,
         fill_value=0.0,

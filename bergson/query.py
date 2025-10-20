@@ -94,6 +94,36 @@ def get_query_data(query_cfg: QueryConfig):
     return query_ds
 
 
+def get_individual_query(
+    query_ds: Dataset, query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype
+):
+    """
+    Compute the individual query and return a callback function that scores gradients
+    according to their inner products or cosine similarities with the individual queries.
+    Requires a custom setup in the score saving code.
+    """
+    queries = torch.cat([query_ds[:][name] for name in query_cfg.modules], dim=1).to(
+        device=device, dtype=dtype
+    )
+
+    if query_cfg.unit_normalize:
+        queries /= queries.norm(dim=1, keepdim=True)
+
+    # Assert on device
+    assert queries.device == device
+
+    def callback(mod_grads: dict[str, torch.Tensor]):
+        grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=1)
+        if query_cfg.unit_normalize:
+            grads /= grads.norm(dim=1, keepdim=True)
+
+        # Return a score for every query
+        print(grads.device, queries.device)
+        return grads @ queries.T
+
+    return callback
+
+
 def get_mean_query(
     query_ds: Dataset, query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype
 ):
@@ -312,6 +342,10 @@ def worker(
         query_callback = get_nearest_query(
             query_ds, query_cfg, query_device, query_dtype
         )
+    elif query_cfg.score == "individual":
+        query_callback = get_individual_query(
+            query_ds, query_cfg, query_device, query_dtype
+        )
     else:
         raise ValueError(f"Invalid query scoring method: {query_cfg.score}")
 
@@ -332,6 +366,7 @@ def worker(
             query_callback=query_callback,
             save_index=index_cfg.save_index,
             save_processor=index_cfg.save_processor,
+            num_scores=1 if query_cfg.score == "individual" else len(query_ds),
         )
     else:
         # Convert each shard to a Dataset then collect its gradients
@@ -360,6 +395,7 @@ def worker(
                 query_callback=query_callback,
                 save_index=index_cfg.save_index,
                 save_processor=index_cfg.save_processor,
+                num_scores=1 if query_cfg.score == "individual" else len(query_ds),
             )
             buf.clear()
             shard_id += 1

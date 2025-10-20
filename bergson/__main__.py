@@ -7,6 +7,24 @@ from simple_parsing import ArgumentParser, ConflictResolution
 from .build import build_gradient_dataset
 from .data import IndexConfig, QueryConfig
 from .query import query_gradient_dataset
+from .static_query import query_gradient_dataset as query_static_gradient_dataset
+
+
+@dataclass
+class StaticQuery:
+    """Query an on-disk gradient index."""
+
+    scores_path: str
+
+    query_cfg: QueryConfig
+
+    index_cfg: IndexConfig
+
+    k: int | None = None
+
+    def execute(self):
+        """Query an on-disk gradient index."""
+        query_static_gradient_dataset(self.scores_path, self.query_cfg, self.index_cfg, self.k)
 
 
 @dataclass
@@ -51,7 +69,7 @@ class Query:
 class Main:
     """Routes to the subcommands."""
 
-    command: Union[Build, Query]
+    command: Union[Build, Query, StaticQuery]
 
     def execute(self):
         """Run the script."""
