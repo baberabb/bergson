@@ -210,7 +210,7 @@ class GradientProcessor:
 
     def __post_init__(self):
         self._projection_matrices: dict[
-            tuple[str, Literal["left", "right"], torch.device], Tensor
+            tuple[str, Literal["left", "right"], torch.device, int, int], Tensor
         ] = {}
 
     @classmethod
@@ -357,7 +357,7 @@ class GradientCollector(ContextDecorator):
         self._fwd_hooks: list[RemovableHandle] = []
         self._bwd_hooks: list[RemovableHandle] = []
 
-        self.target_info: dict[str, tuple[torch.device, torch.Size]] = {}
+        self.target_info: dict[str, tuple[torch.device, torch.Size, bool]] = {}
 
         # Before we add any hooks, we need to peek at what modules we need to track.
         for name, layer in self.model.named_modules():
@@ -368,7 +368,12 @@ class GradientCollector(ContextDecorator):
                 continue
 
             # Users of this class really like to know ahead of time what the shapes are
-            self.target_info[name] = layer.weight.device, layer.weight.shape
+            has_bias = getattr(layer, "bias", None) is not None
+            self.target_info[name] = (
+                layer.weight.device,
+                layer.weight.shape,
+                has_bias,
+            )
 
     def shapes(self) -> Mapping[str, torch.Size]:
         """Return the shapes of the gradients collected by this collector."""
@@ -379,7 +384,7 @@ class GradientCollector(ContextDecorator):
         )
 
         shapes = {}
-        for name, (_, target_shape) in self.target_info.items():
+        for name, (_, target_shape, has_bias) in self.target_info.items():
             if name in self.attention_cfgs:
                 attention_cfg = self.attention_cfgs[name]
                 if proj_shape:
@@ -393,6 +398,8 @@ class GradientCollector(ContextDecorator):
                     attention_shape[attention_cfg.head_dim - 2] = (
                         attention_cfg.head_size
                     )
+                    if has_bias:
+                        attention_shape[-1] += 1
                     head_shape = torch.Size(attention_shape)
 
                 shapes.update(
@@ -402,7 +409,13 @@ class GradientCollector(ContextDecorator):
                     }
                 )
             else:
-                shapes[name] = proj_shape or target_shape
+                if proj_shape:
+                    shapes[name] = proj_shape
+                else:
+                    grad_shape = list(target_shape)
+                    if has_bias:
+                        grad_shape[-1] += 1
+                    shapes[name] = torch.Size(grad_shape)
 
         return shapes
 
@@ -416,7 +429,7 @@ class GradientCollector(ContextDecorator):
         dtype: torch.dtype,
     ) -> Tensor:
         """Return the `side` projection matrix for parameter `name` of shape [m, n]."""
-        key = (name, side, device)
+        key = (name, side, device, m, n)
         if key in self.processor._projection_matrices:
             return self.processor._projection_matrices[key]
 
@@ -465,11 +478,18 @@ class GradientCollector(ContextDecorator):
 
             x = x * b.type_as(x)  # [N, S, I] * [I] → [N, S, I]
 
+        has_bias = getattr(module, "bias", None) is not None
+        if has_bias:
+            ones = x.new_ones(*x.shape[:-1], 1)
+            x = torch.cat([x, ones], dim=-1)
+
         # If we're not using AdamNormalizer, we can randomly project the input here
         # to save memory, rather than waiting until the backward pass.
         p = self.processor.projection_dim
         if p is not None and not isinstance(norm, AdamNormalizer):
             i = getattr(module, LayerAdapter.in_attr(module))
+            if has_bias:
+                i += 1
             x = x @ self.projection(name, p, i, "right", x.device, x.dtype).T  # type: ignore
 
         module._inputs = x
@@ -485,6 +505,7 @@ class GradientCollector(ContextDecorator):
         I = module._inputs  # [N, S, I/q]
 
         name = assert_type(str, module._name)
+        has_bias = getattr(module, "bias", None) is not None
 
         if name in self.attention_cfgs:
             # Recurse into heads with module mutation and restoration
@@ -520,6 +541,8 @@ class GradientCollector(ContextDecorator):
         p = self.processor.projection_dim
         i = getattr(module, LayerAdapter.in_attr(module))
         o = getattr(module, LayerAdapter.out_attr(module))
+        if has_bias:
+            i += 1
 
         # Pre-scale G by the Adafactor row statistics
         norm = self.processor.normalizers.get(name)
@@ -535,7 +558,11 @@ class GradientCollector(ContextDecorator):
             P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
 
             # Normalize the gradients using the second moment matrix
-            P /= norm.avg_sq.sqrt().add_(1e-8)
+            denom = norm.avg_sq.sqrt().add_(1e-8)
+            if has_bias:
+                bias_scale = denom.new_ones((denom.size(0), 1))
+                denom = torch.cat([denom, bias_scale], dim=1)
+            P /= denom
 
             if self.processor.reshape_to_square:
                 P = reshape_to_nearest_square(P)
