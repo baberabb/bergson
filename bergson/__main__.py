@@ -6,15 +6,13 @@ from simple_parsing import ArgumentParser, ConflictResolution
 
 from .build import build_gradient_dataset
 from .data import IndexConfig, QueryConfig
-from .query import query_gradient_dataset
-from .query_existing import query_existing
+from .dynamic_query import query_gradient_dataset
+from .static_query import query_existing
 
 
 @dataclass
 class StaticQuery:
     """Query an on-disk gradient index."""
-
-    scores_path: str
 
     query_cfg: QueryConfig
 
@@ -24,7 +22,10 @@ class StaticQuery:
 
     def execute(self):
         """Query an on-disk gradient index."""
-        query_existing(self.scores_path, self.query_cfg, self.index_cfg, self.k)
+        assert self.query_cfg.scores_path
+        assert self.query_cfg.query_path
+
+        query_existing(self.query_cfg, self.index_cfg, self.k)
 
 
 @dataclass
@@ -53,12 +54,14 @@ class Query:
 
     def execute(self):
         """Query the gradient dataset."""
+        assert self.query_cfg.scores_path
+        assert self.query_cfg.query_path
 
         if os.path.exists(self.index_cfg.run_path) and self.index_cfg.save_index:
             raise ValueError(
                 "Index path already exists and save_index is True - "
                 "running this query will overwrite the existing gradients. "
-                "If you meant to query the existing gradients, use "
+                "If you meant to query the existing gradients use "
                 "Attributor instead."
             )
 

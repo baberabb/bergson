@@ -1,14 +1,14 @@
 import json
 import os
 import socket
-import uuid
 from datetime import timedelta
-from typing import Callable, cast
+from pathlib import Path
+from typing import cast
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from datasets import Dataset, IterableDataset
+from datasets import Dataset, IterableDataset, Sequence, Value
 from peft import PeftConfig, PeftModel
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from torch.distributed.fsdp import fully_shard
@@ -24,6 +24,7 @@ from .build import estimate_advantage
 from .collection import collect_gradients
 from .data import (
     IndexConfig,
+    Query,
     QueryConfig,
     allocate_batches,
     load_data_string,
@@ -33,57 +34,6 @@ from .data import (
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
 from .utils import assert_type, get_layer_list
-
-
-class Query:
-    """
-    Wraps a query scoring callback and stores the resulting scores in a tensor.
-    """
-
-    def __init__(
-        self,
-        query_callback: Callable[[dict[str, torch.Tensor]], torch.Tensor],
-        num_items: int,
-        num_scores: int,
-        scores_path: str,
-        *,
-        dtype: torch.dtype = torch.float32,
-        device: torch.device | str = "cpu",
-    ):
-        self._query_callback = query_callback
-        self._scores_path = scores_path
-        self.scores = torch.zeros((num_items, num_scores), dtype=dtype, device=device)
-        self.num_written = 0
-
-    def __call__(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
-        scores = self._query_callback(mod_grads).detach()
-        if scores.ndim == 1:
-            scores = scores.unsqueeze(-1)
-        assert scores.shape[0] == len(indices)
-        assert scores.shape[1] == self.scores.shape[1]
-
-        scores = scores.to(device=self.scores.device, dtype=self.scores.dtype)
-        self.scores[indices] = scores
-        self.num_written += len(indices)
-
-        if self.num_written >= len(self.scores):
-            self.flush()
-
-    def flush(self):
-        dataset = Dataset.from_dict(
-            {
-                "scores": self.scores.cpu().numpy().tolist(),
-            }
-        )
-        try:
-            dataset.save_to_disk(self._scores_path)
-        except Exception as e:
-            # Handle collisions with existing datasets
-            print(f"Error writing scores to disk: {e}")
-            random_hash = str(uuid.uuid4())[:8]
-            alternate_path = self._scores_path.replace(".hf", f"_{random_hash}.hf")
-            print(f"Writing to alternate path: {alternate_path}")
-            dataset.save_to_disk(alternate_path)
 
 
 def get_query_data(query_cfg: QueryConfig):
@@ -103,7 +53,13 @@ def get_query_data(query_cfg: QueryConfig):
         target_modules = json.load(f)["dtype"]["names"]
 
     query_ds = load_gradient_dataset(query_cfg.query_path, concatenate_gradients=False)
-    query_ds = query_ds.with_format("torch", columns=target_modules)
+    query_ds = query_ds.with_format(
+        "torch", columns=target_modules, dtype=torch.float32
+    )
+
+    query_ds.features
+    for col in target_modules:
+        query_ds = query_ds.cast_column(col, Sequence(Value("float32"), length=1024))
 
     use_q = query_cfg.query_preconditioner_path is not None
     use_i = query_cfg.index_preconditioner_path is not None
@@ -131,17 +87,26 @@ def get_query_data(query_cfg: QueryConfig):
             if (q and i)
             else (q or i)
         )
-        mixed_preconditioner = {k: v.cuda() for k, v in mixed_preconditioner.items()}
+        mixed_preconditioner = {
+            k: v.cuda().to(torch.float32) for k, v in mixed_preconditioner.items()
+        }
 
         def precondition(batch):
+            print("batch")
             for name in target_modules:
-                batch[name] = (batch[name].cuda() @ mixed_preconditioner[name]).cpu()
+                result = (
+                    batch[name].cuda().to(torch.float32) @ mixed_preconditioner[name]
+                )
+                batch[name] = result.cpu()
 
             return batch
 
         query_ds = query_ds.map(
             precondition, batched=True, batch_size=query_cfg.batch_size
         )
+
+        for name in target_modules:
+            assert query_ds[0][name].sum() != 0
 
     return query_ds
 
@@ -170,7 +135,6 @@ def get_individual_query(
             grads /= grads.norm(dim=1, keepdim=True)
 
         # Return a score for every query
-        print(grads.device, queries.device)
         return grads @ queries.T
 
     return callback
@@ -385,23 +349,21 @@ def worker(
 
     query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
 
-    print(f"Model device: {model.device}")
-    query_device = torch.device(f"cuda:{rank}")
     query_dtype = dtype if dtype != "auto" else torch.float16
 
     if query_cfg.score == "mean":
         base_query_callback = get_mean_query(
-            query_ds, query_cfg, query_device, query_dtype
+            query_ds, query_cfg, model.device, query_dtype
         )
         num_scores = 1
     elif query_cfg.score == "nearest":
         base_query_callback = get_nearest_query(
-            query_ds, query_cfg, query_device, query_dtype
+            query_ds, query_cfg, model.device, query_dtype
         )
         num_scores = 1
     elif query_cfg.score == "individual":
         base_query_callback = get_individual_query(
-            query_ds, query_cfg, query_device, query_dtype
+            query_ds, query_cfg, model.device, query_dtype
         )
         num_scores = len(query_ds)
     else:
@@ -415,9 +377,9 @@ def worker(
             base_query_callback,
             len(ds),
             num_scores,
-            query_cfg.scores_path,
+            str(Path(query_cfg.scores_path) / "scores.hf"),
             dtype=scores_dtype,
-            device=query_device,
+            device=model.device,
         )
         collect_gradients(
             model,
@@ -451,9 +413,11 @@ def worker(
                 base_query_callback,
                 len(ds_shard),
                 num_scores,
-                query_cfg.scores_path,
+                str(
+                    Path(query_cfg.scores_path) / f"shard-{shard_id:05d}" / "scores.hf"
+                ),
                 dtype=scores_dtype,
-                device=query_device,
+                device=model.device,
             )
             collect_gradients(
                 model,

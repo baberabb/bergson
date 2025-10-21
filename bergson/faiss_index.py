@@ -1,5 +1,4 @@
 import json
-import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -156,7 +155,7 @@ class FaissIndex:
         )
         faiss_path.mkdir(exist_ok=True, parents=True)
 
-        if not any(faiss_path.iterdir()):
+        if len(list(faiss_path.iterdir())) != faiss_cfg.num_shards:
             print("Building FAISS index...")
             start = perf_counter()
 
@@ -170,8 +169,7 @@ class FaissIndex:
                     if shard_path.is_dir() and (shard_path / "info.json").exists()
                 ]
 
-            if not info_paths:
-                raise FileNotFoundError(f"No gradient metadata found under {path}")
+            assert info_paths, f"No gradient metadata found under {path}"
 
             total_grads = sum(
                 [json.load(open(info_path))["num_grads"] for info_path in info_paths]
@@ -198,6 +196,11 @@ class FaissIndex:
             def build_shard_from_buffer(
                 buffer_parts: list[NDArray], shard_idx: int
             ) -> None:
+                shard_path = faiss_path / f"{shard_idx}.faiss"
+                if shard_path.exists():
+                    print(f"Shard {shard_idx} already exists, skipping...")
+                    return
+
                 print(f"Building shard {shard_idx}...")
                 grads_chunk = np.concatenate(buffer_parts, axis=0)
                 buffer_parts.clear()
@@ -220,7 +223,7 @@ class FaissIndex:
                 del grads_chunk
 
                 index = index_to_device(index, "cpu")
-                faiss.write_index(index, str(faiss_path / f"{shard_idx}.faiss"))
+                faiss.write_index(index, str(shard_path))
 
             for grads in tqdm(dl, desc="Loading gradients"):
                 grads = structured_to_unstructured(grads)

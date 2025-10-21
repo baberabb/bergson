@@ -2,9 +2,10 @@ import json
 import math
 import os
 import random
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 
 import numpy as np
 import pyarrow as pa
@@ -23,6 +24,57 @@ from numpy.typing import DTypeLike
 from simple_parsing import field
 
 from .utils import assert_type
+
+
+class Query:
+    """
+    Wraps a query scoring callback and stores the resulting scores in a tensor.
+    """
+
+    def __init__(
+        self,
+        query_callback: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+        num_items: int,
+        num_scores: int,
+        scores_path: str,
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: torch.device | str = "cpu",
+    ):
+        self._query_callback = query_callback
+        self._scores_path = scores_path
+        self.scores = torch.zeros((num_items, num_scores), dtype=dtype, device=device)
+        self.num_written = 0
+
+    def __call__(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
+        scores = self._query_callback(mod_grads).detach()
+        if scores.ndim == 1:
+            scores = scores.unsqueeze(-1)
+        assert scores.shape[0] == len(indices)
+        assert scores.shape[1] == self.scores.shape[1]
+
+        scores = scores.to(device=self.scores.device, dtype=self.scores.dtype)
+        self.scores[indices] = scores
+        self.num_written += len(indices)
+
+        if self.num_written >= len(self.scores):
+            self.flush()
+
+    def flush(self):
+        dataset = Dataset.from_dict(
+            {
+                "scores": self.scores.cpu().numpy().tolist(),
+            }
+        )
+        try:
+            dataset.save_to_disk(self._scores_path)
+        except Exception as e:
+            # Handle collisions with existing datasets
+            print(f"Error writing scores to disk: {e}")
+            random_hash = str(uuid.uuid4())[:8]
+            alternate_path = self._scores_path.replace(".hf", f"_{random_hash}.hf")
+            print(f"Writing to alternate path: {alternate_path}")
+            dataset.save_to_disk(alternate_path)
 
 
 @dataclass
@@ -82,10 +134,6 @@ class QueryConfig:
 
     scores_path: str = ""
     """Path to the directory where query scores should be written."""
-
-    save_processor: bool = True
-    """Whether to write the query dataset gradient processor
-    to disk."""
 
     query_preconditioner_path: str | None = None
     """Path to a precomputed preconditioner to be applied to

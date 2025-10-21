@@ -9,10 +9,9 @@ from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from .data import create_index, pad_and_tensor
+from .data import Query, create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
-from .query import Query
 
 
 def collect_gradients(

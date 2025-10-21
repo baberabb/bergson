@@ -11,12 +11,11 @@ from .data import (
     QueryConfig,
     load_gradients,
 )
-from .query import get_query_data
+from .dynamic_query import get_query_data
 
 
 @torch.inference_mode()
 def query_existing(
-    scores_path: str,
     query_cfg: QueryConfig,
     index_cfg: IndexConfig,
     k: int | None,
@@ -57,7 +56,7 @@ def query_existing(
         f"Collected scores for {num_queries} queries " f"with {num_scores} scores each."
     )
 
-    output_path = Path(scores_path) / "scores.hf"
+    output_path = Path(query_cfg.scores_path) / "scores.hf"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     dataset = Dataset.from_dict(

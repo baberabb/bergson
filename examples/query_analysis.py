@@ -3,77 +3,32 @@ from argparse import ArgumentParser
 from pathlib import Path
 
 import torch
-from datasets import Dataset, IterableDataset, load_from_disk
+from datasets import Dataset, IterableDataset, concatenate_datasets, load_from_disk
 
 from bergson.data import DataConfig, IndexConfig, load_data_string
 
 
 def parse_args():
-    parser = ArgumentParser(
-        description=(
-            "Aggregate static query results assuming six max-accumulated queries "
-            "and one mean-based query."
-        )
-    )
+    parser = ArgumentParser()
     parser.add_argument(
-        "--trial-dir",
+        "--query_scores",
         type=Path,
         required=True,
-        help="Directory containing the saved static query results (static_query.hf).",
+        help="Directory containing the saved query results (scores.hf).",
     )
     parser.add_argument(
-        "--dataset",
-        type=str,
-        required=True,
-        help="HF dataset identifier matching the index build.",
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="train",
-        help="Dataset split used for the index (default: train).",
-    )
-    parser.add_argument(
-        "--subset",
-        type=str,
-        default=None,
-        help="Dataset subset used for the index, if any.",
-    )
-    parser.add_argument(
-        "--streaming",
-        action="store_true",
-        help="Flag indicating the index dataset was streamed.",
-    )
-    parser.add_argument(
-        "--run-path",
-        type=str,
-        default="static-query",
-        help="Run path label to instantiate IndexConfig (not used for IO).",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Maximum number of rows to keep per strategy (defaults to k).",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="Directory to write strategy outputs (defaults to trial directory).",
-    )
-    parser.add_argument(
-        "--raw-name",
+        "--raw_name",
         type=str,
         default="static_query.hf",
         help="Name of the saved raw search dataset inside the trial directory.",
     )
+    parser.add_argument(
+        "--dataset", type=str, default="EleutherAI/deep-ignorance-pretraining-mix"
+    )
+    parser.add_argument("--split", type=str, default="train")
+    parser.add_argument("--streaming", action="store_true")
+
     return parser.parse_args()
-
-
-def build_index_config(args) -> IndexConfig:
-    data_cfg = DataConfig(dataset=args.dataset, split=args.split, subset=args.subset)
-    return IndexConfig(run_path=args.run_path, data=data_cfg, streaming=args.streaming)
 
 
 def save_strategy(name: str, dataset: Dataset, output_root: Path):
@@ -83,7 +38,7 @@ def save_strategy(name: str, dataset: Dataset, output_root: Path):
     csv_path = strategy_dir / f"{name}.csv"
     dataset.to_csv(csv_path)
 
-    hf_path = strategy_dir / "hf"
+    hf_path = strategy_dir / "data.hf"
     if hf_path.exists():
         shutil.rmtree(hf_path)
     dataset.save_to_disk(hf_path)
@@ -135,19 +90,27 @@ def get_text_rows(
 def main():
     args = parse_args()
 
-    trial_dir = args.trial_dir
-    output_root = args.output_dir or trial_dir
-    raw_path = trial_dir / args.raw_name
+    trial_dir = Path(args.query_scores)
 
-    if not raw_path.exists():
-        raise FileNotFoundError(
-            f"Static query results not found at {raw_path}. "
-            "Run bergson.static_query.query_gradient_dataset first."
-        )
+    assert trial_dir.exists(), f"Query scores not found at {trial_dir}."
 
-    raw_ds = load_from_disk(raw_path)
-    scores_tensor = torch.tensor(raw_ds["scores"], dtype=torch.float32)
-    indices_tensor = torch.tensor(raw_ds["indices"], dtype=torch.int64)
+    if (trial_dir / "shard-00000").exists():
+        datasets = []
+        for shard_path in sorted(trial_dir.iterdir()):
+            if shard_path.is_dir() and "shard" in shard_path.name:
+                try:
+                    datasets.append(load_from_disk(shard_path / "data.hf"))
+                except FileNotFoundError:
+                    datasets.append(load_from_disk(shard_path / "scores.hf"))
+        scores_ds = concatenate_datasets(datasets)
+    else:
+        try:
+            scores_ds = load_from_disk(trial_dir / "data.hf")
+        except FileNotFoundError:
+            scores_ds = load_from_disk(trial_dir / "scores.hf")
+
+    scores_tensor = torch.tensor(scores_ds["scores"], dtype=torch.float32)
+    indices_tensor = torch.tensor(scores_ds["indices"], dtype=torch.int64)
 
     if scores_tensor.ndim != 2 or indices_tensor.ndim != 2:
         raise ValueError(
@@ -155,47 +118,52 @@ def main():
             f"Got {scores_tensor.shape} and {indices_tensor.shape}."
         )
 
-    num_queries, num_neighbors = scores_tensor.shape
+    num_queries, num_docs = scores_tensor.shape
     if num_queries != 7:
         raise ValueError(
             f"Expected exactly 7 queries (6 for max, 1 for mean); "
-            f"received {num_queries}."
+            f"received {num_queries} for each of {num_docs} documents."
         )
 
-    limit = args.limit or num_neighbors
+        # Skip first row, flatten remaining 6 rows
+    scores_flat = scores_tensor[1:].reshape(-1)  # Shape: (6 * num_neighbors,)
+    indices_flat = indices_tensor[1:].reshape(-1)  # Shape: (6 * num_neighbors,)
 
-    max_scores_by_index: dict[int, float] = {}
-    for idx, score in zip(
-        indices_tensor[1:].reshape(-1).tolist(),
-        scores_tensor[1:].reshape(-1).tolist(),
-    ):
-        idx = int(idx)
-        score = float(score)
-        best = max_scores_by_index.get(idx)
-        if best is None or score > best:
-            max_scores_by_index[idx] = score
+    # Use scatter_reduce to get max score for each unique index
+    num_docs = int(indices_flat.max().item() + 1)
+    max_scores = torch.full((num_docs,), float("-inf"), dtype=torch.float32)
+    max_scores.scatter_reduce_(0, indices_flat, scores_flat, reduce="amax")
+
+    # Convert to dict, excluding indices that were never seen
+    max_scores_by_index = {
+        idx: score.item()
+        for idx, score in enumerate(max_scores)
+        if score != float("-inf")
+    }
 
     sorted_max = sorted(
         max_scores_by_index.items(), key=lambda item: item[1], reverse=True
-    )[:limit]
+    )
     max_indices = [idx for idx, _ in sorted_max]
     max_scores = [score for _, score in sorted_max]
 
-    mean_indices = indices_tensor[0].tolist()[:limit]
-    mean_scores = scores_tensor[0].tolist()[:limit]
+    mean_indices = indices_tensor[0].tolist()
+    mean_scores = scores_tensor[0].tolist()
 
-    index_cfg = build_index_config(args)
+    data_cfg = DataConfig(dataset=args.dataset, split=args.split)
+    index_cfg = IndexConfig(run_path="", data=data_cfg, streaming=args.streaming)
+
     max_ds = get_text_rows(max_indices, max_scores, index_cfg, score_column="max_score")
     mean_ds = get_text_rows(
         mean_indices, mean_scores, index_cfg, score_column="mean_score"
     )
 
-    output_root.mkdir(parents=True, exist_ok=True)
-    max_csv, max_hf = save_strategy("max_strategy", max_ds, output_root)
-    mean_csv, mean_hf = save_strategy("mean_strategy", mean_ds, output_root)
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    max_csv, max_hf = save_strategy("max", max_ds, trial_dir)
+    mean_csv, mean_hf = save_strategy("mean", mean_ds, trial_dir)
 
-    print(f"Saved max strategy outputs to {max_csv} and {max_hf}")
-    print(f"Saved mean strategy outputs to {mean_csv} and {mean_hf}")
+    print(f"Saved max top results to {max_csv} and {max_hf}")
+    print(f"Saved mean top results to {mean_csv} and {mean_hf}")
 
 
 if __name__ == "__main__":
