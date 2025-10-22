@@ -551,7 +551,9 @@ class GradientCollector(ContextDecorator):
 
             P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
             if has_bias:
-                P = torch.cat([P, G.sum(dim=0).unsqueeze(0)], dim=0)
+                # Append the bias gradient to the input
+                P = torch.cat([P, G.sum(dim=(0, 1)).unsqueeze(0).unsqueeze(2).expand(P.shape[0], -1, 1)], dim=2)
+                i += 1
 
             if isinstance(norm, AdamNormalizer):
                 # Normalize the gradients using the second moment matrix
