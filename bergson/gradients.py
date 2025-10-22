@@ -479,17 +479,12 @@ class GradientCollector(ContextDecorator):
             x = x * b.type_as(x)  # [N, S, I] * [I] → [N, S, I]
 
         has_bias = getattr(module, "bias", None) is not None
-        if has_bias:
-            ones = x.new_ones(*x.shape[:-1], 1)
-            x = torch.cat([x, ones], dim=-1)
 
         # If we're not using AdamNormalizer, we can randomly project the input here
         # to save memory, rather than waiting until the backward pass.
         p = self.processor.projection_dim
-        if p is not None and not isinstance(norm, AdamNormalizer):
+        if p is not None and not isinstance(norm, AdamNormalizer) and not has_bias:
             i = getattr(module, LayerAdapter.in_attr(module))
-            if has_bias:
-                i += 1
             x = x @ self.projection(name, p, i, "right", x.device, x.dtype).T  # type: ignore
 
         module._inputs = x
@@ -541,8 +536,6 @@ class GradientCollector(ContextDecorator):
         p = self.processor.projection_dim
         i = getattr(module, LayerAdapter.in_attr(module))
         o = getattr(module, LayerAdapter.out_attr(module))
-        if has_bias:
-            i += 1
 
         # Pre-scale G by the Adafactor row statistics
         norm = self.processor.normalizers.get(name)
@@ -554,15 +547,15 @@ class GradientCollector(ContextDecorator):
             G = G * a.type_as(G)  # [N, S, O] * [O] → [N, S, O]
 
         # For Adam, we need to materialize the full gradient and then project
-        if isinstance(norm, AdamNormalizer):
-            P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
+        if isinstance(norm, AdamNormalizer) or has_bias:
 
-            # Normalize the gradients using the second moment matrix
-            denom = norm.avg_sq.sqrt().add_(1e-8)
+            P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
             if has_bias:
-                bias_scale = denom.new_ones((denom.size(0), 1))
-                denom = torch.cat([denom, bias_scale], dim=1)
-            P /= denom
+                P = torch.cat([P, G.sum(dim=0).unsqueeze(0)], dim=0)
+
+            if isinstance(norm, AdamNormalizer):
+                # Normalize the gradients using the second moment matrix
+                P /= norm.avg_sq.sqrt().add_(1e-8)
 
             if self.processor.reshape_to_square:
                 P = reshape_to_nearest_square(P)

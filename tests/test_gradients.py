@@ -47,18 +47,13 @@ def test_phi3():
             i = getattr(layer, LayerAdapter.in_attr(layer))
             o = getattr(layer, LayerAdapter.out_attr(layer))
 
-            weight_grad = layer.weight.grad
-            assert weight_grad is not None
-            bias_grad = layer.bias.grad if getattr(layer, "bias", None) is not None else None
+            g = layer.weight.grad
+            assert g is not None
 
-            moments = weight_grad.square()
-            g = weight_grad
-            if bias_grad is not None:
-                g = torch.cat([g, bias_grad.unsqueeze(-1)], dim=-1)
+            moments = g.square()
             if p is not None:
                 A = collector.projection(name, p, o, "left", g.device, g.dtype)
-                right_dim = i + (1 if bias_grad is not None else 0)
-                B = collector.projection(name, p, right_dim, "right", g.device, g.dtype)
+                B = collector.projection(name, p, i, "right", g.device, g.dtype)
                 g = A @ g @ B.T
 
             torch.testing.assert_close(g, collected_grad.squeeze(0))
@@ -87,27 +82,13 @@ def test_phi3():
                     layer = model.get_submodule(name)
                     i = getattr(layer, LayerAdapter.in_attr(layer))
                     o = getattr(layer, LayerAdapter.out_attr(layer))
-                    weight_grad = layer.weight.grad
-                    assert weight_grad is not None
-                    bias_grad = (
-                        layer.bias.grad if getattr(layer, "bias", None) is not None else None
-                    )
+                    g = layer.weight.grad
+                    assert g is not None
 
-                    weight_grad = normalizers[name].normalize_(weight_grad.clone())
-                    if bias_grad is not None:
-                        if isinstance(normalizers[name], AdafactorNormalizer):
-                            r = normalizers[name].row.add(1e-30)
-                            row_scale = r.mean().sqrt() * r.rsqrt()
-                            bias_component = bias_grad * row_scale.type_as(bias_grad)
-                        else:
-                            bias_component = bias_grad
-                        g = torch.cat([weight_grad, bias_component.unsqueeze(-1)], dim=-1)
-                    else:
-                        g = weight_grad
+                    g = normalizers[name].normalize_(g)
                     if p is not None:
                         A = collector.projection(name, p, o, "left", g.device, g.dtype)
-                        right_dim = i + (1 if bias_grad is not None else 0)
-                        B = collector.projection(name, p, right_dim, "right", g.device, g.dtype)
+                        B = collector.projection(name, p, i, "right", g.device, g.dtype)
                         g = A @ g @ B.T
 
                     # Compare the normalized gradient with the collected gradient. We
