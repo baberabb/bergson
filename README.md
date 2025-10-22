@@ -6,7 +6,7 @@ We view attribution as a counterfactual question: **_If we "unlearned" this trai
 # Announcements
 
 **October 2025**
-- Support convolution modules: https://github.com/EleutherAI/bergson/pull/50/files
+- Support convolution modules: https://github.com/EleutherAI/bergson/pull/50
 - Query datasets on-the-fly, without saving gradients to disk: https://github.com/EleutherAI/bergson/pull/47
 
 **September 2025**
