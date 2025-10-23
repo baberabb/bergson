@@ -213,7 +213,7 @@ class GradientProcessor:
 
     def __post_init__(self):
         self._projection_matrices: dict[
-            tuple[str, Literal["left", "right"], torch.device, int, int], Tensor
+            tuple[str, Literal["left", "right"], torch.device], Tensor
         ] = {}
 
     @classmethod
@@ -435,7 +435,7 @@ class GradientCollector(ContextDecorator):
         dtype: torch.dtype,
     ) -> Tensor:
         """Return the `side` projection matrix for parameter `name` of shape [m, n]."""
-        key = (name, side, device, m, n)
+        key = (name, side, device)
         if key in self.processor._projection_matrices:
             return self.processor._projection_matrices[key]
 
