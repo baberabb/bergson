@@ -208,6 +208,9 @@ class GradientProcessor:
     uniform distribution over {-1, 1}.
     """
 
+    include_bias: bool = False
+    """Whether to include bias gradients when present on a module."""
+
     def __post_init__(self):
         self._projection_matrices: dict[
             tuple[str, Literal["left", "right"], torch.device, int, int], Tensor
@@ -235,6 +238,8 @@ class GradientProcessor:
         # Backward compatibility
         if "projection_type" not in cfg:
             cfg["projection_type"] = "normal"
+        if "include_bias" not in cfg:
+            cfg["include_bias"] = False
 
         # Load normalizers
         norm_state = torch.load(
@@ -385,6 +390,7 @@ class GradientCollector(ContextDecorator):
 
         shapes = {}
         for name, (_, target_shape, has_bias) in self.target_info.items():
+            include_bias = has_bias and self.processor.include_bias
             if name in self.attention_cfgs:
                 attention_cfg = self.attention_cfgs[name]
                 if proj_shape:
@@ -398,7 +404,7 @@ class GradientCollector(ContextDecorator):
                     attention_shape[attention_cfg.head_dim - 2] = (
                         attention_cfg.head_size
                     )
-                    if has_bias:
+                    if include_bias:
                         attention_shape[-1] += 1
                     head_shape = torch.Size(attention_shape)
 
@@ -413,7 +419,7 @@ class GradientCollector(ContextDecorator):
                     shapes[name] = proj_shape
                 else:
                     grad_shape = list(target_shape)
-                    if has_bias:
+                    if include_bias:
                         grad_shape[-1] += 1
                     shapes[name] = torch.Size(grad_shape)
 
@@ -478,12 +484,14 @@ class GradientCollector(ContextDecorator):
 
             x = x * b.type_as(x)  # [N, S, I] * [I] → [N, S, I]
 
-        has_bias = getattr(module, "bias", None) is not None
+        include_bias = (
+            getattr(module, "bias", None) is not None and self.processor.include_bias
+        )
 
         # If we're not using AdamNormalizer, we can randomly project the input here
         # to save memory, rather than waiting until the backward pass.
         p = self.processor.projection_dim
-        if p is not None and not isinstance(norm, AdamNormalizer) and not has_bias:
+        if p is not None and not isinstance(norm, AdamNormalizer) and not include_bias:
             i = getattr(module, LayerAdapter.in_attr(module))
             x = x @ self.projection(name, p, i, "right", x.device, x.dtype).T  # type: ignore
 
@@ -500,7 +508,8 @@ class GradientCollector(ContextDecorator):
         I = module._inputs  # [N, S, I/q]
 
         name = assert_type(str, module._name)
-        has_bias = getattr(module, "bias", None) is not None
+        module_has_bias = getattr(module, "bias", None) is not None
+        include_bias = module_has_bias and self.processor.include_bias
 
         if name in self.attention_cfgs:
             # Recurse into heads with module mutation and restoration
@@ -547,12 +556,21 @@ class GradientCollector(ContextDecorator):
             G = G * a.type_as(G)  # [N, S, O] * [O] → [N, S, O]
 
         # For Adam, we need to materialize the full gradient and then project
-        if isinstance(norm, AdamNormalizer) or has_bias:
+        if isinstance(norm, AdamNormalizer) or include_bias:
 
             P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
-            if has_bias:
+            if include_bias:
                 # Append the bias gradient to the input
-                P = torch.cat([P, G.sum(dim=(0, 1)).unsqueeze(0).unsqueeze(2).expand(P.shape[0], -1, 1)], dim=2)
+                P = torch.cat(
+                    [
+                        P,
+                        G.sum(dim=(0, 1))
+                        .unsqueeze(0)
+                        .unsqueeze(2)
+                        .expand(P.shape[0], -1, 1),
+                    ],
+                    dim=2,
+                )
                 i += 1
 
             if isinstance(norm, AdamNormalizer):

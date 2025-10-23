@@ -141,6 +141,7 @@ def worker(
             projection_dim=cfg.projection_dim or None,
             reshape_to_square=cfg.reshape_to_square,
             projection_type=cfg.projection_type,
+            include_bias=cfg.include_bias,
         )
         if rank == 0 and cfg.save_processor:
             processor.save(cfg.partial_run_path)

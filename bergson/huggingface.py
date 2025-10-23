@@ -31,6 +31,7 @@ class GradientCollectorCallback(TrainerCallback):
         path: str,
         attention_cfgs: dict[str, AttentionConfig] = {},
         projection_dim: int = 16,
+        include_bias: bool = False,
         dtype: DTypeLike = np.float16,
         accumulate_grads: bool = False,
         use_optimizer_state: bool = True,
@@ -40,6 +41,7 @@ class GradientCollectorCallback(TrainerCallback):
         Args:
             path: The path to save the gradients
             projection_dim: The dimension to project the gradients onto
+            include_bias: Whether to append bias gradients when present on a module
             dtype: The dtype of the on-disk gradient store
             accumulate_grads: Whether to take the sum of the gradients
                 of the same example across epochs. If `False`, the
@@ -62,6 +64,7 @@ class GradientCollectorCallback(TrainerCallback):
         self.dtype = dtype
         self.path = path
         self.projection_dim = projection_dim
+        self.include_bias = include_bias
         self.use_optimizer_state = use_optimizer_state
         self.order: list[dict] | None = [] if track_order else None
 
@@ -112,6 +115,7 @@ class GradientCollectorCallback(TrainerCallback):
                 {},
                 projection_dim=self.projection_dim or None,
                 reshape_to_square=reshape_to_square,
+                include_bias=self.include_bias,
             ),
             target_modules=target_modules,
             attention_cfgs=self.attention_cfgs,

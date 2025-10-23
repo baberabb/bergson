@@ -287,6 +287,7 @@ def worker(
             projection_dim=index_cfg.projection_dim or None,
             reshape_to_square=index_cfg.reshape_to_square,
             projection_type=index_cfg.projection_type,
+            include_bias=index_cfg.include_bias,
         )
         if rank == 0 and index_cfg.save_processor:
             processor.save(index_cfg.partial_run_path)
