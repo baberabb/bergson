@@ -353,6 +353,9 @@ class GradientCollector(ContextDecorator):
     Dictionary of head configurations for each module to be split into head matrices.
     """
 
+    indices: list[int] | None = None
+    """Indices of the data points to collect gradients for."""
+
     def __post_init__(self):
         self._fwd_hooks: list[RemovableHandle] = []
         self._bwd_hooks: list[RemovableHandle] = []
@@ -555,7 +558,7 @@ class GradientCollector(ContextDecorator):
 
             P = G.mT @ I  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
 
-        self.closure(name, P)
+        self.closure(name, P, self.indices)
 
         # Save memory ASAP
         del module._inputs

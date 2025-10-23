@@ -8,7 +8,7 @@ from typing import cast
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from datasets import Dataset, IterableDataset, Sequence, Value
+from datasets import Dataset, IterableDataset, Sequence, Value, load_from_disk
 from peft import PeftConfig, PeftModel
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
 from torch.distributed.fsdp import fully_shard
@@ -48,6 +48,16 @@ def get_query_data(query_cfg: QueryConfig):
             "Please build a query dataset index first."
         )
 
+    if query_cfg.query_path.endswith("full_accum_mean_mod_grads.hf"):
+        print("Short circuiting code")
+        query_ds = load_from_disk(query_cfg.query_path)
+        if not query_cfg.modules:
+            query_cfg.modules = list(query_ds.column_names)
+            print(f"Modules: {query_cfg.modules}")
+        query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
+
+        return query_ds
+
     # Load the query dataset
     with open(os.path.join(query_cfg.query_path, "info.json"), "r") as f:
         target_modules = json.load(f)["dtype"]["names"]
@@ -57,9 +67,19 @@ def get_query_data(query_cfg: QueryConfig):
         "torch", columns=target_modules, dtype=torch.float32
     )
 
-    query_ds.features
+    # Ensure all gradient columns are materialized as float32 tensors with their native
+    # sequence length.
     for col in target_modules:
-        query_ds = query_ds.cast_column(col, Sequence(Value("float32"), length=1024))
+        feature = query_ds.features[col]
+        if isinstance(feature, Sequence):
+            length = feature.length
+        else:
+            length = None
+        query_ds = query_ds.cast_column(
+            col,
+            Sequence(Value("float32"), length=length),
+        )
+        print("Length", length)
 
     use_q = query_cfg.query_preconditioner_path is not None
     use_i = query_cfg.index_preconditioner_path is not None
@@ -88,14 +108,14 @@ def get_query_data(query_cfg: QueryConfig):
             else (q or i)
         )
         mixed_preconditioner = {
-            k: v.cuda().to(torch.float32) for k, v in mixed_preconditioner.items()
+            k: v.cuda().to(torch.float64) for k, v in mixed_preconditioner.items()
         }
 
         def precondition(batch):
             print("batch")
             for name in target_modules:
                 result = (
-                    batch[name].cuda().to(torch.float32) @ mixed_preconditioner[name]
+                    batch[name].cuda().to(torch.float64) @ mixed_preconditioner[name]
                 )
                 batch[name] = result.cpu()
 
@@ -140,6 +160,93 @@ def get_individual_query(
     return callback
 
 
+def get_module_wise_mean_query(
+    query_ds: Dataset,
+    query_cfg: QueryConfig,
+    device: torch.device,
+    dtype: torch.dtype,
+    precomputed_mean: bool = True,
+    unit_normalize: bool = False,
+):
+    """
+    Compute the mean query and return a callback function that scores gradients
+    according to their inner products or cosine similarities with the mean query.
+    """
+    # Accumulate on CPU to avoid holding full-resolution gradients on GPU.
+    if not precomputed_mean:
+        acc_device = torch.device("cpu")
+        acc = {
+            module: torch.zeros_like(
+                query_ds[0][module], device=acc_device, dtype=torch.float32
+            )
+            for module in query_cfg.modules
+        }
+
+        def sum_(*cols):
+            for module, x in zip(query_cfg.modules, cols):
+                x = x.to(device=acc_device, dtype=torch.float32)
+                if query_cfg.unit_normalize:
+                    x = x / (x.norm(dim=1, keepdim=True) + 1e-12)
+                acc[module].add_(x.sum(0))
+
+        query_ds.map(
+            sum_,
+            input_columns=query_cfg.modules,
+            batched=True,
+            batch_size=query_cfg.batch_size,
+        )
+
+        callback_query = {
+            module: (acc[module] / len(query_ds)).to(
+                device=device, dtype=dtype, non_blocking=True
+            )
+            for module in query_cfg.modules
+        }
+    else:
+
+        if unit_normalize:
+            callback_query = {
+                module: query_ds[0][module].to(
+                    device=device, dtype=torch.float32, non_blocking=True
+                )
+                for module in query_cfg.modules
+            }
+            norm = (
+                torch.cat(
+                    [
+                        (query_ds[0][module].to(torch.float32) ** 2).sum(dim=1)
+                        for module in query_cfg.modules
+                    ],
+                    dim=0,
+                )
+                .sum()
+                .sqrt()
+            )
+            print(norm.shape)
+            callback_query = {
+                module: (callback_query[module].to(torch.float32) / norm).to(
+                    dtype=dtype
+                )
+                for module in query_cfg.modules
+            }
+        else:
+            callback_query = {
+                module: query_ds[0][module].to(
+                    device=device, dtype=dtype, non_blocking=True
+                )
+                for module in query_cfg.modules
+            }
+
+    @torch.inference_mode()
+    def callback(mod_grads: dict[str, torch.Tensor], name: str):
+        module_scores = mod_grads[name] @ callback_query[name]
+        sum_of_squares = (mod_grads[name] ** 2).sum(dim=1)
+
+        return module_scores, sum_of_squares
+
+    return callback
+
+
 def get_mean_query(
     query_ds: Dataset, query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype
 ):
@@ -147,18 +254,21 @@ def get_mean_query(
     Compute the mean query and return a callback function that scores gradients
     according to their inner products or cosine similarities with the mean query.
     """
+    # Accumulate on CPU to avoid holding full-resolution gradients on GPU.
+    acc_device = torch.device("cpu")
     acc = {
         module: torch.zeros_like(
-            query_ds[0][module], device=device, dtype=torch.float32
+            query_ds[0][module], device=acc_device, dtype=torch.float32
         )
         for module in query_cfg.modules
     }
 
     def sum_(*cols):
         for module, x in zip(query_cfg.modules, cols):
+            x = x.to(device=acc_device, dtype=torch.float32)
             if query_cfg.unit_normalize:
                 x = x / (x.norm(dim=1, keepdim=True) + 1e-12)
-            acc[module] += x.to(device=device, dtype=torch.float32).sum(0)
+            acc[module].add_(x.sum(0))
 
     query_ds.map(
         sum_,
@@ -169,7 +279,9 @@ def get_mean_query(
 
     callback_query = torch.cat(
         [
-            (acc[module] / len(query_ds)).to(device=device, dtype=dtype)
+            (acc[module] / len(query_ds)).to(
+                device=device, dtype=dtype, non_blocking=True
+            )
             for module in query_cfg.modules
         ],
         dim=0,
@@ -344,17 +456,23 @@ def worker(
     else:
         attention_cfgs = {}
 
-    with open(os.path.join(query_cfg.query_path, "info.json"), "r") as f:
-        query_cfg.modules = json.load(f)["dtype"]["names"]
+    if not query_cfg.modules:
+        with open(os.path.join(query_cfg.query_path, "info.json"), "r") as f:
+            query_cfg.modules = json.load(f)["dtype"]["names"]
 
     query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
 
     query_dtype = dtype if dtype != "auto" else torch.float16
 
     if query_cfg.score == "mean":
-        base_query_callback = get_mean_query(
-            query_ds, query_cfg, model.device, query_dtype
-        )
+        if index_cfg.module_wise:
+            base_query_callback = get_module_wise_mean_query(
+                query_ds, query_cfg, model.device, query_dtype
+            )
+        else:
+            base_query_callback = get_mean_query(
+                query_ds, query_cfg, model.device, query_dtype
+            )
         num_scores = 1
     elif query_cfg.score == "nearest":
         base_query_callback = get_nearest_query(
@@ -380,6 +498,8 @@ def worker(
             str(Path(query_cfg.scores_path) / "scores.hf"),
             dtype=scores_dtype,
             device=model.device,
+            rank=rank,
+            module_wise=index_cfg.module_wise,
         )
         collect_gradients(
             model,
@@ -396,6 +516,7 @@ def worker(
             query=query,
             save_index=index_cfg.save_index,
             save_processor=index_cfg.save_processor,
+            module_wise=index_cfg.module_wise,
         )
     else:
         # Convert each shard to a Dataset then collect its gradients
@@ -418,6 +539,8 @@ def worker(
                 ),
                 dtype=scores_dtype,
                 device=model.device,
+                rank=rank,
+                module_wise=index_cfg.module_wise,
             )
             collect_gradients(
                 model,
@@ -434,6 +557,7 @@ def worker(
                 query=query,
                 save_index=index_cfg.save_index,
                 save_processor=index_cfg.save_processor,
+                module_wise=index_cfg.module_wise,
             )
             buf.clear()
             shard_id += 1
@@ -525,6 +649,7 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
         ctx.wait()
 
     try:
+        dist.barrier()
         os.rename(index_cfg.partial_run_path, index_cfg.run_path)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Error renaming index path: {e}")

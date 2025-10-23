@@ -168,6 +168,8 @@ def worker(
             save_index=cfg.save_index,
             save_processor=cfg.save_processor,
             drop_columns=cfg.drop_columns,
+            create_custom_query=cfg.in_memory_index,
+            module_wise=cfg.module_wise,
         )
     else:
         # Convert each shard to a Dataset then map over its gradients
@@ -194,6 +196,8 @@ def worker(
                 # Save a processor state checkpoint after each shard
                 save_processor=cfg.save_processor,
                 drop_columns=cfg.drop_columns,
+                create_custom_query=cfg.in_memory_index,
+                module_wise=cfg.module_wise,
             )
             buf.clear()
             shard_id += 1
@@ -282,6 +286,7 @@ def build_gradient_dataset(cfg: IndexConfig):
         ctx.wait()
 
     try:
+        dist.barrier()
         os.rename(cfg.partial_run_path, cfg.run_path)
     except Exception:
         pass

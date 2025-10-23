@@ -18,7 +18,7 @@ class StaticQuery:
 
     index_cfg: IndexConfig
 
-    k: int | None = None
+    k: int | None = 50
 
     def execute(self):
         """Query an on-disk gradient index."""

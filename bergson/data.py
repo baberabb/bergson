@@ -33,37 +33,61 @@ class Query:
 
     def __init__(
         self,
-        query_callback: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+        query_callback: Callable[..., torch.Tensor],
         num_items: int,
         num_scores: int,
         scores_path: str,
         *,
         dtype: torch.dtype = torch.float32,
         device: torch.device | str = "cpu",
+        rank: int,
+        module_wise: bool = False,
     ):
         self._query_callback = query_callback
         self._scores_path = scores_path
         self.scores = torch.zeros((num_items, num_scores), dtype=dtype, device=device)
+        self.rank = rank
         self.num_written = 0
 
-    def __call__(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
-        scores = self._query_callback(mod_grads).detach()
-        if scores.ndim == 1:
-            scores = scores.unsqueeze(-1)
-        assert scores.shape[0] == len(indices)
-        assert scores.shape[1] == self.scores.shape[1]
+        self.module_wise = module_wise
+        if self.module_wise:
+            self.sum_of_squares = torch.zeros((num_items,), dtype=dtype, device=device)
 
-        scores = scores.to(device=self.scores.device, dtype=self.scores.dtype)
-        self.scores[indices] = scores
-        self.num_written += len(indices)
+    def __call__(
+        self,
+        indices: list[int],
+        mod_grads: dict[str, torch.Tensor],
+        name: str | None = None,
+    ):
+        if name:
+            # Accumulate module-wise scores
+            scores, sum_of_squares = self._query_callback(mod_grads, name)
+            self.sum_of_squares[indices] += sum_of_squares
 
-        if self.num_written >= len(self.scores):
-            self.flush()
+            if scores.ndim == 1:
+                scores = scores.unsqueeze(-1)
 
-    def flush(self):
+            self.scores[indices] += scores.to(
+                device=self.scores.device, dtype=self.scores.dtype
+            )
+
+        else:
+            scores = self._query_callback(mod_grads)
+
+            if scores.ndim == 1:
+                scores = scores.unsqueeze(-1)
+
+            scores = scores.to(device=self.scores.device, dtype=self.scores.dtype)
+            self.scores[indices] = scores
+
+    def save_scores(self, rank: int):
+        if rank != 0:
+            return
+
         dataset = Dataset.from_dict(
             {
                 "scores": self.scores.cpu().numpy().tolist(),
+                "indices": list(range(len(self.scores))),
             }
         )
         try:
@@ -75,6 +99,36 @@ class Query:
             alternate_path = self._scores_path.replace(".hf", f"_{random_hash}.hf")
             print(f"Writing to alternate path: {alternate_path}")
             dataset.save_to_disk(alternate_path)
+
+        if self.module_wise:
+            # TODO unit normalize query before this
+            dataset = Dataset.from_dict(
+                {
+                    "sum_of_squares": self.sum_of_squares.cpu().numpy().tolist(),
+                    "indices": list(range(len(self.sum_of_squares))),
+                }
+            )
+            dataset.save_to_disk(self._scores_path.replace(".hf", "_sum_of_squares.hf"))
+
+            normalized_scores = np.zeros_like(self.scores.cpu().numpy())
+            batch_size = 1024
+            for i in range(0, len(self.sum_of_squares), batch_size):
+                batch = self.sum_of_squares[i : i + batch_size]
+                normalized_scores[i : i + batch_size] = (
+                    (self.scores[i : i + batch_size] / (batch.sqrt() + 1e-12))
+                    .cpu()
+                    .numpy()
+                )
+            dataset = Dataset.from_dict(
+                {
+                    "normalized_scores": normalized_scores.tolist(),
+                    "indices": list(range(len(self.sum_of_squares))),
+                }
+            )
+
+            dataset.save_to_disk(
+                self._scores_path.replace(".hf", "_normalized_scores.hf")
+            )
 
 
 @dataclass
@@ -170,6 +224,9 @@ class IndexConfig:
     save_index: bool = True
     """Whether to write the gradient index to disk."""
 
+    in_memory_index: bool = False
+    """Whether to keep the gradient index in memory and torch.save it to disk."""
+
     save_processor: bool = True
     """Whether to write the gradient processor to disk."""
 
@@ -230,6 +287,9 @@ class IndexConfig:
     attention: AttentionConfig = field(default_factory=AttentionConfig)
     """Configuration for each attention module to be split into head matrices.
     Used for attention modules specified in `split_attention_modules`."""
+
+    module_wise: bool = False
+    """Whether to compute the gradients module-wise."""
 
     @property
     def partial_run_path(self) -> str:

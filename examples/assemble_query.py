@@ -32,7 +32,6 @@ from bergson.data import create_index, load_gradient_dataset
 from bergson.utils import assert_type
 
 
-
 def load_mcqa_dataset():
     def map(x):
         """Many of the questions require the choices to be given to be coherent, e.g.
@@ -286,7 +285,10 @@ def build_mcqa_index(cfg: IndexConfig, ds_path: str):
     except Exception:
         pass
 
-def create_query_index(query_ds: Dataset, run_path: str, assembled_dataset_path: str, index_dtype: np.dtype):
+
+def create_query_index(
+    query_ds: Dataset, run_path: str, assembled_dataset_path: str, index_dtype: np.dtype
+):
     structured_mmap = load_gradients(run_path)
     mmap_dtype = structured_mmap.dtype
 
@@ -316,7 +318,6 @@ def create_query_index(query_ds: Dataset, run_path: str, assembled_dataset_path:
             dest = Path(assembled_dataset_path) / item
             shutil.copy(Path(run_path) / item, dest)
 
-
     if (Path(assembled_dataset_path) / "data.hf").exists():
         if (Path(assembled_dataset_path) / "data.hf").is_file():
             (Path(assembled_dataset_path) / "data.hf").unlink()
@@ -324,16 +325,23 @@ def create_query_index(query_ds: Dataset, run_path: str, assembled_dataset_path:
             shutil.rmtree(Path(assembled_dataset_path) / "data.hf")
 
     # Write structured mean queries to data.hf
-    np_mean_grads = np.stack([item.numpy() for item in list(subset_mean_gradients.values())], axis=0)
-    structured_np_mean_grads = unstructured_to_structured(np_mean_grads, mmap_dtype)
+    np_mean_grads = np.stack(
+        [item.numpy() for item in list(subset_mean_gradients.values())], axis=0
+    )
+    # structured_np_mean_grads = unstructured_to_structured(np_mean_grads, mmap_dtype)
     # data = [
-    #     {name: structured_np_mean_grads[name][i].tolist() for name in mmap_dtype.names}
+    #     {
+    #         name: structured_np_mean_grads[name][i].tolist()
+    #         for name in mmap_dtype.names
+    #     }
     #     for i in range(structured_np_mean_grads.shape[0])
     # ]
 
-    means_dataset = Dataset.from_dict({
-        "scores": [0.] * len(subset_mean_gradients),
-    })
+    means_dataset = Dataset.from_dict(
+        {
+            "scores": [0.0] * len(subset_mean_gradients),
+        }
+    )
     means_dataset.save_to_disk(Path(assembled_dataset_path) / "data.hf")
 
     mean_grad_stack = torch.stack(list(subset_mean_gradients.values()))
@@ -356,13 +364,12 @@ def create_query_index(query_ds: Dataset, run_path: str, assembled_dataset_path:
     index_grads = create_index(
         str(assembled_dataset_path), len(subset_mean_gradients), grad_sizes, index_dtype
     )
-    structured_mean_grads = unstructured_to_structured(np_mean_grads.astype(index_dtype), mmap_dtype)
     index_grads[:] = unstructured_to_structured(
         np_mean_grads.astype(index_dtype), mmap_dtype
     )
     index_grads.flush()
 
-    ds = load_gradient_dataset(assembled_dataset_path)
+    load_gradient_dataset(assembled_dataset_path)
 
     mean_grad_stack = torch.stack(list(subset_mean_gradients.values()))
     first_query_grad = gradient_tensor[1].unsqueeze(0).expand_as(mean_grad_stack)
@@ -379,7 +386,7 @@ def create_query_index(query_ds: Dataset, run_path: str, assembled_dataset_path:
 
 
 def main():
-    projection_dim = 16
+    projection_dim = 0
     model_name = "EleutherAI/deep_ignorance_pretraining_baseline_small"
     ds_path = f"runs/ds_wmdp_bio_robust_mcqa_{projection_dim}"
     index_path = f"runs/wmdp_bio_robust_mcqa_means_{projection_dim}"
@@ -395,27 +402,70 @@ def main():
         prompt_column="text",
     )
 
+    # cfg = IndexConfig(
+    #     run_path=index_path,
+    #     save_index=True,
+    #     save_processor=True,
+    #     precision="fp16",
+    #     data=data_config,
+    #     fsdp=True,
+    #     model=model_name,
+    #     projection_dim=projection_dim,
+    #     reshape_to_square=True,
+    # )
+
     cfg = IndexConfig(
         run_path=index_path,
-        save_index=True,
-        save_processor=True,
+        # save_index=True,
+        save_index=False,
+        # save_processor=True,
+        save_processor=False,
         precision="fp16",
         data=data_config,
         fsdp=True,
         model=model_name,
         projection_dim=projection_dim,
         reshape_to_square=True,
+        module_wise=True,
+        in_memory_index=True,
+        skip_preconditioners=True,
+        token_batch_size=1024,
     )
 
-    build_mcqa_index(cfg, ds_path)
+    # build_mcqa_index(cfg, ds_path)
+
+    # Sum all the accumulated mean gradients into a single tensor
+    world_size = 8
+    accum = {}
+    for rank in range(world_size):
+        accum_mean_mod_grads = torch.load(
+            os.path.join(cfg.run_path, f"accum_mean_grads_{rank}.pth")
+        )
+        if not accum:
+            accum = accum_mean_mod_grads
+        else:
+            for name in accum_mean_mod_grads.keys():
+                accum[name] += accum_mean_mod_grads[name]
+
+    # Convert to HF DS
+    accum_ds = Dataset.from_dict({name: accum[name].numpy() for name in accum})
+    accum_ds.save_to_disk(
+        os.path.join(cfg.run_path, "full_accum_mean_mod_grads.hf"), num_shards=1
+    )
 
     # Trackstar uses 2**16 with an 8B model
     # We are collecting gradients for a ~2.7B model
     # We are using ~2**13 I think
-    modules = set(load_gradients(cfg.run_path).dtype.names)
-    print(f"Full projection dim: {len(modules) * cfg.projection_dim}")
+    # modules = set(load_gradients(cfg.run_path).dtype.names)
+    # print(
+    # f"Full projection dim: {len(modules) * cfg.projection_dim * cfg.projection_dim}"
+    # )
 
-    create_query_index(mcqa_ds, cfg.run_path, assembled_dataset_path, index_dtype=np.float16)
+    exit()
+
+    create_query_index(
+        mcqa_ds, cfg.run_path, assembled_dataset_path, index_dtype=np.float16
+    )
 
 
 if __name__ == "__main__":
