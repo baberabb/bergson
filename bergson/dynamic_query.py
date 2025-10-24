@@ -166,7 +166,6 @@ def get_module_wise_mean_query(
     device: torch.device,
     dtype: torch.dtype,
     precomputed_mean: bool = True,
-    unit_normalize: bool = False,
 ):
     """
     Compute the mean query and return a callback function that scores gradients
@@ -203,8 +202,7 @@ def get_module_wise_mean_query(
             for module in query_cfg.modules
         }
     else:
-
-        if unit_normalize:
+        if query_cfg.unit_normalize:
             callback_query = {
                 module: query_ds[0][module].to(
                     device=device, dtype=torch.float32, non_blocking=True

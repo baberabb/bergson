@@ -101,7 +101,6 @@ class Query:
             dataset.save_to_disk(alternate_path)
 
         if self.module_wise:
-            # TODO unit normalize query before this
             dataset = Dataset.from_dict(
                 {
                     "sum_of_squares": self.sum_of_squares.cpu().numpy().tolist(),
