@@ -286,7 +286,6 @@ def build_gradient_dataset(cfg: IndexConfig):
         ctx.wait()
 
     try:
-        dist.barrier()
         os.rename(cfg.partial_run_path, cfg.run_path)
     except Exception:
         pass

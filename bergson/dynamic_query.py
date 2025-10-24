@@ -647,7 +647,6 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
         ctx.wait()
 
     try:
-        dist.barrier()
         os.rename(index_cfg.partial_run_path, index_cfg.run_path)
     except Exception as e:
         print(f"Error renaming index path: {e}")
