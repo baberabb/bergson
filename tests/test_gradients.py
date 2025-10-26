@@ -46,6 +46,7 @@ def test_phi3():
 
             i = getattr(layer, LayerAdapter.in_attr(layer))
             o = getattr(layer, LayerAdapter.out_attr(layer))
+
             g = layer.weight.grad
             assert g is not None
 

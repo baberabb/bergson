@@ -132,6 +132,9 @@ class IndexConfig:
     projection_dim: int = 16
     """Dimension of the random projection for the index, or 0 to disable it."""
 
+    include_bias: bool = False
+    """Whether to append bias gradients for modules that have them."""
+
     reshape_to_square: bool = False
     """Whether to reshape the gradients to a square matrix."""
 

@@ -208,6 +208,9 @@ class GradientProcessor:
     uniform distribution over {-1, 1}.
     """
 
+    include_bias: bool = False
+    """Whether to include bias gradients when present on a module."""
+
     def __post_init__(self):
         self._projection_matrices: dict[
             tuple[str, Literal["left", "right"], torch.device], Tensor
@@ -235,6 +238,8 @@ class GradientProcessor:
         # Backward compatibility
         if "projection_type" not in cfg:
             cfg["projection_type"] = "normal"
+        if "include_bias" not in cfg:
+            cfg["include_bias"] = False
 
         # Load normalizers
         norm_state = torch.load(
@@ -357,7 +362,7 @@ class GradientCollector(ContextDecorator):
         self._fwd_hooks: list[RemovableHandle] = []
         self._bwd_hooks: list[RemovableHandle] = []
 
-        self.target_info: dict[str, tuple[torch.device, torch.Size]] = {}
+        self.target_info: dict[str, tuple[torch.device, torch.Size, bool]] = {}
 
         # Before we add any hooks, we need to peek at what modules we need to track.
         for name, layer in self.model.named_modules():
@@ -368,7 +373,12 @@ class GradientCollector(ContextDecorator):
                 continue
 
             # Users of this class really like to know ahead of time what the shapes are
-            self.target_info[name] = layer.weight.device, layer.weight.shape
+            has_bias = getattr(layer, "bias", None) is not None
+            self.target_info[name] = (
+                layer.weight.device,
+                layer.weight.shape,
+                has_bias,
+            )
 
     def shapes(self) -> Mapping[str, torch.Size]:
         """Return the shapes of the gradients collected by this collector."""
@@ -379,7 +389,8 @@ class GradientCollector(ContextDecorator):
         )
 
         shapes = {}
-        for name, (_, target_shape) in self.target_info.items():
+        for name, (_, target_shape, has_bias) in self.target_info.items():
+            include_bias = has_bias and self.processor.include_bias
             if name in self.attention_cfgs:
                 attention_cfg = self.attention_cfgs[name]
                 if proj_shape:
@@ -393,6 +404,8 @@ class GradientCollector(ContextDecorator):
                     attention_shape[attention_cfg.head_dim - 2] = (
                         attention_cfg.head_size
                     )
+                    if include_bias:
+                        attention_shape[-1] += 1
                     head_shape = torch.Size(attention_shape)
 
                 shapes.update(
@@ -402,7 +415,13 @@ class GradientCollector(ContextDecorator):
                     }
                 )
             else:
-                shapes[name] = proj_shape or target_shape
+                if proj_shape:
+                    shapes[name] = proj_shape
+                else:
+                    grad_shape = list(target_shape)
+                    if include_bias:
+                        grad_shape[-1] += 1
+                    shapes[name] = torch.Size(grad_shape)
 
         return shapes
 
@@ -465,10 +484,15 @@ class GradientCollector(ContextDecorator):
 
             x = x * b.type_as(x)  # [N, S, I] * [I] → [N, S, I]
 
-        # If we're not using AdamNormalizer, we can randomly project the input here
-        # to save memory, rather than waiting until the backward pass.
+        include_bias = (
+            self.processor.include_bias and getattr(module, "bias", None) is not None
+        )
+
+        # If we're not using AdamNormalizer and are not including bias gradients,
+        # we can randomly project the input here to save memory,
+        # rather than waiting until the backward pass.
         p = self.processor.projection_dim
-        if p is not None and not isinstance(norm, AdamNormalizer):
+        if p is not None and not isinstance(norm, AdamNormalizer) and not include_bias:
             i = getattr(module, LayerAdapter.in_attr(module))
             x = x @ self.projection(name, p, i, "right", x.device, x.dtype).T  # type: ignore
 
@@ -485,6 +509,8 @@ class GradientCollector(ContextDecorator):
         I = module._inputs  # [N, S, I/q]
 
         name = assert_type(str, module._name)
+        module_has_bias = getattr(module, "bias", None) is not None
+        include_bias = module_has_bias and self.processor.include_bias
 
         if name in self.attention_cfgs:
             # Recurse into heads with module mutation and restoration
@@ -530,12 +556,28 @@ class GradientCollector(ContextDecorator):
 
             G = G * a.type_as(G)  # [N, S, O] * [O] → [N, S, O]
 
-        # For Adam, we need to materialize the full gradient and then project
-        if isinstance(norm, AdamNormalizer):
-            P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
+        # If we are using AdamNormalizer, or including bias gradients
+        # we need to materialize the full gradient and then project
+        if isinstance(norm, AdamNormalizer) or include_bias:
 
-            # Normalize the gradients using the second moment matrix
-            P /= norm.avg_sq.sqrt().add_(1e-8)
+            P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
+            if include_bias:
+                # Append the bias gradient to the input
+                P = torch.cat(
+                    [
+                        P,
+                        G.sum(dim=(0, 1))
+                        .unsqueeze(0)
+                        .unsqueeze(2)
+                        .expand(P.shape[0], -1, 1),
+                    ],
+                    dim=2,
+                )
+                i += 1
+
+            if isinstance(norm, AdamNormalizer):
+                # Normalize the gradients using the second moment matrix
+                P /= norm.avg_sq.sqrt().add_(1e-8)
 
             if self.processor.reshape_to_square:
                 P = reshape_to_nearest_square(P)

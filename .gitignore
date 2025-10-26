@@ -185,3 +185,5 @@ figures/
 results/
 prototype/
 influence_results/
+.idea/
+uv.lock
