@@ -489,8 +489,8 @@ class GradientCollector(ContextDecorator):
         )
 
         # If we're not using AdamNormalizer and are not including bias gradients,
-        # we can randomly project the input here
-        # to save memory, rather than waiting until the backward pass.
+        # we can randomly project the input here to save memory,
+        # rather than waiting until the backward pass.
         p = self.processor.projection_dim
         if p is not None and not isinstance(norm, AdamNormalizer) and not include_bias:
             i = getattr(module, LayerAdapter.in_attr(module))
