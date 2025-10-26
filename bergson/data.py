@@ -2,7 +2,6 @@ import json
 import math
 import os
 import random
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Sequence
@@ -89,18 +88,7 @@ class Query:
                 "indices": list(range(len(self.scores))),
             }
         )
-        try:
-            dataset.save_to_disk(self._scores_path / f"rank_{rank}" / "scores.hf")
-        except Exception as e:
-            # Handle collisions with existing datasets
-            print(f"Error writing scores to disk: {e}")
-            random_hash = str(uuid.uuid4())[:8]
-            alternate_path = (
-                self._scores_path / f"rank_{rank}" / f"scores_{random_hash}.hf"
-            )
-            print(f"Writing to alternate path: {alternate_path}")
-            dataset.save_to_disk(alternate_path)
-
+        dataset.save_to_disk(self._scores_path / f"rank_{rank}" / "scores.hf")
         if self.module_wise:
             dataset = Dataset.from_dict(
                 {
