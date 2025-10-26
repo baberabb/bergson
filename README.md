@@ -28,14 +28,14 @@ pip install bergson
 # Quickstart
 
 ```
-bergson build runs/test --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
+python -m bergson build runs/test --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
 ```
 
 # Usage
 The first step is to build an index of gradients for each training sample. You can do this from the command line, using `bergson` as a CLI tool:
 
 ```bash
-bergson build <output_path> --model <model_name> --dataset <dataset_name>
+python -m bergson build <output_path> --model <model_name> --dataset <dataset_name>
 ```
 
 This will create a directory at `<output_path>` containing the gradients for each training sample in the specified dataset. The `--model` and `--dataset` arguments should be compatible with the Hugging Face `transformers` library. By default it assumes that the dataset has a `text` column, but you can specify other columns using `--prompt_column` and optionally `--completion_column`. The `--help` flag will show you all available options.
@@ -96,7 +96,7 @@ collect_gradients(
 Where a reward signal is available we compute gradients using a weighted advantage estimate based on Dr. GRPO:
 
 ```bash
-bergson build <output_path> --model <model_name> --dataset <dataset_name> --reward_column <reward_column_name>
+python -m bergson build <output_path> --model <model_name> --dataset <dataset_name> --reward_column <reward_column_name>
 ```
 
 ## Queries
