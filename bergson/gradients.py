@@ -488,7 +488,8 @@ class GradientCollector(ContextDecorator):
             self.processor.include_bias and getattr(module, "bias", None) is not None
         )
 
-        # If we're not using AdamNormalizer and are not including bias gradients, we can randomly project the input here
+        # If we're not using AdamNormalizer and are not including bias gradients,
+        # we can randomly project the input here
         # to save memory, rather than waiting until the backward pass.
         p = self.processor.projection_dim
         if p is not None and not isinstance(norm, AdamNormalizer) and not include_bias:
@@ -555,7 +556,8 @@ class GradientCollector(ContextDecorator):
 
             G = G * a.type_as(G)  # [N, S, O] * [O] → [N, S, O]
 
-        # If we are using AdamNormalizer, or including bias gradients, we need to materialize the full gradient and then project
+        # If we are using AdamNormalizer, or including bias gradients
+        # we need to materialize the full gradient and then project
         if isinstance(norm, AdamNormalizer) or include_bias:
 
             P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
