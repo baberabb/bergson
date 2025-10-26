@@ -44,14 +44,14 @@ class Query:
         module_wise: bool = False,
     ):
         self._query_callback = query_callback
-        self._scores_path = scores_path
-        self.scores = torch.zeros((num_items, num_scores), dtype=dtype, device=device)
+        self._scores_path = Path(scores_path)
+        self.scores = torch.zeros((num_items, num_scores), dtype=dtype, device="cpu")
         self.rank = rank
         self.num_written = 0
 
         self.module_wise = module_wise
         if self.module_wise:
-            self.sum_of_squares = torch.zeros((num_items,), dtype=dtype, device=device)
+            self.sum_of_squares = torch.zeros((num_items,), dtype=dtype, device="cpu")
 
     def __call__(
         self,
@@ -62,7 +62,9 @@ class Query:
         if name:
             # Accumulate module-wise scores
             scores, sum_of_squares = self._query_callback(mod_grads, name)
-            self.sum_of_squares[indices] += sum_of_squares
+            self.sum_of_squares[indices] += sum_of_squares.to(
+                self.sum_of_squares.device
+            )
 
             if scores.ndim == 1:
                 scores = scores.unsqueeze(-1)
@@ -81,9 +83,6 @@ class Query:
             self.scores[indices] = scores
 
     def save_scores(self, rank: int):
-        if rank != 0:
-            return
-
         dataset = Dataset.from_dict(
             {
                 "scores": self.scores.cpu().numpy().tolist(),
@@ -91,12 +90,14 @@ class Query:
             }
         )
         try:
-            dataset.save_to_disk(self._scores_path)
+            dataset.save_to_disk(self._scores_path / f"rank_{rank}" / "scores.hf")
         except Exception as e:
             # Handle collisions with existing datasets
             print(f"Error writing scores to disk: {e}")
             random_hash = str(uuid.uuid4())[:8]
-            alternate_path = self._scores_path.replace(".hf", f"_{random_hash}.hf")
+            alternate_path = (
+                self._scores_path / f"rank_{rank}" / f"scores_{random_hash}.hf"
+            )
             print(f"Writing to alternate path: {alternate_path}")
             dataset.save_to_disk(alternate_path)
 
@@ -107,26 +108,8 @@ class Query:
                     "indices": list(range(len(self.sum_of_squares))),
                 }
             )
-            dataset.save_to_disk(self._scores_path.replace(".hf", "_sum_of_squares.hf"))
-
-            normalized_scores = np.zeros_like(self.scores.cpu().numpy())
-            batch_size = 1024
-            for i in range(0, len(self.sum_of_squares), batch_size):
-                batch = self.sum_of_squares[i : i + batch_size]
-                normalized_scores[i : i + batch_size] = (
-                    (self.scores[i : i + batch_size] / (batch.sqrt() + 1e-12))
-                    .cpu()
-                    .numpy()
-                )
-            dataset = Dataset.from_dict(
-                {
-                    "normalized_scores": normalized_scores.tolist(),
-                    "indices": list(range(len(self.sum_of_squares))),
-                }
-            )
-
             dataset.save_to_disk(
-                self._scores_path.replace(".hf", "_normalized_scores.hf")
+                self._scores_path / f"rank_{rank}" / "sum_of_squares.hf"
             )
 
 
