@@ -1,10 +1,12 @@
 import json
 import os
 import socket
+from collections import defaultdict
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -335,25 +337,36 @@ def filter_complete_indices_memmap(
     """
     Filter out indices that are already written to in the scores.bin file.
     """
-    raise NotImplementedError("Memmap query filtering not implemented")
+    root = Path(query_cfg.scores_path) / f"rank_{rank}"
+    root.mkdir(parents=True, exist_ok=True)
 
-    # info = json.load(open(Path(query_cfg.scores_path) / f"rank_{rank}" / "info.json"))
-    # scores_dtype = np.dtype(info["dtype"])
+    info = json.load(open(root / "info.json"))
+    scores_dtype = np.dtype(info["dtype"])
 
-    # scores_path = Path(query_cfg.scores_path) / f"rank_{rank}" / "scores.bin"
-    # scores = np.memmap(scores_path, dtype=scores_dtype, mode="r")
+    scores_path = root / "scores.bin"
+    scores = np.memmap(str(scores_path), dtype=scores_dtype, mode="r")
 
-    # target_writes_per_index = len(query_cfg.modules) if index_cfg.module_wise else 1
+    if not index_cfg.module_wise:
+        indices = scores["index"]
+        written_mask = scores["written"]
+        written_indices = set(indices[written_mask].tolist())
+    else:
+        indices = scores["index"]
+        written_mask = scores["written"]
 
-    # indices = scores["index"]
-    # unwritten_indices = set(indices[~scores["written"]].tolist())
+        # Build a mapping of module -> written indices
+        written_set = defaultdict(set)
+        for idx, written in zip(indices, written_mask):
+            written_set[idx].add(written)
 
-    # batches = [[idx for idx in batch if idx in unwritten_indices]
-    # for batch in batches]
+        written_indices = {idx for idx, writes in written_set.items() if all(writes)}
 
-    # batches = [batch for batch in batches if len(batch) > 0]
+    batches = [
+        [idx for idx in batch if idx not in written_indices] for batch in batches
+    ]
+    batches = [batch for batch in batches if len(batch) > 0]
 
-    # return batches
+    return batches
 
 
 def filter_complete_indices_csv(

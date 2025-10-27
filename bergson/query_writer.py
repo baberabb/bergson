@@ -3,7 +3,7 @@ import json
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -21,9 +21,12 @@ class QueryWriter(ABC):
         self,
         indices: list[int],
         mod_grads: dict[str, torch.Tensor],
-        name: str | None = None,
+        **kwargs: Any,
     ):
-        pass
+        """
+        Write the scores to the query writer.
+        """
+        raise NotImplementedError("Subclasses must implement this method")
 
 
 class CsvQueryWriter(QueryWriter):
@@ -186,6 +189,7 @@ class MemmapQueryWriter(QueryWriter):
                 ("score", np.float32),
                 ("sum_of_squares", np.float32),
                 ("module_id", np.uint16),
+                ("written", np.bool_),
             ]
         )
 
@@ -203,6 +207,7 @@ class MemmapQueryWriter(QueryWriter):
             self.scores["sum_of_squares"][:] = zeros
             self.scores["index"][:] = zeros.astype(np.uint32)
             self.scores["module_id"][:] = zeros.astype(np.uint16)
+            self.scores["written"][:] = False
             self.scores.flush()
             os.fsync(self.scores._mmap.fileno())  # type: ignore
 
@@ -240,14 +245,14 @@ class MemmapQueryWriter(QueryWriter):
         np_indices = np.array(indices, dtype=np.uint32)
         np_indices = np_indices * self.num_modules + module_idx
 
-        self.scores["index"][indices] = np.array(indices, dtype=np.uint32)
-        self.scores["score"][indices] = (
+        self.scores["index"][np_indices] = np.array(indices, dtype=np.uint32)
+        self.scores["score"][np_indices] = (
             scores.cpu().numpy().astype(np.float32).flatten()
         )
-        self.scores["sum_of_squares"][indices] = (
+        self.scores["sum_of_squares"][np_indices] = (
             sum_of_squares.cpu().numpy().astype(np.float32).flatten()
         )
-        self.scores["written"][indices] = True
+        self.scores["written"][np_indices] = True
 
         self.num_items_since_flush += 1
         if self.num_items_since_flush >= self.flush_interval:
