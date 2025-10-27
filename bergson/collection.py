@@ -257,10 +257,6 @@ def collect_gradients(
     if grad_buffer is not None:
         grad_buffer.flush()
 
-    # Make sure the scores are written to disk
-    if query:
-        query.save_scores(rank)
-
     # if create_custom_query:
     #     torch.save(grads, os.path.join(path, f"accum_mean_grads_{rank}.pth"))
     #     torch.save(num_grads, os.path.join(path, f"num_grads_{rank}.pth"))
