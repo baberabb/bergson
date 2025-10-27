@@ -32,7 +32,7 @@ from .data import (
 )
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
-from .query_writer import QueryWriter
+from .query_writer import CsvQueryWriter, MemmapQueryWriter
 from .utils import assert_type, get_layer_list
 
 
@@ -335,22 +335,25 @@ def filter_complete_indices_memmap(
     """
     Filter out indices that are already written to in the scores.bin file.
     """
-    info = json.load(open(Path(query_cfg.scores_path) / f"rank_{rank}" / "info.json"))
-    scores_dtype = np.dtype(info["dtype"])
+    raise NotImplementedError("Memmap query filtering not implemented")
 
-    scores_path = Path(query_cfg.scores_path) / f"rank_{rank}" / "scores.bin"
-    scores = np.memmap(scores_path, dtype=scores_dtype, mode="r")
+    # info = json.load(open(Path(query_cfg.scores_path) / f"rank_{rank}" / "info.json"))
+    # scores_dtype = np.dtype(info["dtype"])
 
-    target_writes_per_index = len(query_cfg.modules) if index_cfg.module_wise else 1
+    # scores_path = Path(query_cfg.scores_path) / f"rank_{rank}" / "scores.bin"
+    # scores = np.memmap(scores_path, dtype=scores_dtype, mode="r")
 
-    indices = scores["index"]
-    unwritten_indices = set(indices[~scores["written"]].tolist())
+    # target_writes_per_index = len(query_cfg.modules) if index_cfg.module_wise else 1
 
-    batches = [[idx for idx in batch if idx in unwritten_indices] for batch in batches]
+    # indices = scores["index"]
+    # unwritten_indices = set(indices[~scores["written"]].tolist())
 
-    batches = [batch for batch in batches if len(batch) > 0]
+    # batches = [[idx for idx in batch if idx in unwritten_indices]
+    # for batch in batches]
 
-    return batches
+    # batches = [batch for batch in batches if len(batch) > 0]
+
+    # return batches
 
 
 def filter_complete_indices_csv(
@@ -596,33 +599,41 @@ def worker(
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
-        batches = filter_complete_indices_csv(index_cfg, query_cfg, batches, rank)
+
+        if query_cfg.writer == "csv":
+            batches = filter_complete_indices_csv(index_cfg, query_cfg, batches, rank)
+        else:
+            batches = filter_complete_indices_memmap(
+                index_cfg, query_cfg, batches, rank
+            )
 
         if not batches:
             print(f"No batches to query for rank {rank}")
             return
 
-        query = QueryWriter(
-            base_query_callback,  # type: ignore
-            len(ds),
-            num_scores,
-            str(Path(query_cfg.scores_path)),
-            dtype=scores_dtype,
-            device=model.device,
-            rank=rank,
-            module_wise=index_cfg.module_wise,
-        )
-        # query = MemmapQueryWriter(
-        #     base_query_callback,  # type: ignore
-        #     len(ds),
-        #     num_scores,
-        #     str(Path(query_cfg.scores_path)),
-        #     dtype=scores_dtype,
-        #     rank=rank,
-        #     num_modules=len(query_cfg.modules),
-        #     module_wise=index_cfg.module_wise,
-        #     flush_batches_interval=1000,
-        # )
+        if query_cfg.writer == "csv":
+            query_writer = CsvQueryWriter(
+                base_query_callback,  # type: ignore
+                len(ds),
+                num_scores,
+                str(Path(query_cfg.scores_path)),
+                dtype=scores_dtype,
+                device=model.device,
+                rank=rank,
+                module_wise=index_cfg.module_wise,
+            )
+        else:
+            query_writer = MemmapQueryWriter(
+                base_query_callback,  # type: ignore
+                len(ds),
+                num_scores,
+                str(Path(query_cfg.scores_path)),
+                dtype=scores_dtype,
+                rank=rank,
+                modules=query_cfg.modules,
+                module_wise=index_cfg.module_wise,
+                flush_batches_interval=1000,
+            )
         collect_gradients(
             model,
             ds,
@@ -636,7 +647,7 @@ def worker(
             target_modules=target_modules,
             attention_cfgs=attention_cfgs,
             drop_columns=index_cfg.drop_columns,
-            query=query,
+            query_writer=query_writer,
             save_index=index_cfg.save_index,
             save_processor=index_cfg.save_processor,
             module_wise=index_cfg.module_wise,
@@ -653,30 +664,36 @@ def worker(
             batches = allocate_batches(
                 ds_shard["length"][:], index_cfg.token_batch_size
             )
-            # batches = filter_complete_indices_memmap(index_cfg, query_cfg, batches, rank)
-            batches = filter_complete_indices_csv(index_cfg, query_cfg, batches, rank)
 
-            query = QueryWriter(
-                base_query_callback,  # type: ignore
-                len(ds_shard),
-                num_scores,
-                str(Path(query_cfg.scores_path) / f"shard-{shard_id:05d}"),
-                dtype=scores_dtype,
-                device=model.device,
-                rank=rank,
-                module_wise=index_cfg.module_wise,
-            )
-            # query = MemmapQueryWriter(
-            #     base_query_callback,  # type: ignore
-            #     len(ds_shard),
-            #     num_scores,
-            #     str(Path(query_cfg.scores_path) / f"shard-{shard_id:05d}"),
-            #     dtype=scores_dtype,
-            #     device=model.device,
-            #     rank=rank,
-            #     module_wise=index_cfg.module_wise,
-            #     flush_batches_interval=1000,
-            # )
+            if query_cfg.writer == "csv":
+                batches = filter_complete_indices_csv(
+                    index_cfg, query_cfg, batches, rank
+                )
+                query_writer = CsvQueryWriter(
+                    base_query_callback,  # type: ignore
+                    len(ds_shard),
+                    num_scores,
+                    str(Path(query_cfg.scores_path) / f"shard-{shard_id:05d}"),
+                    dtype=scores_dtype,
+                    device=model.device,
+                    rank=rank,
+                    module_wise=index_cfg.module_wise,
+                )
+            else:
+                batches = filter_complete_indices_memmap(
+                    index_cfg, query_cfg, batches, rank
+                )
+                query_writer = MemmapQueryWriter(
+                    base_query_callback,  # type: ignore
+                    len(ds_shard),
+                    num_scores,
+                    str(Path(query_cfg.scores_path) / f"shard-{shard_id:05d}"),
+                    dtype=scores_dtype,
+                    modules=query_cfg.modules,
+                    rank=rank,
+                    module_wise=index_cfg.module_wise,
+                    flush_batches_interval=1000,
+                )
             collect_gradients(
                 model,
                 ds_shard,
@@ -690,7 +707,7 @@ def worker(
                 target_modules=target_modules,
                 attention_cfgs=attention_cfgs,
                 drop_columns=index_cfg.drop_columns,
-                query=query,
+                query_writer=query_writer,
                 save_index=index_cfg.save_index,
                 save_processor=index_cfg.save_processor,
                 module_wise=index_cfg.module_wise,

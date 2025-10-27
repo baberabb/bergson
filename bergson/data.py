@@ -107,6 +107,9 @@ class QueryConfig:
     batch_size: int = 1024
     """Batch size for processing the query dataset."""
 
+    writer: Literal["csv", "memmap"] = "csv"
+    """Writer to use for the query scores."""
+
 
 @dataclass
 class IndexConfig:

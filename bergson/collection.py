@@ -32,7 +32,7 @@ def collect_gradients(
     save_index: bool = True,
     save_processor: bool = True,
     drop_columns: bool = False,
-    query: QueryWriter | None = None,
+    query_writer: QueryWriter | None = None,
     module_wise: bool = False,
     create_custom_query: bool = False,
 ):
@@ -40,7 +40,7 @@ def collect_gradients(
     Compute projected gradients using a subset of the dataset.
     """
     assert not create_custom_query, "create_custom_query is commented out"
-    if module_wise and query:
+    if module_wise and query_writer:
         assert skip_preconditioners
 
     rank = dist.get_rank() if dist.is_initialized() else 0
@@ -110,8 +110,8 @@ def collect_gradients(
         else:
             # TODO do we need the dtype conversion
             mod_grads[name] = g.to(dtype=dtype)
-            if module_wise and query:
-                query(indices, mod_grads, name)
+            if module_wise and query_writer:
+                query_writer(indices, mod_grads, name)
                 mod_grads.pop(name)
 
         # Compute the outer product of the flattened gradient
@@ -226,8 +226,8 @@ def collect_gradients(
             for module_name in mod_grads.keys():
                 grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
 
-        if query and not module_wise:
-            query(indices, mod_grads)
+        if query_writer and not module_wise:
+            query_writer(indices, mod_grads)
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)

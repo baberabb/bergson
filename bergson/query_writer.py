@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable
 
@@ -10,7 +11,22 @@ import torch
 import torch.distributed as dist
 
 
-class QueryWriter:
+class QueryWriter(ABC):
+    """
+    Base class for query writers.
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        indices: list[int],
+        mod_grads: dict[str, torch.Tensor],
+        name: str | None = None,
+    ):
+        pass
+
+
+class CsvQueryWriter(QueryWriter):
     """
     Wraps a query scoring callback and stores the resulting scores in a tensor.
     """
@@ -130,7 +146,7 @@ class QueryWriter:
                 writer.writerow(row)
 
 
-class MemmapQueryWriter:
+class MemmapQueryWriter(QueryWriter):
     """
     Wraps a query scoring callback and stores the resulting scores in a tensor.
     """
@@ -197,6 +213,7 @@ class MemmapQueryWriter:
                         "num_items": num_items,
                         "num_modules": self.num_modules,
                         "dtype": scores_dtype,
+                        "module_to_idx": self.module_to_idx,
                     },
                     f,
                     indent=2,
