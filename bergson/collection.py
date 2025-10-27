@@ -20,6 +20,7 @@ def collect_gradients(
     data: Dataset,
     processor: GradientProcessor,
     path: str,
+    token_batch_size: int,
     *,
     batches: list[list[int]] | None = None,
     kl_divergence: bool | None = None,
@@ -124,6 +125,26 @@ def collect_gradients(
     # Update collect with callback
     collector.closure = callback
 
+    # Run a random tensor of size token_batch_size to warm up the cache
+    # And ensure enough memory is available
+    random_tensor = torch.randint(
+        0, 50_000, (1, token_batch_size), device=model.device, dtype=torch.long
+    )
+    with GradientCollector(
+        model.base_model,
+        lambda _: None,
+        processor,
+        target_modules=target_modules,
+        attention_cfgs=attention_cfgs,
+    ) as collector:
+        logits = model(random_tensor).logits[:, :-1]
+        loss = logits[0, 0, 0].float()
+        model.zero_grad()
+        del random_tensor, logits, loss
+        torch.cuda.synchronize()
+        # Optional: trim the caching allocator between very different shapes
+        torch.cuda.empty_cache()
+
     per_doc_losses = torch.full(
         (len(data),),
         device=model.device,
@@ -210,7 +231,9 @@ def collect_gradients(
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
 
-    process_preconditioners(processor, preconditioners, len(data))
+    # TODO can probably loosen this condition
+    if save_processor or not skip_preconditioners:
+        process_preconditioners(processor, preconditioners, len(data))
 
     if dist.is_initialized():
         dist.reduce(per_doc_losses, dst=0)
