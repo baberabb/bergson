@@ -209,7 +209,6 @@ class MemmapQueryWriter(QueryWriter):
             self.scores["module_id"][:] = zeros.astype(np.uint16)
             self.scores["written"][:] = False
             self.scores.flush()
-            os.fsync(self.scores._mmap.fileno())  # type: ignore
 
             # Persist metadata for future runs
             with open(scores_path + "/info.json", "w") as f:

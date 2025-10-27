@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -340,6 +341,9 @@ def filter_complete_indices_memmap(
     root = Path(query_cfg.scores_path) / f"rank_{rank}"
     root.mkdir(parents=True, exist_ok=True)
 
+    if not os.path.exists(root / "info.json"):
+        return batches
+
     info = json.load(open(root / "info.json"))
     scores_dtype = np.dtype(info["dtype"])
 
@@ -381,8 +385,6 @@ def filter_complete_indices_csv(
     """
 
     # find and concatenate all the scores.csv files into a single dataframe
-    import pandas as pd
-
     dfs_dir = Path(query_cfg.scores_path) / f"rank_{rank}"
     dfs_dir.mkdir(parents=True, exist_ok=True)
     available_dfs = [
