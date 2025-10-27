@@ -368,6 +368,7 @@ def filter_complete_indices_csv(
     import pandas as pd
 
     dfs_dir = Path(query_cfg.scores_path) / f"rank_{rank}"
+    dfs_dir.mkdir(parents=True, exist_ok=True)
     available_dfs = [
         pd.read_csv(dfs_dir / file)
         for file in sorted(os.listdir(dfs_dir))
