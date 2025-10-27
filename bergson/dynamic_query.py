@@ -326,6 +326,33 @@ def get_nearest_query(
     return callback
 
 
+def filter_complete_indices_memmap(
+    index_cfg: IndexConfig,
+    query_cfg: QueryConfig,
+    batches: list[list[int]],
+    rank: int,
+):
+    """
+    Filter out indices that are already written to in the scores.bin file.
+    """
+    info = json.load(open(Path(query_cfg.scores_path) / f"rank_{rank}" / "info.json"))
+    scores_dtype = np.dtype(info["dtype"])
+
+    scores_path = Path(query_cfg.scores_path) / f"rank_{rank}" / "scores.bin"
+    scores = np.memmap(scores_path, dtype=scores_dtype, mode="r")
+
+    target_writes_per_index = len(query_cfg.modules) if index_cfg.module_wise else 1
+
+    indices = scores["index"]
+    unwritten_indices = set(indices[~scores["written"]].tolist())
+
+    batches = [[idx for idx in batch if idx in unwritten_indices] for batch in batches]
+
+    batches = [batch for batch in batches if len(batch) > 0]
+
+    return batches
+
+
 def filter_complete_indices_csv(
     index_cfg: IndexConfig,
     query_cfg: QueryConfig,
@@ -584,6 +611,17 @@ def worker(
             rank=rank,
             module_wise=index_cfg.module_wise,
         )
+        # query = MemmapQueryWriter(
+        #     base_query_callback,  # type: ignore
+        #     len(ds),
+        #     num_scores,
+        #     str(Path(query_cfg.scores_path)),
+        #     dtype=scores_dtype,
+        #     rank=rank,
+        #     num_modules=len(query_cfg.modules),
+        #     module_wise=index_cfg.module_wise,
+        #     flush_batches_interval=1000,
+        # )
         collect_gradients(
             model,
             ds,
@@ -614,6 +652,9 @@ def worker(
             batches = allocate_batches(
                 ds_shard["length"][:], index_cfg.token_batch_size
             )
+            # batches = filter_complete_indices_memmap(index_cfg, query_cfg, batches, rank)
+            batches = filter_complete_indices_csv(index_cfg, query_cfg, batches, rank)
+
             query = QueryWriter(
                 base_query_callback,  # type: ignore
                 len(ds_shard),
@@ -624,6 +665,17 @@ def worker(
                 rank=rank,
                 module_wise=index_cfg.module_wise,
             )
+            # query = MemmapQueryWriter(
+            #     base_query_callback,  # type: ignore
+            #     len(ds_shard),
+            #     num_scores,
+            #     str(Path(query_cfg.scores_path) / f"shard-{shard_id:05d}"),
+            #     dtype=scores_dtype,
+            #     device=model.device,
+            #     rank=rank,
+            #     module_wise=index_cfg.module_wise,
+            #     flush_batches_interval=1000,
+            # )
             collect_gradients(
                 model,
                 ds_shard,

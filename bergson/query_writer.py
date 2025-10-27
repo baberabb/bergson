@@ -1,12 +1,13 @@
 import csv
+import json
 import os
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
 import pandas as pd
-
-# import numpy as np
 import torch
+import torch.distributed as dist
 
 
 class QueryWriter:
@@ -129,106 +130,147 @@ class QueryWriter:
                 writer.writerow(row)
 
 
-# class NpQueryWriter:
-#     """
-#     Wraps a query scoring callback and stores the resulting scores in a
-#     structured numpy array.
-#     """
+class MemmapQueryWriter:
+    """
+    Wraps a query scoring callback and stores the resulting scores in a tensor.
+    """
 
-#     def __init__(
-#         self,
-#         query_callback: Callable[..., torch.Tensor],
-#         num_items: int,
-#         num_scores: int,
-#         scores_path: str,
-#         *,
-#         dtype: torch.dtype = torch.float32,
-#         device: torch.device | str = "cpu",
-#         rank: int,
-#         module_wise: bool = False,
-#         rows_per_file: int = 10_000_000,
-#         num_modules: int = 0,
-#     ):
-#         self._query_callback = query_callback
-#         self._scores_path = scores_path
-#         self.rank = rank
-#         self.dtype = dtype
-#         self.module_wise = module_wise
-#         self.num_scores = num_scores
-#         self.rows_per_file = rows_per_file
+    def __init__(
+        self,
+        query_callback: Callable[..., torch.Tensor],
+        num_items: int,
+        num_scores: int,
+        scores_path: str,
+        *,
+        dtype: torch.dtype = torch.float32,
+        rank: int,
+        modules: list[str],
+        module_wise: bool = False,
+        flush_batches_interval: int = 1000,
+    ):
+        assert num_scores == 1, "MemmapQueryWriter only supports single-score queries"
 
-#         structured_dtype = np.dtype([
-#             ('num_writes', np.uint16),
-#             ('running', np.bool_),
-#             ('score', np.float32),
-#             ('sum_score', np.float32)
-#         ])
+        self._query_callback = query_callback
+        self._scores_path = Path(scores_path)
+        self.rank = rank
+        self.dtype = dtype
+        self.module_wise = module_wise
 
-#         scores_file_path = os.path.join(scores_path, "scores.bin")
+        self.flush_interval = flush_batches_interval
+        self.num_items_since_flush = 0
 
-#         # ── 1. Rank-0 creates file & metadata exactly once ─────────────────────────
-#         if rank == 0:
-#             # Ensure the directory exists
-#             os.makedirs(scores_path, exist_ok=True)
+        self.module_to_idx = {mod: i for i, mod in enumerate(modules)}
+        self.num_modules = len(modules)
 
-#             # Allocate (extends file to right size without writing zeros byte-by-byte)
-#             nbytes = np.dtype(struct_dtype).itemsize * num_items  # type: ignore
-#             with open(self._scores_path, "wb") as f:
-#                 f.truncate(nbytes)
+        scores_file_path = os.path.join(scores_path, "scores.bin")
 
-#                 # Force the directory entry + data to disk *before* other ranks
-# continue
-#                 os.fsync(f.fileno())
+        scores_dtype = np.dtype(
+            [
+                ("index", np.uint32),
+                ("score", np.float32),
+                ("sum_of_squares", np.float32),
+                ("module_id", np.uint16),
+            ]
+        )
 
-#             # Persist metadata for future runs
-#             with open(scores_path + "/info.json", "w") as f:
-#                 json.dump({"num_grads": num_grads, "dtype": struct_dtype}, f,
-# indent=2)
+        if rank == 0 and not os.path.exists(scores_file_path):
+            self.scores = np.memmap(
+                str(scores_file_path),
+                dtype=scores_dtype,
+                mode="w+",
+                shape=(num_items * self.num_modules,),
+            )
 
-#         # ── 2. Everyone blocks until the file is
-# # definitely there & sized ─────────────
-#         if dist.is_initialized():
-#             dist.barrier()
+            # Write zeros
+            zeros = np.zeros(len(self.scores), dtype=np.float32)
+            self.scores["score"][:] = zeros
+            self.scores["sum_of_squares"][:] = zeros
+            self.scores["index"][:] = zeros.astype(np.uint32)
+            self.scores["module_id"][:] = zeros.astype(np.uint16)
+            self.scores.flush()
+            os.fsync(self.scores._mmap.fileno())  # type: ignore
 
-#             if rank == 0:
-#                 data = np.memmap(
-#                     str(self._scores_path / "scores.bin"),
-#                     dtype=structured_dtype,
-#                     mode='w+',
-#                     shape=(num_items,)
-#                 )
+            # Persist metadata for future runs
+            with open(scores_path + "/info.json", "w") as f:
+                json.dump(
+                    {
+                        "num_items": num_items,
+                        "num_modules": self.num_modules,
+                        "dtype": scores_dtype,
+                    },
+                    f,
+                    indent=2,
+                )
 
-#             if dist.is_initialized():
-#                 dist.barrier()
+        if dist.is_initialized():
+            dist.barrier()
 
-#             data = np.memmap(
-#                 str(self._scores_path / "scores.bin"),
-#                 dtype=structured_dtype,
-#                 mode='r+',
-#                 shape=(num_items,)
-#             )
+        self.scores = np.memmap(
+            str(scores_file_path),
+            dtype=scores_dtype,
+            mode="r+",
+            shape=(num_items * self.num_modules,),
+        )
 
-#             self._data = data
+    def _write_to_memmap_mod(
+        self,
+        indices: list[int],
+        scores: torch.Tensor,
+        sum_of_squares: torch.Tensor,
+        module: str,
+    ):
+        module_idx = self.module_to_idx[module]
+        np_indices = np.array(indices, dtype=np.uint32)
+        np_indices = np_indices * self.num_modules + module_idx
 
+        self.scores["index"][indices] = np.array(indices, dtype=np.uint32)
+        self.scores["score"][indices] = (
+            scores.cpu().numpy().astype(np.float32).flatten()
+        )
+        self.scores["sum_of_squares"][indices] = (
+            sum_of_squares.cpu().numpy().astype(np.float32).flatten()
+        )
+        self.scores["written"][indices] = True
 
-#     def __call__(
-#         self,
-#         indices: list[int],
-#         mod_grads: dict[str, torch.Tensor],
-#         name: str | None = None,
-#     ):
-#         if name:
-#             # Accumulate module-wise scores
-#             scores, sum_of_squares = self._query_callback(mod_grads, name)
-#             sum_of_squares = sum_of_squares.to(device="cpu", dtype=self.dtype)
-#             scores = scores.to(device="cpu", dtype=self.dtype)
+        self.num_items_since_flush += 1
+        if self.num_items_since_flush >= self.flush_interval:
+            self.num_items_since_flush = 0
+            self.scores.flush()
 
-#             if scores.ndim == 1:
-#                 scores = scores.unsqueeze(-1)
+    def _write_to_memmap(self, indices: list[int], scores: torch.Tensor):
+        self.scores["index"][indices] = np.array(indices, dtype=np.uint32)
+        self.scores["score"][indices] = (
+            scores.cpu().numpy().astype(np.float32).flatten()
+        )
+        self.scores["written"][indices] = True
 
-#         else:
-#             scores = self._query_callback(mod_grads)
-#             scores = scores.to(device="cpu", dtype=self.dtype)
+        self.num_items_since_flush += 1
+        if self.num_items_since_flush >= self.flush_interval:
+            self.num_items_since_flush = 0
+            self.scores.flush()
 
-#             if scores.ndim == 1:
-#                 scores = scores.unsqueeze(-1)
+    def __call__(
+        self,
+        indices: list[int],
+        mod_grads: dict[str, torch.Tensor],
+        name: str | None = None,
+    ):
+        if name:
+            # Accumulate module-wise scores
+            scores, sum_of_squares = self._query_callback(mod_grads, name)
+            sum_of_squares = sum_of_squares.to(device="cpu", dtype=self.dtype)
+            scores = scores.to(device="cpu", dtype=self.dtype)
+
+            if scores.ndim == 1:
+                scores = scores.unsqueeze(-1)
+
+            self._write_to_memmap_mod(indices, scores, sum_of_squares, name)
+
+        else:
+            scores = self._query_callback(mod_grads)
+            scores = scores.to(device="cpu", dtype=self.dtype)
+
+            if scores.ndim == 1:
+                scores = scores.unsqueeze(-1)
+
+            self._write_to_memmap(indices, scores)
