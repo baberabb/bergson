@@ -323,6 +323,59 @@ def get_nearest_query(
     return callback
 
 
+def filter_complete_indices(
+    index_cfg: IndexConfig, query_cfg: QueryConfig, batches: list[list[int]], rank: int
+):
+    """
+    Filter out indices that are present in the scores.csv file.
+    """
+
+    import shutil
+
+    scores_csv_path = Path(query_cfg.scores_path) / f"rank_{rank}" / "scores.csv"
+    if not scores_csv_path.exists():
+        return batches
+
+    raw_scores_csv_path = scores_csv_path.parent / f"raw_{scores_csv_path.name}"
+    shutil.copy2(scores_csv_path, raw_scores_csv_path)
+
+    target_rows_per_index = len(query_cfg.modules) if index_cfg.module_wise else 1
+
+    # Remove rows for indices with fewer than target_rows_per_index
+    # rows from scores.csv file
+    import pandas as pd
+
+    df = pd.read_csv(raw_scores_csv_path)
+    if df.empty:
+        # Create an empty dataset with the right schema manually
+        scores_ds = Dataset.from_dict({col: [] for col in df.columns})
+    else:
+        scores_ds = Dataset.from_pandas(df)
+
+    # scores_ds = Dataset.from_csv(raw_scores_csv_path)
+    scores_ds = assert_type(Dataset, scores_ds)
+    len_scores_ds = len(scores_ds)
+    # Group by indices and filter out indices with fewer thantarget_rows_per_index rows
+    scores_ds = scores_ds.groupby("index").filter(
+        lambda x: len(x) >= target_rows_per_index
+    )
+    # Convert back to a csv and save to scores_csv_path
+    scores_ds.to_csv(scores_csv_path)
+
+    print(f"Removed {len_scores_ds - len(scores_ds)} rows from scores.csv file")
+
+    scores_indices = scores_ds["index"].tolist()
+
+    batches = [
+        [idx for idx in batch if idx not in scores_indices]
+        for batch in batches
+        if len(batch) > 0
+    ]
+    print(f"Filtered {len(scores_indices)} indices from batches")
+
+    return batches
+
+
 def worker(
     rank: int,
     world_size: int,
@@ -489,6 +542,8 @@ def worker(
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
+        batches = filter_complete_indices(index_cfg, query_cfg, batches, rank)
+
         query = Query(
             base_query_callback,
             len(ds),

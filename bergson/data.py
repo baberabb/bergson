@@ -1,3 +1,4 @@
+import csv
 import json
 import math
 import os
@@ -44,13 +45,21 @@ class Query:
     ):
         self._query_callback = query_callback
         self._scores_path = Path(scores_path)
-        self.scores = torch.zeros((num_items, num_scores), dtype=dtype, device="cpu")
         self.rank = rank
         self.num_written = 0
-
+        self.dtype = dtype
         self.module_wise = module_wise
-        if self.module_wise:
-            self.sum_of_squares = torch.zeros((num_items,), dtype=dtype, device="cpu")
+
+        self._csv_path = self._scores_path / f"rank_{rank}" / "scores.csv"
+        self._csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Initialize CSV file with header
+        with open(self._csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            header = ["index"] + [f"score_{i}" for i in range(num_scores)]
+            if self.module_wise:
+                header.append("sum_of_squares")
+            writer.writerow(header)
 
     def __call__(
         self,
@@ -61,44 +70,40 @@ class Query:
         if name:
             # Accumulate module-wise scores
             scores, sum_of_squares = self._query_callback(mod_grads, name)
-            self.sum_of_squares[indices] += sum_of_squares.to(
-                self.sum_of_squares.device
-            )
+            sum_of_squares = sum_of_squares.to(device="cpu", dtype=self.dtype)
+            scores = scores.to(device="cpu", dtype=self.dtype)
 
             if scores.ndim == 1:
                 scores = scores.unsqueeze(-1)
 
-            self.scores[indices] += scores.to(
-                device=self.scores.device, dtype=self.scores.dtype
-            )
+            self._write_to_csv(indices, scores, sum_of_squares)
 
         else:
             scores = self._query_callback(mod_grads)
+            scores = scores.to(device="cpu", dtype=self.dtype)
 
             if scores.ndim == 1:
                 scores = scores.unsqueeze(-1)
 
-            scores = scores.to(device=self.scores.device, dtype=self.scores.dtype)
-            self.scores[indices] = scores
+            self._write_to_csv(indices, scores)
 
-    def save_scores(self, rank: int):
-        dataset = Dataset.from_dict(
-            {
-                "scores": self.scores.cpu().numpy().tolist(),
-                "indices": list(range(len(self.scores))),
-            }
-        )
-        dataset.save_to_disk(self._scores_path / f"rank_{rank}" / "scores.hf")
-        if self.module_wise:
-            dataset = Dataset.from_dict(
-                {
-                    "sum_of_squares": self.sum_of_squares.cpu().numpy().tolist(),
-                    "indices": list(range(len(self.sum_of_squares))),
-                }
-            )
-            dataset.save_to_disk(
-                self._scores_path / f"rank_{rank}" / "sum_of_squares.hf"
-            )
+    def _write_to_csv(
+        self,
+        indices: list[int],
+        scores: torch.Tensor,
+        sum_of_squares: torch.Tensor | None = None,
+    ):
+        """Write sum_of_squares, scores, and indices to CSV."""
+        with open(self._csv_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            for idx in indices:
+                row = [
+                    idx,
+                    scores[idx].tolist(),
+                ]
+                if sum_of_squares is not None:
+                    row.append(sum_of_squares[idx].item())
+                writer.writerow(row)
 
 
 @dataclass
