@@ -326,7 +326,7 @@ def get_nearest_query(
     return callback
 
 
-def filter_complete_indices(
+def filter_complete_indices_csv(
     index_cfg: IndexConfig,
     query_cfg: QueryConfig,
     batches: list[list[int]],
@@ -392,6 +392,10 @@ def filter_complete_indices(
         for batch in batches
         if len(batch) > 0
     ]
+
+    # Filter out empty batches
+    batches = [batch for batch in batches if len(batch) > 0]
+
     print(f"Filtered {len(scores_indices)} indices from batches")
 
     return batches
@@ -564,10 +568,14 @@ def worker(
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
-        batches = filter_complete_indices(index_cfg, query_cfg, batches, rank)
+        batches = filter_complete_indices_csv(index_cfg, query_cfg, batches, rank)
+
+        if not batches:
+            print(f"No batches to query for rank {rank}")
+            return
 
         query = QueryWriter(
-            base_query_callback,
+            base_query_callback,  # type: ignore
             len(ds),
             num_scores,
             str(Path(query_cfg.scores_path)),
@@ -607,7 +615,7 @@ def worker(
                 ds_shard["length"][:], index_cfg.token_batch_size
             )
             query = QueryWriter(
-                base_query_callback,
+                base_query_callback,  # type: ignore
                 len(ds_shard),
                 num_scores,
                 str(Path(query_cfg.scores_path) / f"shard-{shard_id:05d}"),
