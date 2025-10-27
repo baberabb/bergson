@@ -1,7 +1,6 @@
 import json
 import os
 import socket
-from collections import defaultdict
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
@@ -353,22 +352,36 @@ def filter_complete_indices_memmap(
     if not index_cfg.module_wise:
         indices = scores["index"]
         written_mask = scores["written"]
-        written_indices = set(indices[written_mask].tolist())
+        written_indices = set(np.unique(indices[written_mask]).tolist())
+        print(
+            f"Found {len(written_indices)} written indices in "
+            f"rank_{rank} scores.bin file"
+        )
     else:
         indices = scores["index"]
         written_mask = scores["written"]
 
-        # Build a mapping of module -> written indices
-        written_set = defaultdict(set)
-        for idx, written in zip(indices, written_mask):
-            written_set[idx].add(written)
+        # u: unique module ids, inv: 0..len(u)-1
+        u, inv = np.unique(indices, return_inverse=True)
+        # occurrences per module
+        counts = np.bincount(inv)
+        true_counts = np.bincount(inv, weights=written_mask.astype(np.int64))
+        written_indices = set(u[true_counts == counts].tolist())
+        print(
+            f"Found {len(written_indices)} written indices in "
+            f"rank_{rank} scores.bin file"
+        )
 
-        written_indices = {idx for idx, writes in written_set.items() if all(writes)}
-
+    len_batches = len(batches)
     batches = [
         [idx for idx in batch if idx not in written_indices] for batch in batches
     ]
     batches = [batch for batch in batches if len(batch) > 0]
+
+    print(
+        f"Filtered {len_batches - len(batches)} batches from "
+        f"rank_{rank} scores.bin file"
+    )
 
     return batches
 

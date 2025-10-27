@@ -28,6 +28,13 @@ class QueryWriter(ABC):
         """
         raise NotImplementedError("Subclasses must implement this method")
 
+    @abstractmethod
+    def flush(self):
+        """
+        Flush the query writer.
+        """
+        raise NotImplementedError("Subclasses must implement this method")
+
 
 class CsvQueryWriter(QueryWriter):
     """
@@ -148,6 +155,9 @@ class CsvQueryWriter(QueryWriter):
                 row = [idx] + score.tolist()
                 writer.writerow(row)
 
+    def flush(self):
+        pass
+
 
 class MemmapQueryWriter(QueryWriter):
     """
@@ -188,18 +198,9 @@ class MemmapQueryWriter(QueryWriter):
         struct_dtype = {
             "names": ["index", "score", "sum_of_squares", "module_id", "written"],
             "formats": ["uint32", "float32", "float32", "uint16", "bool"],
+            "offsets": [0, 4, 8, 12, 14],
             "itemsize": 16,
         }
-
-        scores_dtype = np.dtype(
-            [
-                ("index", np.uint32),
-                ("score", np.float32),
-                ("sum_of_squares", np.float32),
-                ("module_id", np.uint16),
-                ("written", np.bool_),
-            ]
-        )
 
         if rank == 0 and not os.path.exists(scores_file_path):
             self.scores = np.memmap(
@@ -216,7 +217,7 @@ class MemmapQueryWriter(QueryWriter):
             self.scores["index"][:] = zeros.astype(np.uint32)
             self.scores["module_id"][:] = zeros.astype(np.uint16)
             self.scores["written"][:] = False
-            self.scores.flush()
+            self.flush()
 
             # Persist metadata for future runs
             with open(scores_path + "/info.json", "w") as f:
@@ -236,7 +237,7 @@ class MemmapQueryWriter(QueryWriter):
 
         self.scores = np.memmap(
             str(scores_file_path),
-            dtype=scores_dtype,
+            dtype=np.dtype(struct_dtype),  # type: ignore
             mode="r+",
             shape=(num_items * self.num_modules,),
         )
@@ -249,7 +250,7 @@ class MemmapQueryWriter(QueryWriter):
         module: str,
     ):
         module_idx = self.module_to_idx[module]
-        np_indices = np.array(indices, dtype=np.uint32)
+        np_indices = np.array(indices, dtype=np.intp)
         np_indices = np_indices * self.num_modules + module_idx
 
         self.scores["index"][np_indices] = np.array(indices, dtype=np.uint32)
@@ -264,8 +265,7 @@ class MemmapQueryWriter(QueryWriter):
 
         self.num_batches_since_flush += 1
         if self.num_batches_since_flush >= self.flush_interval:
-            self.num_batches_since_flush = 0
-            self.scores.flush()
+            self.flush()
 
     def _write_to_memmap(self, indices: list[int], scores: torch.Tensor):
         self.scores["index"][indices] = np.array(indices, dtype=np.uint32)
@@ -276,8 +276,7 @@ class MemmapQueryWriter(QueryWriter):
 
         self.num_batches_since_flush += 1
         if self.num_batches_since_flush >= self.flush_interval:
-            self.num_batches_since_flush = 0
-            self.scores.flush()
+            self.flush()
 
     def __call__(
         self,
@@ -304,3 +303,7 @@ class MemmapQueryWriter(QueryWriter):
                 scores = scores.unsqueeze(-1)
 
             self._write_to_memmap(indices, scores)
+
+    def flush(self):
+        self.scores.flush()
+        self.num_batches_since_flush = 0
