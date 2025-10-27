@@ -24,7 +24,6 @@ from .build import estimate_advantage
 from .collection import collect_gradients
 from .data import (
     IndexConfig,
-    Query,
     QueryConfig,
     allocate_batches,
     load_data_string,
@@ -33,6 +32,7 @@ from .data import (
 )
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
+from .query_writer import Query
 from .utils import assert_type, get_layer_list
 
 

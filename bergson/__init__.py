@@ -6,6 +6,7 @@ from .data import AttentionConfig, DataConfig, IndexConfig, load_gradients
 from .faiss_index import FaissConfig
 from .gradcheck import FiniteDiff
 from .gradients import GradientCollector, GradientProcessor
+from .query_writer import Query
 
 __all__ = [
     "collect_gradients",
@@ -18,4 +19,5 @@ __all__ = [
     "IndexConfig",
     "DataConfig",
     "AttentionConfig",
+    "Query",
 ]
