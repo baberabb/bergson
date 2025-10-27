@@ -32,7 +32,7 @@ from .data import (
 )
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
-from .query_writer import Query
+from .query_writer import QueryWriter
 from .utils import assert_type, get_layer_list
 
 
@@ -562,7 +562,7 @@ def worker(
         batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
         batches = filter_complete_indices(index_cfg, query_cfg, batches, rank)
 
-        query = Query(
+        query = QueryWriter(
             base_query_callback,
             len(ds),
             num_scores,
@@ -602,7 +602,7 @@ def worker(
             batches = allocate_batches(
                 ds_shard["length"][:], index_cfg.token_batch_size
             )
-            query = Query(
+            query = QueryWriter(
                 base_query_callback,
                 len(ds_shard),
                 num_scores,

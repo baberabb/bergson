@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 
 
-class Query:
+class QueryWriter:
     """
     Wraps a query scoring callback and stores the resulting scores in a tensor.
     """

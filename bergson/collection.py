@@ -10,9 +10,10 @@ from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from .data import Query, create_index, pad_and_tensor
+from .data import create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
+from .query_writer import QueryWriter
 
 
 def collect_gradients(
@@ -31,7 +32,7 @@ def collect_gradients(
     save_index: bool = True,
     save_processor: bool = True,
     drop_columns: bool = False,
-    query: Query | None = None,
+    query: QueryWriter | None = None,
     module_wise: bool = False,
     create_custom_query: bool = False,
 ):
