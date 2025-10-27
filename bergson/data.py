@@ -54,12 +54,13 @@ class Query:
         self._csv_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Initialize CSV file with header
-        with open(self._csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            header = ["index"] + [f"score_{i}" for i in range(num_scores)]
-            if self.module_wise:
-                header.append("sum_of_squares")
-            writer.writerow(header)
+        if not self._csv_path.exists():
+            with open(self._csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                header = ["index"] + [f"score_{i}" for i in range(num_scores)]
+                if self.module_wise:
+                    header.append("sum_of_squares")
+                writer.writerow(header)
 
     def __call__(
         self,
@@ -76,7 +77,7 @@ class Query:
             if scores.ndim == 1:
                 scores = scores.unsqueeze(-1)
 
-            self._write_to_csv(indices, scores, sum_of_squares)
+            self._write_to_csv_mod(indices, scores, sum_of_squares)
 
         else:
             scores = self._query_callback(mod_grads)
@@ -87,22 +88,22 @@ class Query:
 
             self._write_to_csv(indices, scores)
 
-    def _write_to_csv(
-        self,
-        indices: list[int],
-        scores: torch.Tensor,
-        sum_of_squares: torch.Tensor | None = None,
+    def _write_to_csv_mod(
+        self, indices: list[int], scores: torch.Tensor, sum_of_squares: torch.Tensor
     ):
         """Write sum_of_squares, scores, and indices to CSV."""
         with open(self._csv_path, "a", newline="") as f:
             writer = csv.writer(f)
-            for idx in indices:
-                row = [
-                    idx,
-                    scores[idx].tolist(),
-                ]
-                if sum_of_squares is not None:
-                    row.append(sum_of_squares[idx].item())
+            for idx, score, ss in zip(indices, scores, sum_of_squares):
+                row = [idx] + score.tolist() + [ss.item()]
+                writer.writerow(row)
+
+    def _write_to_csv(self, indices: list[int], scores: torch.Tensor):
+        """Write sum_of_squares, scores, and indices to CSV."""
+        with open(self._csv_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            for idx, score in zip(indices, scores):
+                row = [idx] + score.tolist()
                 writer.writerow(row)
 
 
@@ -475,6 +476,14 @@ def load_data_string(
             # Automatically use load_from_disk if appropriate
             if "load_from_disk" in str(e):
                 ds = Dataset.load_from_disk(data_str, keep_in_memory=False)
+                if "[" in split:
+                    split = split.split("[")[1].split("]")[0]
+                    start, end = split.split(":")
+                    print(
+                        f"selecting {split} from {ds.num_rows} rows using "
+                        f"start = {start} and end = {end}"
+                    )
+                    ds = ds.select(range(int(start), int(end)))
             else:
                 raise e
 
