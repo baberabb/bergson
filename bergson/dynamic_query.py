@@ -648,7 +648,6 @@ def worker(
                 rank=rank,
                 modules=query_cfg.modules,
                 module_wise=index_cfg.module_wise,
-                flush_batches_interval=1000,
             )
         collect_gradients(
             model,
@@ -708,7 +707,6 @@ def worker(
                     modules=query_cfg.modules,
                     rank=rank,
                     module_wise=index_cfg.module_wise,
-                    flush_batches_interval=1000,
                 )
             collect_gradients(
                 model,

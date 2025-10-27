@@ -165,9 +165,10 @@ class MemmapQueryWriter(QueryWriter):
         rank: int,
         modules: list[str],
         module_wise: bool = False,
-        flush_batches_interval: int = 1000,
+        flush_batches_interval: int = 40,
     ):
         assert num_scores == 1, "MemmapQueryWriter only supports single-score queries"
+        assert module_wise, "MemmapQueryWriter only supports module-wise queries"
 
         self._query_callback = query_callback
         self._scores_path = Path(scores_path)
@@ -176,12 +177,19 @@ class MemmapQueryWriter(QueryWriter):
         self.module_wise = module_wise
 
         self.flush_interval = flush_batches_interval
-        self.num_items_since_flush = 0
+        self.num_batches_since_flush = 0
 
         self.module_to_idx = {mod: i for i, mod in enumerate(modules)}
         self.num_modules = len(modules)
 
         scores_file_path = os.path.join(scores_path, "scores.bin")
+
+        # Build a json-serializable structured dtype
+        struct_dtype = {
+            "names": ["index", "score", "sum_of_squares", "module_id", "written"],
+            "formats": ["uint32", "float32", "float32", "uint16", "bool"],
+            "itemsize": 16,
+        }
 
         scores_dtype = np.dtype(
             [
@@ -196,7 +204,7 @@ class MemmapQueryWriter(QueryWriter):
         if rank == 0 and not os.path.exists(scores_file_path):
             self.scores = np.memmap(
                 str(scores_file_path),
-                dtype=scores_dtype,
+                dtype=np.dtype(struct_dtype),  # type: ignore
                 mode="w+",
                 shape=(num_items * self.num_modules,),
             )
@@ -216,7 +224,7 @@ class MemmapQueryWriter(QueryWriter):
                     {
                         "num_items": num_items,
                         "num_modules": self.num_modules,
-                        "dtype": scores_dtype,
+                        "dtype": struct_dtype,
                         "module_to_idx": self.module_to_idx,
                     },
                     f,
@@ -252,10 +260,11 @@ class MemmapQueryWriter(QueryWriter):
             sum_of_squares.cpu().numpy().astype(np.float32).flatten()
         )
         self.scores["written"][np_indices] = True
+        self.scores["module_id"][np_indices] = module_idx
 
-        self.num_items_since_flush += 1
-        if self.num_items_since_flush >= self.flush_interval:
-            self.num_items_since_flush = 0
+        self.num_batches_since_flush += 1
+        if self.num_batches_since_flush >= self.flush_interval:
+            self.num_batches_since_flush = 0
             self.scores.flush()
 
     def _write_to_memmap(self, indices: list[int], scores: torch.Tensor):
@@ -265,9 +274,9 @@ class MemmapQueryWriter(QueryWriter):
         )
         self.scores["written"][indices] = True
 
-        self.num_items_since_flush += 1
-        if self.num_items_since_flush >= self.flush_interval:
-            self.num_items_since_flush = 0
+        self.num_batches_since_flush += 1
+        if self.num_batches_since_flush >= self.flush_interval:
+            self.num_batches_since_flush = 0
             self.scores.flush()
 
     def __call__(
