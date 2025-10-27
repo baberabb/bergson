@@ -237,8 +237,11 @@ def get_module_wise_mean_query(
 
     @torch.inference_mode()
     def callback(mod_grads: dict[str, torch.Tensor], name: str):
-        module_scores = mod_grads[name] @ callback_query[name]
-        sum_of_squares = (mod_grads[name] ** 2).sum(dim=1)
+        module_scores = torch.inner(mod_grads[name], callback_query[name]).to(
+            "cpu", non_blocking=True
+        )
+        mod_grads[name].pow_(2)
+        sum_of_squares = mod_grads[name].sum(dim=1).to("cpu", non_blocking=True)
 
         return module_scores, sum_of_squares
 
@@ -355,7 +358,8 @@ def filter_complete_indices(
     # scores_ds = Dataset.from_csv(raw_scores_csv_path)
     scores_ds = assert_type(Dataset, scores_ds)
     len_scores_ds = len(scores_ds)
-    # Group by indices and filter out indices with fewer thantarget_rows_per_index rows
+    # Group by indices and filter out indices with fewer than
+    # target_rows_per_index rows
     scores_ds = scores_ds.groupby("index").filter(
         lambda x: len(x) >= target_rows_per_index
     )
@@ -396,7 +400,7 @@ def worker(
             init_method=f"tcp://{addr}:{port}",
             device_id=torch.device(f"cuda:{rank}"),
             rank=rank,
-            timeout=timedelta(hours=1),
+            timeout=timedelta(minutes=20),
             world_size=world_size,
         )
 
@@ -497,8 +501,9 @@ def worker(
             reshape_to_square=index_cfg.reshape_to_square,
             projection_type=index_cfg.projection_type,
         )
-        if rank == 0 and index_cfg.save_processor:
-            processor.save(index_cfg.partial_run_path)
+        if index_cfg.save_processor:
+            if rank == 0:
+                processor.save(index_cfg.partial_run_path)
 
     if index_cfg.split_attention_modules:
         attention_cfgs = {
@@ -548,7 +553,7 @@ def worker(
             base_query_callback,
             len(ds),
             num_scores,
-            str(Path(query_cfg.scores_path) / "scores.hf"),
+            str(Path(query_cfg.scores_path)),
             dtype=scores_dtype,
             device=model.device,
             rank=rank,
@@ -560,6 +565,7 @@ def worker(
             processor,
             index_cfg.partial_run_path,
             batches=batches,
+            token_batch_size=index_cfg.token_batch_size,
             kl_divergence=index_cfg.loss_fn == "kl",
             loss_reduction=index_cfg.loss_reduction,
             skip_preconditioners=index_cfg.skip_preconditioners,
@@ -587,9 +593,7 @@ def worker(
                 base_query_callback,
                 len(ds_shard),
                 num_scores,
-                str(
-                    Path(query_cfg.scores_path) / f"shard-{shard_id:05d}" / "scores.hf"
-                ),
+                str(Path(query_cfg.scores_path) / f"shard-{shard_id:05d}"),
                 dtype=scores_dtype,
                 device=model.device,
                 rank=rank,
@@ -600,6 +604,7 @@ def worker(
                 ds_shard,
                 processor,
                 os.path.join(index_cfg.partial_run_path, f"shard-{shard_id:05d}"),
+                token_batch_size=index_cfg.token_batch_size,
                 batches=batches,
                 kl_divergence=index_cfg.loss_fn == "kl",
                 loss_reduction=index_cfg.loss_reduction,
@@ -650,6 +655,8 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
     ds = load_data_string(
         index_cfg.data.dataset, index_cfg.data.split, streaming=index_cfg.streaming
     )
+
+    os.makedirs(index_cfg.partial_run_path, exist_ok=True)
 
     remove_columns = ds.column_names if index_cfg.drop_columns else None
     ds = ds.map(
