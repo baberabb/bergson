@@ -327,48 +327,61 @@ def get_nearest_query(
 
 
 def filter_complete_indices(
-    index_cfg: IndexConfig, query_cfg: QueryConfig, batches: list[list[int]], rank: int
+    index_cfg: IndexConfig,
+    query_cfg: QueryConfig,
+    batches: list[list[int]],
+    rank: int,
+    rows_per_file: int = 10_000_000,
 ):
     """
     Filter out indices that are present in the scores.csv file.
     """
 
-    import shutil
-
-    scores_csv_path = Path(query_cfg.scores_path) / f"rank_{rank}" / "scores.csv"
-    if not scores_csv_path.exists():
-        return batches
-
-    raw_scores_csv_path = scores_csv_path.parent / f"raw_{scores_csv_path.name}"
-    shutil.copy2(scores_csv_path, raw_scores_csv_path)
-
-    target_rows_per_index = len(query_cfg.modules) if index_cfg.module_wise else 1
-
-    # Remove rows for indices with fewer than target_rows_per_index
-    # rows from scores.csv file
+    # find and concatenate all the scores.csv files into a single dataframe
     import pandas as pd
 
-    df = pd.read_csv(raw_scores_csv_path)
-    if df.empty:
-        # Create an empty dataset with the right schema manually
-        scores_ds = Dataset.from_dict({col: [] for col in df.columns})
-    else:
-        scores_ds = Dataset.from_pandas(df)
+    dfs_dir = Path(query_cfg.scores_path) / f"rank_{rank}"
+    available_dfs = [
+        pd.read_csv(dfs_dir / file)
+        for file in sorted(os.listdir(dfs_dir))
+        if file.endswith(".csv")
+    ]
+    scores_df = pd.concat(available_dfs)
 
-    # scores_ds = Dataset.from_csv(raw_scores_csv_path)
-    scores_ds = assert_type(Dataset, scores_ds)
-    len_scores_ds = len(scores_ds)
+    if scores_df.empty:
+        return batches
+
+    # Archive unfiltered data
+    raw_scores_csv_path = Path(query_cfg.scores_path) / f"rank_{rank}_raw"
+    for i in range(0, len(scores_df), rows_per_file):
+        scores_df.iloc[i : i + rows_per_file].to_csv(
+            str(raw_scores_csv_path / f"scores_{i:02d}.csv")
+        )
+
+    target_rows_per_index = len(query_cfg.modules) if index_cfg.module_wise else 1
+    original_scores_df_len = len(scores_df)
+
+    # Remove rows for indices with fewer than target_rows_per_index
+
     # Group by indices and filter out indices with fewer than
     # target_rows_per_index rows
-    scores_ds = scores_ds.groupby("index").filter(
+    scores_df = scores_df.groupby("index").filter(
         lambda x: len(x) >= target_rows_per_index
     )
-    # Convert back to a csv and save to scores_csv_path
-    scores_ds.to_csv(scores_csv_path)
+    scores_df = assert_type(pd.DataFrame, scores_df)
+    # Convert back to a csv and save
+    for i in range(0, len(scores_df), rows_per_file):
+        scores_df.iloc[i : i + rows_per_file].to_csv(
+            str(Path(query_cfg.scores_path) / f"rank_{rank}" / f"scores_{i:02d}.csv")
+        )
 
-    print(f"Removed {len_scores_ds - len(scores_ds)} rows from scores.csv file")
+    print(
+        f"Removed {original_scores_df_len - len(scores_df)} rows "
+        f"from rank_{rank} scores.csv file"
+    )
 
-    scores_indices = scores_ds["index"].tolist()
+    scores_indices = scores_df["index"].unique().tolist()
+    print(f"Found {len(scores_indices)} indices in rank_{rank} scores.csv file")
 
     batches = [
         [idx for idx in batch if idx not in scores_indices]
