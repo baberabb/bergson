@@ -332,12 +332,11 @@ def filter_complete_indices_memmap(
     index_cfg: IndexConfig,
     query_cfg: QueryConfig,
     batches: list[list[int]],
-    rank: int,
 ):
     """
     Filter out indices that are already written to in the scores.bin file.
     """
-    root = Path(query_cfg.scores_path) / f"rank_{rank}"
+    root = Path(query_cfg.scores_path)
     root.mkdir(parents=True, exist_ok=True)
 
     if not os.path.exists(root / "info.json"):
@@ -353,10 +352,7 @@ def filter_complete_indices_memmap(
         indices = scores["index"]
         written_mask = scores["written"]
         written_indices = set(np.unique(indices[written_mask]).tolist())
-        print(
-            f"Found {len(written_indices)} written indices in "
-            f"rank_{rank} scores.bin file"
-        )
+        print(f"Found {len(written_indices)} written indices in " f"scores.bin file")
     else:
         indices = scores["index"]
         written_mask = scores["written"]
@@ -367,10 +363,7 @@ def filter_complete_indices_memmap(
         counts = np.bincount(inv)
         true_counts = np.bincount(inv, weights=written_mask.astype(np.int64))
         written_indices = set(u[true_counts == counts].tolist())
-        print(
-            f"Found {len(written_indices)} written indices in "
-            f"rank_{rank} scores.bin file"
-        )
+        print(f"Found {len(written_indices)} written indices in " f"scores.bin file")
 
     len_batches = len(batches)
     batches = [
@@ -378,10 +371,7 @@ def filter_complete_indices_memmap(
     ]
     batches = [batch for batch in batches if len(batch) > 0]
 
-    print(
-        f"Filtered {len_batches - len(batches)} batches from "
-        f"rank_{rank} scores.bin file"
-    )
+    print(f"Filtered {len_batches - len(batches)} batches from " f"scores.bin file")
 
     return batches
 
@@ -632,9 +622,7 @@ def worker(
         if query_cfg.writer == "csv":
             batches = filter_complete_indices_csv(index_cfg, query_cfg, batches, rank)
         else:
-            batches = filter_complete_indices_memmap(
-                index_cfg, query_cfg, batches, rank
-            )
+            batches = filter_complete_indices_memmap(index_cfg, query_cfg, batches)
 
         if not batches:
             print(f"No batches to query for rank {rank}")

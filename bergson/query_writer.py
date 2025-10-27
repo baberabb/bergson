@@ -147,6 +147,8 @@ class CsvQueryWriter(QueryWriter):
                 row = [idx] + score.tolist() + [ss.item()]
                 writer.writerow(row)
 
+        self._rows_in_file += len(indices)
+
     def _write_to_csv(self, indices: list[int], scores: torch.Tensor):
         """Write sum_of_squares, scores, and indices to CSV."""
         with open(self._csv_path, "a", newline="") as f:
@@ -154,6 +156,8 @@ class CsvQueryWriter(QueryWriter):
             for idx, score in zip(indices, scores):
                 row = [idx] + score.tolist()
                 writer.writerow(row)
+
+        self._rows_in_file += len(indices)
 
     def flush(self):
         pass
@@ -203,6 +207,7 @@ class MemmapQueryWriter(QueryWriter):
         }
 
         if rank == 0 and not os.path.exists(scores_file_path):
+            print(f"Creating new scores file: {scores_file_path}")
             self.scores = np.memmap(
                 str(scores_file_path),
                 dtype=np.dtype(struct_dtype),  # type: ignore
@@ -241,6 +246,7 @@ class MemmapQueryWriter(QueryWriter):
             mode="r+",
             shape=(num_items * self.num_modules,),
         )
+        print(f"Loaded {len(self.scores)} scores from {scores_file_path}")
 
     def _write_to_memmap_mod(
         self,
@@ -307,3 +313,150 @@ class MemmapQueryWriter(QueryWriter):
     def flush(self):
         self.scores.flush()
         self.num_batches_since_flush = 0
+
+
+def convert_csv_to_memmap(
+    csv_dir: str,
+    output_path: str,
+    modules: list[str],
+    num_items: int,
+    *,
+    num_ranks: int = 1,
+    verify: bool = True,
+) -> None:
+    """
+    Convert CSV files produced by CsvQueryWriter to memmap format for MemmapQueryWriter.
+
+    Args:
+        csv_dir: Directory containing rank_X/scores_XX.csv files
+        output_path: Path where the memmap file and metadata will be written
+        modules: List of module names (must match the order used during scoring)
+        num_items: Total number of items scored
+        num_ranks: Number of ranks that wrote CSV files
+        verify: Whether to verify all expected indices were written
+    """
+    csv_dir_path = Path(csv_dir)
+    output_path_obj = Path(output_path)
+    output_path_obj.mkdir(parents=True, exist_ok=True)
+
+    num_modules = len(modules)
+    module_to_idx = {mod: i for i, mod in enumerate(modules)}
+
+    # Define structured dtype matching MemmapQueryWriter
+    struct_dtype = {
+        "names": ["index", "score", "sum_of_squares", "module_id", "written"],
+        "formats": ["uint32", "float32", "float32", "uint16", "bool"],
+        "offsets": [0, 4, 8, 12, 14],
+        "itemsize": 16,
+    }
+
+    scores_file_path = output_path_obj / "scores.bin"
+
+    # Create memmap file
+    print(f"Creating memmap file: {scores_file_path}")
+    scores = np.memmap(
+        str(scores_file_path),
+        dtype=np.dtype(struct_dtype),  # type: ignore
+        mode="w+",
+        shape=(num_items * num_modules,),
+    )
+
+    # Initialize with zeros
+    print("Initializing memmap...")
+    scores["score"][:] = 0.0
+    scores["sum_of_squares"][:] = 0.0
+    scores["index"][:] = 0
+    scores["module_id"][:] = 0
+    scores["written"][:] = False
+
+    # Read and write data from all CSV files
+    total_rows = 0
+    for rank in range(num_ranks):
+        rank_dir = csv_dir_path / f"rank_{rank}"
+        if not rank_dir.exists():
+            print(f"Warning: {rank_dir} does not exist, skipping")
+            continue
+
+        csv_files = sorted(rank_dir.glob("scores_*.csv"))
+        print(f"Processing {len(csv_files)} CSV files from rank {rank}")
+
+        for csv_file in csv_files:
+            print(f"  Reading {csv_file}")
+            df = pd.read_csv(csv_file)
+
+            if len(df) == 0:
+                continue
+
+            # Extract data
+            indices = df["index"].values.astype(np.uint32)
+
+            # Check if module_wise (has sum_of_squares column)
+            is_module_wise = "sum_of_squares" in df.columns
+
+            if is_module_wise:
+                # For module-wise scoring, we need to determine which module each
+                # row belongs to
+                # This requires additional context - assuming module info is
+                # encoded in order
+                for i, (idx, row) in enumerate(zip(indices, df.iterrows())):
+                    # Simple round-robin distribution
+                    module_idx = i % num_modules
+                    memmap_idx = int(idx) * num_modules + module_idx
+
+                    scores["index"][memmap_idx] = idx
+                    scores["score"][memmap_idx] = row[1]["score_0"]
+                    scores["sum_of_squares"][memmap_idx] = row[1]["sum_of_squares"]
+                    scores["module_id"][memmap_idx] = module_idx
+                    scores["written"][memmap_idx] = True
+            else:
+                # Non-module-wise: single score per index
+                # Map to first module slot
+                for idx, row in zip(indices, df.iterrows()):
+                    memmap_idx = int(idx) * num_modules  # Use first module slot
+
+                    scores["index"][memmap_idx] = idx
+                    scores["score"][memmap_idx] = row[1]["score_0"]
+                    scores["module_id"][memmap_idx] = 0
+                    scores["written"][memmap_idx] = True
+
+            total_rows += len(df)
+
+    print(f"Wrote {total_rows} total rows to memmap")
+
+    # Flush to disk
+    scores.flush()
+
+    # Save metadata
+    metadata_path = output_path_obj / "info.json"
+    print(f"Writing metadata to {metadata_path}")
+    with open(metadata_path, "w") as f:
+        json.dump(
+            {
+                "num_items": num_items,
+                "num_modules": num_modules,
+                "dtype": struct_dtype,
+                "module_to_idx": module_to_idx,
+            },
+            f,
+            indent=2,
+        )
+
+    # Verification
+    if verify:
+        num_written = np.sum(scores["written"])
+        print(
+            f"Verification: {num_written} / {num_items * num_modules} entries written"
+        )
+
+        if is_module_wise:
+            expected = num_items * num_modules
+        else:
+            expected = num_items
+
+        if num_written < expected:
+            print(
+                f"Warning: Expected at least {expected} entries, but "
+                f"only {num_written} were written"
+            )
+
+    print("Conversion complete!")
