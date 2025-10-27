@@ -6,6 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
+import pandas as pd
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -381,8 +382,6 @@ def filter_complete_indices_csv(
     """
 
     # find and concatenate all the scores.csv files into a single dataframe
-    import pandas as pd
-
     dfs_dir = Path(query_cfg.scores_path) / f"rank_{rank}"
     dfs_dir.mkdir(parents=True, exist_ok=True)
     available_dfs = [
@@ -390,7 +389,8 @@ def filter_complete_indices_csv(
         for file in sorted(os.listdir(dfs_dir))
         if file.endswith(".csv")
     ]
-    scores_df = pd.concat(available_dfs)
+    available_dfs = [df for df in available_dfs if not df.empty]
+    scores_df = pd.concat(available_dfs) if available_dfs else pd.DataFrame()
 
     if scores_df.empty:
         return batches
