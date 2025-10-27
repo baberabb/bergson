@@ -353,6 +353,8 @@ def filter_complete_indices(
 
     # Archive unfiltered data
     raw_scores_csv_path = Path(query_cfg.scores_path) / f"rank_{rank}_raw"
+    raw_scores_csv_path.mkdir(parents=True, exist_ok=True)
+
     for i in range(0, len(scores_df), rows_per_file):
         scores_df.iloc[i : i + rows_per_file].to_csv(
             str(raw_scores_csv_path / f"scores_{i:02d}.csv")
@@ -369,6 +371,8 @@ def filter_complete_indices(
         lambda x: len(x) >= target_rows_per_index
     )
     scores_df = assert_type(pd.DataFrame, scores_df)
+    scores_path = Path(query_cfg.scores_path) / f"rank_{rank}"
+    scores_path.mkdir(parents=True, exist_ok=True)
     # Convert back to a csv and save
     for i in range(0, len(scores_df), rows_per_file):
         scores_df.iloc[i : i + rows_per_file].to_csv(
