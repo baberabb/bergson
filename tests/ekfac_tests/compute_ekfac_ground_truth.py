@@ -1,3 +1,8 @@
+# %%
+# %load_ext autoreload
+# %autoreload 2
+
+# %%
 """Compute EKFAC ground truth for testing.
 
 This script computes ground truth covariance matrices, eigenvectors, and eigenvalue
@@ -6,11 +11,13 @@ workers we can simulate distributed computation.
 """
 
 import argparse
+import builtins
 import gc
 import json
 import os
+import sys
 from dataclasses import asdict
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -26,11 +33,15 @@ from torch import Tensor
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
-from bergson.data import DataConfig, IndexConfig, pad_and_tensor, tokenize
+from bergson.data import DataConfig, IndexConfig, Precision, pad_and_tensor, tokenize
 from bergson.hessians.utils import TensorDict
 from bergson.utils import assert_type
 
+# %% [markdown]
+# ## -1. Helper functions
 
+
+# %%
 def allocate_batches_test(doc_lengths: list[int], N: int, workers: Optional[int] = None) -> list[list[list[int]]]:
     """
     Modification of allocate_batches to return a flat list of batches for testing.
@@ -119,6 +130,7 @@ def allocate_batches_test(doc_lengths: list[int], N: int, workers: Optional[int]
     return allocation
 
 
+# %%
 def compute_covariance(
     rank: int,
     model: PreTrainedModel,
@@ -217,33 +229,59 @@ def compute_eigenvalue_correction_amortized(
     return {"total_processed_rank": total_processed}
 
 
-def main():
-    """Main function to compute EKFAC ground truth."""
-    parser = argparse.ArgumentParser(description="Compute EKFAC ground truth for testing")
-    parser.add_argument(
-        "--precision",
-        type=str,
-        default="fp32",
-        choices=["fp32", "fp16", "bf16", "int4", "int8"],
-        help="Model precision (default: fp32)",
-    )
-    parser.add_argument(
-        "-o",
-        "--output-dir",
-        type=str,
-        default=None,
-        help="Output directory for ground truth results (default: test_files/pile_100_examples/ground_truth)",
-    )
-    args = parser.parse_args()
+# %% [markdown]
+# ## 0. Hyperparameters
+
+
+# %%
+def parse_config() -> tuple[Precision, Optional[str]]:
+    """Parse command-line arguments or return defaults."""
+    precision: Precision
+    output_dir: Optional[str]
+
+    if len(sys.argv) > 1 and not hasattr(builtins, "__IPYTHON__"):
+        parser = argparse.ArgumentParser(description="Compute EKFAC ground truth for testing")
+        parser.add_argument(
+            "--precision",
+            type=str,
+            default="fp32",
+            choices=["fp32", "fp16", "bf16", "int4", "int8"],
+            help="Model precision (default: fp32)",
+        )
+        parser.add_argument(
+            "-o",
+            "--output-dir",
+            type=str,
+            default=None,
+            help="Output directory for ground truth results (default: test_files/pile_100_examples/ground_truth)",
+        )
+        args = parser.parse_args()
+        precision = args.precision
+        output_dir = args.output_dir
+    else:
+        # Defaults for interactive execution or running without arguments
+        precision = "fp32"
+        output_dir = None
 
     # Set random seeds for reproducibility
     set_all_seeds(42)
 
-    # Setup paths
+    return precision, output_dir
+
+
+if __name__ == "__main__" or TYPE_CHECKING:
+    precision, output_dir = parse_config()
+
+
+# %%
+def setup_paths_and_config(
+    precision: Precision, output_dir: Optional[str] = None
+) -> tuple[IndexConfig, str, int, torch.device, Any, torch.dtype]:
+    """Setup paths and configuration object."""
     current_path = os.getcwd()
     parent_path = os.path.join(current_path, "test_files", "pile_100_examples")
-    if args.output_dir is not None:
-        test_path = args.output_dir
+    if output_dir is not None:
+        test_path = output_dir
     else:
         test_path = os.path.join(parent_path, "ground_truth")
     os.makedirs(test_path, exist_ok=True)
@@ -251,7 +289,7 @@ def main():
     # Configuration
     cfg = IndexConfig(run_path="")
     cfg.model = "EleutherAI/Pythia-14m"
-    cfg.precision = args.precision
+    cfg.precision = precision
     cfg.fsdp = False
     cfg.data = DataConfig(dataset=os.path.join(parent_path, "data"))
 
@@ -288,7 +326,20 @@ def main():
         case other:
             raise ValueError(f"Unsupported precision: {other}")
 
-    # Load model
+    return cfg, test_path, workers, device, target_modules, dtype
+
+
+if __name__ == "__main__" or TYPE_CHECKING:
+    cfg, test_path, workers, device, target_modules, dtype = setup_paths_and_config(precision, output_dir)
+
+
+# %% [markdown]
+# ## 1. Loading model and data
+
+
+# %%
+def load_model_step(cfg: IndexConfig, dtype: torch.dtype) -> PreTrainedModel:
+    """Load the model."""
     print(f"Loading model {cfg.model}...")
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model,
@@ -307,9 +358,19 @@ def main():
         ),
         torch_dtype=dtype,
     )
+    return model
 
-    # Load dataset
+
+if __name__ == "__main__" or TYPE_CHECKING:
+    model = load_model_step(cfg, dtype)
+
+
+# %%
+def load_dataset_step(cfg: IndexConfig) -> Dataset:
+    """Load and return the dataset."""
+    data_str = cfg.data.dataset
     print(f"Loading dataset from {data_str}...")
+
     if data_str.endswith(".csv"):
         ds = assert_type(Dataset, Dataset.from_csv(data_str))
     elif data_str.endswith(".json") or data_str.endswith(".jsonl"):
@@ -326,7 +387,18 @@ def main():
                 raise e
 
     assert isinstance(ds, Dataset)
+    return ds
 
+
+if __name__ == "__main__" or TYPE_CHECKING:
+    ds = load_dataset_step(cfg)
+
+
+# %%
+def tokenize_and_allocate_step(
+    ds: Dataset, cfg: IndexConfig, workers: int
+) -> tuple[Dataset, list[list[list[int]]], Any]:
+    """Tokenize dataset and allocate batches."""
     tokenizer = AutoTokenizer.from_pretrained(cfg.model, model_max_length=cfg.token_batch_size)
     ds = ds.map(tokenize, batched=True, fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer))
     data = ds
@@ -335,10 +407,30 @@ def main():
     batches_world = allocate_batches_test(doc_lengths=ds["length"], N=cfg.token_batch_size, workers=workers)
     assert len(batches_world) == workers
 
-    print("\n=== Computing Covariances ===")
+    return data, batches_world, tokenizer
+
+
+if __name__ == "__main__" or TYPE_CHECKING:
+    data, batches_world, tokenizer = tokenize_and_allocate_step(ds, cfg, workers)
+
+
+# %% [markdown]
+# ## 2. Compute activation and gradient covariance
+
+
+# %%
+def compute_covariances_step(
+    model: PreTrainedModel,
+    data: Dataset,
+    batches_world: list[list[list[int]]],
+    device: torch.device,
+    target_modules: Any,
+    workers: int,
+    test_path: str,
+) -> str:
+    """Compute covariances for all ranks and save to disk."""
     covariance_test_path = os.path.join(test_path, "covariances")
 
-    total_processed_global = 0
     for rank in range(workers):
         covariance_test_path_rank = os.path.join(covariance_test_path, f"rank_{rank}")
         os.makedirs(covariance_test_path_rank, exist_ok=True)
@@ -362,7 +454,19 @@ def main():
             json.dump({"total_processed_rank": d["total_processed_rank"]}, f, indent=4)
             print(f"Rank {rank} processed {d['total_processed_rank']} tokens.")
 
-    # Combine results from all ranks
+    return covariance_test_path
+
+
+if __name__ == "__main__" or TYPE_CHECKING:
+    print("\n=== Computing Covariances ===")
+    covariance_test_path = compute_covariances_step(
+        model, data, batches_world, device, target_modules, workers, test_path
+    )
+
+
+# %%
+def combine_covariances_step(covariance_test_path: str, workers: int, device: torch.device) -> int:
+    """Combine covariance results from all ranks."""
     activation_covariances = TensorDict({})
     gradient_covariances = TensorDict({})
     total_processed_global = 0
@@ -401,7 +505,22 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
-    print("\n=== Computing Eigenvectors ===")
+    return total_processed_global
+
+
+if __name__ == "__main__" or TYPE_CHECKING:
+    print("\n=== Combining Covariances ===")
+    total_processed_global = combine_covariances_step(covariance_test_path, workers, device)
+
+
+# %% [markdown]
+# ## 3. Compute eigenvalues and eigenvectors
+
+
+# %%
+def compute_eigenvectors_step(test_path: str, device: torch.device, dtype: torch.dtype) -> str:
+    """Compute eigenvectors from covariances."""
+    covariance_test_path = os.path.join(test_path, "covariances")
     eigenvectors_test_path = os.path.join(test_path, "eigenvectors")
     os.makedirs(eigenvectors_test_path, exist_ok=True)
 
@@ -436,7 +555,30 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
-    print("\n=== Computing Eigenvalue Corrections ===")
+    return eigenvectors_test_path
+
+
+if __name__ == "__main__" or TYPE_CHECKING:
+    print("\n=== Computing Eigenvectors ===")
+    eigenvectors_test_path = compute_eigenvectors_step(test_path, device, dtype)
+
+
+# %% [markdown]
+# ## 4. Compute eigenvalue correction
+
+
+# %%
+def compute_eigenvalue_corrections_step(
+    model: PreTrainedModel,
+    data: Dataset,
+    batches_world: list[list[list[int]]],
+    device: torch.device,
+    target_modules: Any,
+    workers: int,
+    test_path: str,
+) -> tuple[str, int]:
+    """Compute eigenvalue corrections for all ranks."""
+    eigenvectors_test_path = os.path.join(test_path, "eigenvectors")
     eigenvalue_correction_test_path = os.path.join(test_path, "eigenvalue_corrections")
     os.makedirs(eigenvalue_correction_test_path, exist_ok=True)
 
@@ -471,7 +613,21 @@ def main():
             print(f"Rank {rank} processed {d['total_processed_rank']} tokens.")
         total_processed_global += d["total_processed_rank"]
 
-    # Combine results from all ranks
+    return eigenvalue_correction_test_path, total_processed_global
+
+
+if __name__ == "__main__" or TYPE_CHECKING:
+    print("\n=== Computing Eigenvalue Corrections ===")
+    eigenvalue_correction_test_path, total_processed_global_lambda = compute_eigenvalue_corrections_step(
+        model, data, batches_world, device, target_modules, workers, test_path
+    )
+
+
+# %%
+def combine_eigenvalue_corrections_step(
+    eigenvalue_correction_test_path: str, workers: int, device: torch.device, total_processed_global: int
+) -> TensorDict:
+    """Combine eigenvalue correction results from all ranks."""
     eigenvalue_corrections = TensorDict({})
 
     for rank in range(workers):
@@ -492,9 +648,12 @@ def main():
         os.path.join(eigenvalue_correction_test_path, "eigenvalue_corrections.safetensors"),
     )
 
+    return eigenvalue_corrections
+
+
+if __name__ == "__main__" or TYPE_CHECKING:
+    eigenvalue_corrections = combine_eigenvalue_corrections_step(
+        eigenvalue_correction_test_path, workers, device, total_processed_global_lambda
+    )
     print("\n=== Ground Truth Computation Complete ===")
     print(f"Results saved to: {test_path}")
-
-
-if __name__ == "__main__":
-    main()
