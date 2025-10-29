@@ -10,7 +10,7 @@ import gc
 import json
 import os
 from dataclasses import asdict
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -22,8 +22,9 @@ from ground_truth.collector import (
 )
 from safetensors.torch import load_file, save_file
 from test_utils import set_all_seeds
+from torch import Tensor
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
 from bergson.data import DataConfig, IndexConfig, pad_and_tensor, tokenize
 from bergson.hessians.utils import TensorDict
@@ -120,14 +121,14 @@ def allocate_batches_test(doc_lengths: list[int], N: int, workers: Optional[int]
 
 def compute_covariance(
     rank: int,
-    model,
-    data,
-    batches_world,
-    device,
-    target_modules,
-    activation_covariances: dict,
-    gradient_covariances: dict,
-):
+    model: PreTrainedModel,
+    data: Dataset,
+    batches_world: list[list[list[int]]],
+    device: torch.device,
+    target_modules: Any,
+    activation_covariances: dict[str, Tensor],
+    gradient_covariances: dict[str, Tensor],
+) -> dict[str, Any]:
     """Compute activation and gradient covariances for a single worker."""
     total_processed = 0
     batches = batches_world[rank]
@@ -166,17 +167,18 @@ def compute_covariance(
     return {"losses": loss_list, "total_processed_rank": total_processed}
 
 
+# %%
 def compute_eigenvalue_correction_amortized(
     rank: int,
-    model,
-    data,
-    batches_world,
-    device,
-    target_modules,
-    eigenvalue_corrections: dict,
-    eigenvectors_activations: dict,
-    eigenvectors_gradients: dict,
-):
+    model: PreTrainedModel,
+    data: Dataset,
+    batches_world: list[list[list[int]]],
+    device: torch.device,
+    target_modules: Any,
+    eigenvalue_corrections: dict[str, Tensor],
+    eigenvectors_activations: dict[str, Tensor],
+    eigenvectors_gradients: dict[str, Tensor],
+) -> dict[str, int]:
     """Compute eigenvalue corrections using the amortized method."""
     total_processed = 0
     batches = batches_world[rank]
