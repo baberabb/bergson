@@ -16,6 +16,7 @@ from simple_parsing import field
 
 from .utils import assert_type
 
+Precision = Literal["bf16", "fp16", "fp32", "int4", "int8"]
 
 @dataclass
 class DataConfig:
@@ -48,7 +49,7 @@ class IndexConfig:
     fsdp: bool = False
     """Whether to use Fully Sharded Data Parallel (FSDP) for collecing gradients."""
 
-    precision: Literal["bf16", "fp16", "fp32", "int4", "int8"] = "bf16"
+    precision: Precision = "bf16"
     """Precision to use for the model parameters."""
 
     projection_dim: int = 16
