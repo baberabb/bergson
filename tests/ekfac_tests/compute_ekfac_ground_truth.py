@@ -130,105 +130,6 @@ def allocate_batches_test(doc_lengths: list[int], N: int, workers: Optional[int]
     return allocation
 
 
-# %%
-def compute_covariance(
-    rank: int,
-    model: PreTrainedModel,
-    data: Dataset,
-    batches_world: list[list[list[int]]],
-    device: torch.device,
-    target_modules: Any,
-    activation_covariances: dict[str, Tensor],
-    gradient_covariances: dict[str, Tensor],
-) -> dict[str, Any]:
-    """Compute activation and gradient covariances for a single worker."""
-    total_processed = 0
-    batches = batches_world[rank]
-    loss_list = []
-
-    collector = GroundTruthCovarianceCollector(
-        model=model.base_model,
-        activation_covariances=activation_covariances,
-        gradient_covariances=gradient_covariances,
-        target_modules=target_modules,
-    )
-
-    for sl in tqdm(batches, desc=f"Rank {rank} covariances"):
-        batch = data[sl]
-        x, y = pad_and_tensor(
-            batch["input_ids"],
-            labels=batch.get("labels"),
-            device=device,
-        )
-
-        total_processed += x.numel()
-
-        with collector:
-            logits = model(x).logits
-            losses = F.cross_entropy(
-                logits[:, :-1].reshape(-1, logits.size(-1)),
-                y[:, 1:].flatten(),
-                reduction="none",
-            ).reshape_as(y[:, 1:])
-
-            losses = losses.sum(1)
-            losses.mean().backward()
-            loss_list.append(losses.detach().cpu())
-            model.zero_grad()
-
-    return {"losses": loss_list, "total_processed_rank": total_processed}
-
-
-# %%
-def compute_eigenvalue_correction_amortized(
-    rank: int,
-    model: PreTrainedModel,
-    data: Dataset,
-    batches_world: list[list[list[int]]],
-    device: torch.device,
-    target_modules: Any,
-    eigenvalue_corrections: dict[str, Tensor],
-    eigenvectors_activations: dict[str, Tensor],
-    eigenvectors_gradients: dict[str, Tensor],
-) -> dict[str, int]:
-    """Compute eigenvalue corrections using the amortized method."""
-    total_processed = 0
-    batches = batches_world[rank]
-
-    collector = GroundTruthAmortizedLambdaCollector(
-        model=model.base_model,
-        eigenvalue_corrections=eigenvalue_corrections,
-        eigenvectors_activations=eigenvectors_activations,
-        eigenvectors_gradients=eigenvectors_gradients,
-        device=device,
-        target_modules=target_modules,
-    )
-
-    for sl in tqdm(batches, desc=f"Rank {rank} eigenvalue corrections"):
-        batch = data[sl]
-        x, y = pad_and_tensor(
-            batch["input_ids"],
-            labels=batch.get("labels"),
-            device=device,
-        )
-
-        total_processed += x.numel()
-
-        with collector:
-            logits = model(x).logits
-            losses = F.cross_entropy(
-                logits[:, :-1].reshape(-1, logits.size(-1)),
-                y[:, 1:].flatten(),
-                reduction="none",
-            ).reshape_as(y[:, 1:])
-
-            losses = losses.sum(1)
-            losses.mean().backward()
-            model.zero_grad()
-
-    return {"total_processed_rank": total_processed}
-
-
 # %% [markdown]
 # ## 0. Hyperparameters
 
@@ -419,6 +320,55 @@ if __name__ == "__main__" or TYPE_CHECKING:
 
 
 # %%
+def compute_covariance(
+    rank: int,
+    model: PreTrainedModel,
+    data: Dataset,
+    batches_world: list[list[list[int]]],
+    device: torch.device,
+    target_modules: Any,
+    activation_covariances: dict[str, Tensor],
+    gradient_covariances: dict[str, Tensor],
+) -> dict[str, Any]:
+    """Compute activation and gradient covariances for a single worker."""
+    total_processed = 0
+    batches = batches_world[rank]
+    loss_list = []
+
+    collector = GroundTruthCovarianceCollector(
+        model=model.base_model,
+        activation_covariances=activation_covariances,
+        gradient_covariances=gradient_covariances,
+        target_modules=target_modules,
+    )
+
+    for sl in tqdm(batches, desc=f"Rank {rank} covariances"):
+        batch = data[sl]
+        x, y = pad_and_tensor(
+            batch["input_ids"],
+            labels=batch.get("labels"),
+            device=device,
+        )
+
+        total_processed += x.numel()
+
+        with collector:
+            logits = model(x).logits
+            losses = F.cross_entropy(
+                logits[:, :-1].reshape(-1, logits.size(-1)),
+                y[:, 1:].flatten(),
+                reduction="none",
+            ).reshape_as(y[:, 1:])
+
+            losses = losses.sum(1)
+            losses.mean().backward()
+            loss_list.append(losses.detach().cpu())
+            model.zero_grad()
+
+    return {"losses": loss_list, "total_processed_rank": total_processed}
+
+
+# %%
 def compute_covariances_step(
     model: PreTrainedModel,
     data: Dataset,
@@ -565,6 +515,56 @@ if __name__ == "__main__" or TYPE_CHECKING:
 
 # %% [markdown]
 # ## 4. Compute eigenvalue correction
+
+
+# %%
+def compute_eigenvalue_correction_amortized(
+    rank: int,
+    model: PreTrainedModel,
+    data: Dataset,
+    batches_world: list[list[list[int]]],
+    device: torch.device,
+    target_modules: Any,
+    eigenvalue_corrections: dict[str, Tensor],
+    eigenvectors_activations: dict[str, Tensor],
+    eigenvectors_gradients: dict[str, Tensor],
+) -> dict[str, int]:
+    """Compute eigenvalue corrections using the amortized method."""
+    total_processed = 0
+    batches = batches_world[rank]
+
+    collector = GroundTruthAmortizedLambdaCollector(
+        model=model.base_model,
+        eigenvalue_corrections=eigenvalue_corrections,
+        eigenvectors_activations=eigenvectors_activations,
+        eigenvectors_gradients=eigenvectors_gradients,
+        device=device,
+        target_modules=target_modules,
+    )
+
+    for sl in tqdm(batches, desc=f"Rank {rank} eigenvalue corrections"):
+        batch = data[sl]
+        x, y = pad_and_tensor(
+            batch["input_ids"],
+            labels=batch.get("labels"),
+            device=device,
+        )
+
+        total_processed += x.numel()
+
+        with collector:
+            logits = model(x).logits
+            losses = F.cross_entropy(
+                logits[:, :-1].reshape(-1, logits.size(-1)),
+                y[:, 1:].flatten(),
+                reduction="none",
+            ).reshape_as(y[:, 1:])
+
+            losses = losses.sum(1)
+            losses.mean().backward()
+            model.zero_grad()
+
+    return {"total_processed_rank": total_processed}
 
 
 # %%
