@@ -37,12 +37,14 @@ from bergson.data import DataConfig, IndexConfig, Precision, pad_and_tensor, tok
 from bergson.hessians.utils import TensorDict
 from bergson.utils import assert_type
 
+Batches = list[list[list[int]]]
+
 # %% [markdown]
 # ## -1. Helper functions
 
 
 # %%
-def allocate_batches_test(doc_lengths: list[int], N: int, workers: Optional[int] = None) -> list[list[list[int]]]:
+def allocate_batches_test(doc_lengths: list[int], N: int, workers: Optional[int] = None) -> Batches:
     """
     Modification of allocate_batches to return a flat list of batches for testing.
 
@@ -122,7 +124,7 @@ def allocate_batches_test(doc_lengths: list[int], N: int, workers: Optional[int]
     assert all(max(doc_lengths[i] for i in batch) * len(batch) <= N for batch in batches)
 
     # Round-robin assignment to workers
-    allocation: list[list[list[int]]] = [[] for _ in range(world_size)]
+    allocation: Batches = [[] for _ in range(world_size)]
     for b_idx, batch in enumerate(batches):
         allocation[b_idx % world_size].append(batch)
 
@@ -298,7 +300,7 @@ if __name__ == "__main__" or TYPE_CHECKING:
 # %%
 def tokenize_and_allocate_step(
     ds: Dataset, cfg: IndexConfig, workers: int
-) -> tuple[Dataset, list[list[list[int]]], Any]:
+) -> tuple[Dataset, Batches, Any]:
     """Tokenize dataset and allocate batches."""
     tokenizer = AutoTokenizer.from_pretrained(cfg.model, model_max_length=cfg.token_batch_size)
     ds = ds.map(tokenize, batched=True, fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer))
@@ -324,7 +326,7 @@ def compute_covariance(
     rank: int,
     model: PreTrainedModel,
     data: Dataset,
-    batches_world: list[list[list[int]]],
+    batches_world: Batches,
     device: torch.device,
     target_modules: Any,
     activation_covariances: dict[str, Tensor],
@@ -372,7 +374,7 @@ def compute_covariance(
 def compute_covariances_step(
     model: PreTrainedModel,
     data: Dataset,
-    batches_world: list[list[list[int]]],
+    batches_world: Batches,
     device: torch.device,
     target_modules: Any,
     workers: int,
@@ -522,7 +524,7 @@ def compute_eigenvalue_correction_amortized(
     rank: int,
     model: PreTrainedModel,
     data: Dataset,
-    batches_world: list[list[list[int]]],
+    batches_world: Batches,
     device: torch.device,
     target_modules: Any,
     eigenvalue_corrections: dict[str, Tensor],
@@ -571,7 +573,7 @@ def compute_eigenvalue_correction_amortized(
 def compute_eigenvalue_corrections_step(
     model: PreTrainedModel,
     data: Dataset,
-    batches_world: list[list[list[int]]],
+    batches_world: Batches,
     device: torch.device,
     target_modules: Any,
     workers: int,
