@@ -162,7 +162,9 @@ class AdamNormalizer(Normalizer):
         and the factored second moments.
         """
         # We assume avg_sq is a square matrix of shape [O, I]
-        assert self.avg_sq.ndim == 2, f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
+        assert (
+            self.avg_sq.ndim == 2
+        ), f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
 
         # Compute row and column means
         return AdafactorNormalizer(
@@ -211,9 +213,6 @@ class GradientProcessor:
         cfg = asdict(self)
         with open(cfg_path, "w") as f:
             json.dump(cfg, f, indent=2)
-
-
-
 
 
 @dataclass
@@ -346,7 +345,12 @@ class GradientCollector(ContextDecorator):
         if p is not None and not isinstance(norm, AdamNormalizer):
             i = module.in_features
 
-            x = x @ self.projection(name=name, m=p, n=i, side="right", dtype=x.dtype, device=x.device).T
+            x = (
+                x
+                @ self.projection(
+                    name=name, m=p, n=i, side="right", dtype=x.dtype, device=x.device
+                ).T
+            )
 
         module._inputs = x
 
@@ -387,14 +391,20 @@ class GradientCollector(ContextDecorator):
 
             # Project the gradients to the lower-dimensional space
             if p is not None:
-                A = self.projection(name=name, m=p, n=o, side="left", dtype=G.dtype, device=G.device)
-                B = self.projection(name=name, m=p, n=i, side="right", dtype=G.dtype, device=G.device)
+                A = self.projection(
+                    name=name, m=p, n=o, side="left", dtype=G.dtype, device=G.device
+                )
+                B = self.projection(
+                    name=name, m=p, n=i, side="right", dtype=G.dtype, device=G.device
+                )
                 P = A @ P @ B.T  # [N, p, q]
 
         # Both Adafactor and no normalizer, we can project G first
         else:
             if p is not None:
-                A = self.projection(name=name, m=p, n=o, side="left", dtype=G.dtype, device=G.device)
+                A = self.projection(
+                    name=name, m=p, n=o, side="left", dtype=G.dtype, device=G.device
+                )
                 G = G @ A.T  # [N, S, p]
 
             P = G.mT @ I  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]

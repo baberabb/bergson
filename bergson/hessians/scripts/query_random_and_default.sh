@@ -18,7 +18,7 @@ python -m bergson "${BASE_OUTPUT_PATH}/query" \
     --token_batch_size 2048 \
     --normalizer none \
     --fsdp \
-    --projection_dim 0 
+    --projection_dim 0
 
 
 echo "Completed projection_dim 0 run"

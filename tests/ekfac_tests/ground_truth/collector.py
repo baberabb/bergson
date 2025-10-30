@@ -25,8 +25,7 @@ class GroundTruthCovarianceCollector(HookCollectorBase):
         pass
 
     def forward_hook(self, name: str, a: Tensor) -> None:
-
-        a = a.reshape(-1, a.shape[-1]) # [N*S, O]
+        a = a.reshape(-1, a.shape[-1])  # [N*S, O]
 
         update = a.mT @ a
 
@@ -36,7 +35,7 @@ class GroundTruthCovarianceCollector(HookCollectorBase):
             self.activation_covariances[name].add_(update)
 
     def backward_hook(self, name: str, g: Tensor) -> None:
-        g = g.reshape(-1, g.shape[-1]) # [N*S, O]
+        g = g.reshape(-1, g.shape[-1])  # [N*S, O]
 
         update = g.mT @ g
 
@@ -74,7 +73,7 @@ class GroundTruthNonAmortizedLambdaCollector(HookCollectorBase):
         gradient = torch.einsum("N S O I, I J -> N S O J", gradient, eigenvector_a)
         gradient = torch.einsum("O P, N S O J -> N S P J", eigenvector_g, gradient)
 
-        gradient = gradient.sum(dim=1) # sum over sequence length
+        gradient = gradient.sum(dim=1)  # sum over sequence length
 
         gradient = gradient**2
         correction = gradient.sum(dim=0)
@@ -110,7 +109,11 @@ class GroundTruthAmortizedLambdaCollector(HookCollectorBase):
         transformed_a = torch.einsum("N S I, I J -> N S J", activation, eigenvector_a)
         transformed_g = torch.einsum("O P, N S O -> N S P", eigenvector_g, g)
 
-        correction = (torch.einsum("N S O, N S I -> N O I", transformed_g, transformed_a) ** 2).sum(dim=0).contiguous()
+        correction = (
+            (torch.einsum("N S O, N S I -> N O I", transformed_g, transformed_a) ** 2)
+            .sum(dim=0)
+            .contiguous()
+        )
 
         if name not in self.eigenvalue_corrections:
             self.eigenvalue_corrections[name] = correction

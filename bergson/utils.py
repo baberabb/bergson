@@ -18,7 +18,11 @@ def assert_type(typ: Type[T], obj: Any) -> T:
 def get_layer_list(model: PreTrainedModel | PeftModel) -> nn.ModuleList:
     """Get the list of layers to train SAEs on."""
     N = assert_type(int, model.config.num_hidden_layers)
-    candidates = [mod for mod in model.base_model.modules() if isinstance(mod, nn.ModuleList) and len(mod) == N]
+    candidates = [
+        mod
+        for mod in model.base_model.modules()
+        if isinstance(mod, nn.ModuleList) and len(mod) == N
+    ]
     assert len(candidates) == 1, "Could not find the list of layers."
 
     return candidates[0]

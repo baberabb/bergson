@@ -57,7 +57,9 @@ run_path = os.path.join(test_dir, "run/influence_results")
 
 
 def test_total_processed_examples():
-    total_processed_ground_truth_path = os.path.join(ground_truth_path, "covariances/stats.json")
+    total_processed_ground_truth_path = os.path.join(
+        ground_truth_path, "covariances/stats.json"
+    )
     total_processed_run_path = os.path.join(run_path, "total_processed_covariances.pt")
 
     with open(total_processed_ground_truth_path, "r") as f:
@@ -90,9 +92,13 @@ def main():
     ]
 
     for file_name in required_files:
-        assert os.path.exists(os.path.join(ground_truth_path, file_name)), f"Missing required file: {file_name}"
+        assert os.path.exists(
+            os.path.join(ground_truth_path, file_name)
+        ), f"Missing required file: {file_name}"
 
-    cfg_json = json.load(open(os.path.join(ground_truth_path, "index_config.json"), "r"))
+    cfg_json = json.load(
+        open(os.path.join(ground_truth_path, "index_config.json"), "r")
+    )
 
     cfg = IndexConfig(**cfg_json)
 

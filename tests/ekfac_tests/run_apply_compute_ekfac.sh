@@ -8,4 +8,3 @@ python test_apply_ekfac.py \
     --use_fsdp \
     --world_size 8 \
     --gradient_batch_size 10 \
-    

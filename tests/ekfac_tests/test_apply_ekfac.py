@@ -61,18 +61,24 @@ run_path = os.path.join(test_dir, "run/influence_results")
 
 
 def test_gradients(run_path, ground_truth_path):
-    ground_truth = load_file(os.path.join(ground_truth_path, "gradients.safetensors"), device="cuda")
+    ground_truth = load_file(
+        os.path.join(ground_truth_path, "gradients.safetensors"), device="cuda"
+    )
     computed_mmap = load_gradients(run_path)
 
     for k in ground_truth.keys():
         ground_truth_tensor = ground_truth[k].to(dtype=torch.float32)
 
         computed_tensor = (
-            torch.from_numpy(computed_mmap[k].copy()).to(device="cuda").view(-1, *ground_truth_tensor.shape[1:])
+            torch.from_numpy(computed_mmap[k].copy())
+            .to(device="cuda")
+            .view(-1, *ground_truth_tensor.shape[1:])
         ).to(dtype=torch.float32)
 
         if not (ground_truth_tensor.shape == computed_tensor.shape):
-            raise ValueError(f"Shape mismatch for key {k}: {ground_truth_tensor.shape} vs {computed_tensor.shape}")
+            raise ValueError(
+                f"Shape mismatch for key {k}: {ground_truth_tensor.shape} vs {computed_tensor.shape}"
+            )
 
         if not torch.allclose(ground_truth_tensor, computed_tensor, rtol=1e-3, atol=0):
             abs_diff = torch.abs(ground_truth_tensor - computed_tensor)
@@ -86,7 +92,9 @@ def test_gradients(run_path, ground_truth_path):
             gt_val = ground_truth_tensor.flatten()[argmax_idx].item()
             comp_val = computed_tensor.flatten()[argmax_idx].item()
 
-            print(f"Mismatch '{k}': max_abs={max_abs_diff:.2e}, max_rel={max_rel_diff:.2e}")
+            print(
+                f"Mismatch '{k}': max_abs={max_abs_diff:.2e}, max_rel={max_rel_diff:.2e}"
+            )
             print(f"  At {tuple(coords)}: gt={gt_val:.2e}, comp={comp_val:.2e}")
 
 
@@ -101,9 +109,13 @@ def main():
     ]
 
     for file_name in required_files:
-        assert os.path.exists(os.path.join(ground_truth_path, file_name)), f"Missing required file: {file_name}"
+        assert os.path.exists(
+            os.path.join(ground_truth_path, file_name)
+        ), f"Missing required file: {file_name}"
 
-    cfg_json = json.load(open(os.path.join(ground_truth_path, "index_config.json"), "r"))
+    cfg_json = json.load(
+        open(os.path.join(ground_truth_path, "index_config.json"), "r")
+    )
     print(cfg_json)
     cfg = IndexConfig(**cfg_json)
 
