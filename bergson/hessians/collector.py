@@ -263,8 +263,14 @@ class CovarianceCollector(HookCollectorBase):
         os.makedirs(gradient_path, exist_ok=True)
 
         # Save sharded covariance matrices
-        save_file(self.A_cov_dict, os.path.join(activation_path, f"shard_{self.rank}.safetensors"))
-        save_file(self.S_cov_dict, os.path.join(gradient_path, f"shard_{self.rank}.safetensors"))
+        save_file(
+            self.A_cov_dict,
+            os.path.join(activation_path, f"shard_{self.rank}.safetensors"),
+        )
+        save_file(
+            self.S_cov_dict,
+            os.path.join(gradient_path, f"shard_{self.rank}.safetensors"),
+        )
 
 
 @dataclass(kw_only=True)
@@ -286,11 +292,15 @@ class LambdaCollector(HookCollectorBase):
         """Load eigenvectors and initialize storage."""
         # Load precomputed eigenvectors
         self.eigen_a = load_file(
-            os.path.join(self.path, f"activation_eigen_sharded/shard_{self.rank}.safetensors"),
+            os.path.join(
+                self.path, f"activation_eigen_sharded/shard_{self.rank}.safetensors"
+            ),
             device=f"cuda:{self.rank}",
         )
         self.eigen_g = load_file(
-            os.path.join(self.path, f"gradient_eigen_sharded/shard_{self.rank}.safetensors"),
+            os.path.join(
+                self.path, f"gradient_eigen_sharded/shard_{self.rank}.safetensors"
+            ),
             device=f"cuda:{self.rank}",
         )
 
@@ -303,7 +313,9 @@ class LambdaCollector(HookCollectorBase):
         # a shape: [N, S, I]
 
         # Transform: a @ eigen_a
-        transformed = self.shard_computer._matmul(vector_nsa=a, matrix_cb=self.eigen_a[name])  # shape [N, S, I]
+        transformed = self.shard_computer._matmul(
+            vector_nsa=a, matrix_cb=self.eigen_a[name]
+        )  # shape [N, S, I]
 
         # Cache for use in backward pass
         self.transformed_a_cache[name] = transformed
@@ -313,11 +325,15 @@ class LambdaCollector(HookCollectorBase):
         # g shape: [N, S, O]
 
         # Transform: g @ eigen_g
-        transformed_g = self.shard_computer._matmul(vector_nsa=g, matrix_cb=self.eigen_g[name])  # shape [N, S, O]
+        transformed_g = self.shard_computer._matmul(
+            vector_nsa=g, matrix_cb=self.eigen_g[name]
+        )  # shape [N, S, O]
 
         # Compute outer product: sum_n (transformed_a_n^T @ transformed_g_n)
         # Einstein notation: [N, S, I] x [N, S, O] -> [N, O, I]
-        transformed_grad_shard = torch.einsum("N S I, N S O -> N O I", self.transformed_a_cache[name], transformed_g)
+        transformed_grad_shard = torch.einsum(
+            "N S I, N S O -> N O I", self.transformed_a_cache[name], transformed_g
+        )
 
         # Square and sum over batch
         transformed_grad_shard = (transformed_grad_shard**2).sum(dim=0).contiguous()
@@ -333,15 +349,26 @@ class LambdaCollector(HookCollectorBase):
 
         # Accumulate (with CPU offloading for memory efficiency)
         if name not in self.eigenvalue_corrections:
-            self.eigenvalue_corrections[name] = transformed_grad_shard[start_row:end_row, :].contiguous()
+            self.eigenvalue_corrections[name] = transformed_grad_shard[
+                start_row:end_row, :
+            ].contiguous()
         else:
-            self.eigenvalue_corrections[name] = self.eigenvalue_corrections[name].to(device=self.device)
-            self.eigenvalue_corrections[name].add_(transformed_grad_shard[start_row:end_row, :].contiguous())
-            self.eigenvalue_corrections[name] = self.eigenvalue_corrections[name].to(device="cpu", non_blocking=False)
+            self.eigenvalue_corrections[name] = self.eigenvalue_corrections[name].to(
+                device=self.device
+            )
+            self.eigenvalue_corrections[name].add_(
+                transformed_grad_shard[start_row:end_row, :].contiguous()
+            )
+            self.eigenvalue_corrections[name] = self.eigenvalue_corrections[name].to(
+                device="cpu", non_blocking=False
+            )
 
     def teardown(self) -> None:
         """Save eigenvalue corrections to disk."""
         output_path = os.path.join(self.path, "eigenvalue_correction_sharded")
         os.makedirs(output_path, exist_ok=True)
 
-        save_file(self.eigenvalue_corrections, os.path.join(output_path, f"shard_{self.rank}.safetensors"))
+        save_file(
+            self.eigenvalue_corrections,
+            os.path.join(output_path, f"shard_{self.rank}.safetensors"),
+        )

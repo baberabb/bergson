@@ -22,7 +22,9 @@ class RankFilter(logging.Filter):
 
 
 # Create a function to get loggers with consistent naming
-def get_logger(name: Optional[str] = None, level: Optional[str] = None) -> logging.Logger:
+def get_logger(
+    name: Optional[str] = None, level: Optional[str] = None
+) -> logging.Logger:
     """
     Get a logger with the configured format.
 

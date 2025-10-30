@@ -64,7 +64,9 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
             ds = load_dataset(data_str, split="train")
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
-                raise NotImplementedError("DatasetDicts and IterableDatasetDicts are not supported.")
+                raise NotImplementedError(
+                    "DatasetDicts and IterableDatasetDicts are not supported."
+                )
         except ValueError as e:
             # Automatically use load_from_disk if appropriate
             if "load_from_disk" in str(e):
@@ -72,14 +74,20 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
             else:
                 raise e
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model, model_max_length=cfg.token_batch_size)
+    tokenizer = AutoTokenizer.from_pretrained(
+        cfg.model, model_max_length=cfg.token_batch_size
+    )
 
-    ds = ds.map(tokenize, batched=True, fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer))
+    ds = ds.map(
+        tokenize, batched=True, fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer)
+    )
 
     return ds
 
 
-def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tuple[AutoModelForCausalLM, set | None]:
+def setup_model_and_peft(
+    cfg: IndexConfig, rank: int, dtype: torch.dtype
+) -> tuple[AutoModelForCausalLM, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
 
     torch.manual_seed(42)
@@ -141,7 +149,9 @@ def setup_model_and_peft(cfg: IndexConfig, rank: int, dtype: torch.dtype) -> tup
                     model.get_submodule(processed_name)
                     target_modules.add(processed_name)
                 except AttributeError:
-                    print(f"Adapter parameter '{processed_name}' not found in the model.")
+                    print(
+                        f"Adapter parameter '{processed_name}' not found in the model."
+                    )
 
     # Configure gradients
     model.requires_grad_(False)
@@ -223,7 +233,11 @@ def worker_wrapper(
                 case "fp32":
                     dtype = torch.float32
                 case "int4" | "int8":
-                    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                    dtype = (
+                        torch.bfloat16
+                        if torch.cuda.is_bf16_supported()
+                        else torch.float16
+                    )
                 case other:
                     raise ValueError(f"Unsupported precision: {other}")
 
@@ -305,7 +319,10 @@ def distributed_computing(
             ctx = start_processes(
                 "build",
                 worker_wrapper,
-                args={i: (i, world_size, cfg, ds, worker_fn, setup_model, setup_processor) for i in range(world_size)},
+                args={
+                    i: (i, world_size, cfg, ds, worker_fn, setup_model, setup_processor)
+                    for i in range(world_size)
+                },
                 envs={
                     i: {
                         "LOCAL_RANK": str(i),

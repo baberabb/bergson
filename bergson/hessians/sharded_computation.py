@@ -15,7 +15,9 @@ class ShardedMul:
 
         self.rank = dist.get_rank() if self.dist else 0
         self.world_size = dist.get_world_size() if self.dist else 1
-        self.device = torch.device(f"cuda:{self.rank}" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(
+            f"cuda:{self.rank}" if torch.cuda.is_available() else "cpu"
+        )
 
         self.target_info = target_info
         self.lambda_damp_factor = lambda_damp_factor
@@ -32,12 +34,16 @@ class ShardedMul:
             # Activation covariance A^T A has shape [in_dim, in_dim]
             in_dim = weight_shape[1]
             shard_in_dim = in_dim if not self.dist else in_dim // self.world_size
-            activation_covariance_dict[name] = torch.zeros((shard_in_dim, in_dim), device=self.device, dtype=dtype)
+            activation_covariance_dict[name] = torch.zeros(
+                (shard_in_dim, in_dim), device=self.device, dtype=dtype
+            )
 
             # Gradient covariance G^T G has shape [out_dim, out_dim]
             out_dim = weight_shape[0]
             shard_out_dim = out_dim if not self.dist else out_dim // self.world_size
-            gradient_covariance_dict[name] = torch.zeros((shard_out_dim, out_dim), device=self.device, dtype=dtype)
+            gradient_covariance_dict[name] = torch.zeros(
+                (shard_out_dim, out_dim), device=self.device, dtype=dtype
+            )
 
     def _matmul(
         self,
@@ -46,11 +52,12 @@ class ShardedMul:
     ) -> Float[Tensor, "n s b"]:
         """Vector-matrix multiplication.
         - If not distributed, this does usual multiplication with a=c.
-        - If distributed, assumes that c=a/world_size and does sharded multiplication."""
+        - If distributed, assumes that c=a/world_size and does sharded multiplication.
+        """
 
-        assert vector_nsa.shape[2] == matrix_cb.shape[0] * self.world_size, (
-            f"Vector shape {vector_nsa.shape} not compatible with matrix shape {matrix_cb.shape} and world_size {self.world_size}"
-        )
+        assert (
+            vector_nsa.shape[2] == matrix_cb.shape[0] * self.world_size
+        ), f"Vector shape {vector_nsa.shape} not compatible with matrix shape {matrix_cb.shape} and world_size {self.world_size}"
 
         if not self.dist:
             result_nsb = torch.einsum("n s c, c b-> n s b", vector_nsa, matrix_cb)
@@ -81,7 +88,9 @@ class ShardedMul:
         """
 
         files = os.listdir(shard_path)
-        assert len(files) == self.world_size, f"Expected {self.world_size} shards, found {len(files)} in {shard_path}"
+        assert (
+            len(files) == self.world_size
+        ), f"Expected {self.world_size} shards, found {len(files)} in {shard_path}"
 
         full_matrix = None
 
@@ -89,14 +98,20 @@ class ShardedMul:
             full_path_rank = os.path.join(
                 shard_path, "shard_0.safetensors"
             )  # TODO: Does this work with different CUDA visible devices?
-            with safe_open(full_path_rank, framework="pt", device=f"cuda:{self.rank}") as f:
+            with safe_open(
+                full_path_rank, framework="pt", device=f"cuda:{self.rank}"
+            ) as f:
                 full_matrix = f.get_tensor(name)
 
         else:
             full_matrix_list = []
             for shard_id in range(self.world_size):
-                shard_path_rank = os.path.join(shard_path, f"shard_{shard_id}.safetensors")
-                with safe_open(shard_path_rank, framework="pt", device=f"cuda:{self.rank}") as f:
+                shard_path_rank = os.path.join(
+                    shard_path, f"shard_{shard_id}.safetensors"
+                )
+                with safe_open(
+                    shard_path_rank, framework="pt", device=f"cuda:{self.rank}"
+                ) as f:
                     local_matrix = f.get_tensor(name)
 
                 full_matrix_list.append(local_matrix)
@@ -107,7 +122,10 @@ class ShardedMul:
         return full_matrix
 
     def _merge_and_shard_dict(
-        self, input_dict: dict[str, torch.Tensor], covariance_type: Literal["activation", "gradient"], dtype
+        self,
+        input_dict: dict[str, torch.Tensor],
+        covariance_type: Literal["activation", "gradient"],
+        dtype,
     ) -> dict[str, torch.Tensor]:
         """This function takes a dict of tensors, where each rank will have *full* eigenvectors of *some* modules.
         It then redistributes the tensors across all ranks,
@@ -127,13 +145,21 @@ class ShardedMul:
                     tensor = input_dict[key].to(device=self.device)
 
                 shard_size = d // self.world_size
-                dist.all_reduce(tensor, op=dist.ReduceOp.SUM) if dist.is_initialized() else None
+                (
+                    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+                    if dist.is_initialized()
+                    else None
+                )
 
                 shard = torch.empty(shard_size, d, device=self.device, dtype=dtype)
-                shard.copy_(tensor[self.rank * shard_size : (self.rank + 1) * shard_size, :])
+                shard.copy_(
+                    tensor[self.rank * shard_size : (self.rank + 1) * shard_size, :]
+                )
                 result_dict[key] = shard.to(device="cpu", non_blocking=True)
 
-                assert shard.shape[0] == shard_size, f"Shard shape {shard.shape} does not match expected {shard_size}"
+                assert (
+                    shard.shape[0] == shard_size
+                ), f"Shard shape {shard.shape} does not match expected {shard_size}"
 
                 del tensor
 
@@ -142,10 +168,14 @@ class ShardedMul:
 
         return result_dict
 
-    def _hadamard(self, matrix_noi: Float[Tensor, "n o i"], lambda_ci: Float[Tensor, "c i"]):
+    def _hadamard(
+        self, matrix_noi: Float[Tensor, "n o i"], lambda_ci: Float[Tensor, "c i"]
+    ):
         if not self.dist:
             global_lambda_mean = lambda_ci.mean()
-            inverse_lambda = (lambda_ci + self.lambda_damp_factor * global_lambda_mean).reciprocal()
+            inverse_lambda = (
+                lambda_ci + self.lambda_damp_factor * global_lambda_mean
+            ).reciprocal()
             matrix_noi.mul_(inverse_lambda)
         else:
             self._sharded_hadamard(matrix_noi, lambda_ci)
@@ -162,7 +192,9 @@ class ShardedMul:
         Returns: [n, s, b]
         """
         # Split the vector into shards
-        vector_shards_wnsc = torch.chunk(vector_nsa, self.world_size, dim=-1)  # (w, n, s, a/w)
+        vector_shards_wnsc = torch.chunk(
+            vector_nsa, self.world_size, dim=-1
+        )  # (w, n, s, a/w)
         n, s, b = vector_nsa.shape[0], vector_nsa.shape[1], matrix_cb.shape[1]
 
         result_nsb = torch.zeros(
@@ -178,13 +210,17 @@ class ShardedMul:
                 shard_cb = torch.zeros_like(matrix_cb)
 
             dist.broadcast(shard_cb, src=rank_index)
-            result_nsb += torch.einsum("n s c, c b-> n s b", vector_shards_wnsc[rank_index], shard_cb)  # [B, c]
+            result_nsb += torch.einsum(
+                "n s c, c b-> n s b", vector_shards_wnsc[rank_index], shard_cb
+            )  # [B, c]
             if self.rank != rank_index:
                 del shard_cb
 
         return result_nsb
 
-    def _sharded_hadamard(self, matrix_noi: Float[Tensor, "n o i"], lambda_ci: Float[Tensor, "c i"]):
+    def _sharded_hadamard(
+        self, matrix_noi: Float[Tensor, "n o i"], lambda_ci: Float[Tensor, "c i"]
+    ):
         """
         Sharded in-place element-wise multiplication for distributed training.
         gradients: [n, o, i]
@@ -207,7 +243,9 @@ class ShardedMul:
 
             start_row = rank_index * shard_ci.shape[0]
             end_row = (rank_index + 1) * shard_ci.shape[0]
-            inverse_lambda = (shard_ci + self.lambda_damp_factor * global_lambda_mean).reciprocal()
+            inverse_lambda = (
+                shard_ci + self.lambda_damp_factor * global_lambda_mean
+            ).reciprocal()
 
             matrix_noi[:, start_row:end_row, :].mul_(inverse_lambda)
 
@@ -229,7 +267,9 @@ class ShardedMul:
 
         x, y = (matrix_noi.shape[1], matrix_bc.shape[0] * self.world_size)
 
-        result_nxy = torch.zeros(matrix_noi.shape[0], x, y, device=matrix_noi.device, dtype=matrix_noi.dtype)
+        result_nxy = torch.zeros(
+            matrix_noi.shape[0], x, y, device=matrix_noi.device, dtype=matrix_noi.dtype
+        )
 
         for rank_index in range(self.world_size):
             if rank_index == self.rank:
@@ -242,7 +282,9 @@ class ShardedMul:
             start_row = rank_index * shard_size
             end_row = (rank_index + 1) * shard_size
 
-            result_nxy[:, :, start_row:end_row].copy_(torch.einsum("n o i, c i -> n o c", matrix_noi, shard_bc))
+            result_nxy[:, :, start_row:end_row].copy_(
+                torch.einsum("n o i, c i -> n o c", matrix_noi, shard_bc)
+            )
 
             if self.rank != rank_index:
                 del shard_bc
