@@ -31,7 +31,12 @@ from safetensors.torch import load_file, save_file
 from test_utils import set_all_seeds
 from torch import Tensor
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    PreTrainedModel,
+)
 
 from bergson.data import DataConfig, IndexConfig, Precision, pad_and_tensor, tokenize
 from bergson.hessians.utils import TensorDict
@@ -44,7 +49,9 @@ Batches = list[list[list[int]]]
 
 
 # %%
-def allocate_batches_test(doc_lengths: list[int], N: int, workers: Optional[int] = None) -> Batches:
+def allocate_batches_test(
+    doc_lengths: list[int], N: int, workers: Optional[int] = None
+) -> Batches:
     """
     Modification of allocate_batches to return a flat list of batches for testing.
 
@@ -103,7 +110,9 @@ def allocate_batches_test(doc_lengths: list[int], N: int, workers: Optional[int]
         while len(batches) < world_size:
             big = batches.pop(0)
             if len(big) == 1:
-                raise RuntimeError("Not enough documents to give each worker at least one batch.")
+                raise RuntimeError(
+                    "Not enough documents to give each worker at least one batch."
+                )
             batches.append([big.pop()])
             batches.append(big)
 
@@ -121,7 +130,9 @@ def allocate_batches_test(doc_lengths: list[int], N: int, workers: Optional[int]
         i += 1
 
     assert len(batches) == target_batches
-    assert all(max(doc_lengths[i] for i in batch) * len(batch) <= N for batch in batches)
+    assert all(
+        max(doc_lengths[i] for i in batch) * len(batch) <= N for batch in batches
+    )
 
     # Round-robin assignment to workers
     allocation: Batches = [[] for _ in range(world_size)]
@@ -143,7 +154,9 @@ def parse_config() -> tuple[Precision, Optional[str]]:
     output_dir: Optional[str]
 
     if len(sys.argv) > 1 and not hasattr(builtins, "__IPYTHON__"):
-        parser = argparse.ArgumentParser(description="Compute EKFAC ground truth for testing")
+        parser = argparse.ArgumentParser(
+            description="Compute EKFAC ground truth for testing"
+        )
         parser.add_argument(
             "--precision",
             type=str,
@@ -233,7 +246,9 @@ def setup_paths_and_config(
 
 
 if __name__ == "__main__" or TYPE_CHECKING:
-    cfg, test_path, workers, device, target_modules, dtype = setup_paths_and_config(precision, output_dir)
+    cfg, test_path, workers, device, target_modules, dtype = setup_paths_and_config(
+        precision, output_dir
+    )
 
 
 # %% [markdown]
@@ -259,7 +274,7 @@ def load_model_step(cfg: IndexConfig, dtype: torch.dtype) -> PreTrainedModel:
             if cfg.precision in ("int4", "int8")
             else None
         ),
-        torch_dtype=dtype,
+        dtype=dtype,
     )
     return model
 
@@ -282,7 +297,9 @@ def load_dataset_step(cfg: IndexConfig) -> Dataset:
         try:
             ds = load_dataset(data_str, split="train")
             if isinstance(ds, (DatasetDict, IterableDatasetDict)):
-                raise NotImplementedError("DatasetDicts and IterableDatasetDicts are not supported.")
+                raise NotImplementedError(
+                    "DatasetDicts and IterableDatasetDicts are not supported."
+                )
         except ValueError as e:
             if "load_from_disk" in str(e):
                 ds = Dataset.load_from_disk(data_str, keep_in_memory=False)
@@ -302,12 +319,18 @@ def tokenize_and_allocate_step(
     ds: Dataset, cfg: IndexConfig, workers: int
 ) -> tuple[Dataset, Batches, Any]:
     """Tokenize dataset and allocate batches."""
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model, model_max_length=cfg.token_batch_size)
-    ds = ds.map(tokenize, batched=True, fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer))
+    tokenizer = AutoTokenizer.from_pretrained(
+        cfg.model, model_max_length=cfg.token_batch_size
+    )
+    ds = ds.map(
+        tokenize, batched=True, fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer)
+    )
     data = ds
 
     # Allocate batches
-    batches_world = allocate_batches_test(doc_lengths=ds["length"], N=cfg.token_batch_size, workers=workers)
+    batches_world = allocate_batches_test(
+        doc_lengths=ds["length"], N=cfg.token_batch_size, workers=workers
+    )
     assert len(batches_world) == workers
 
     return data, batches_world, tokenizer
@@ -400,8 +423,16 @@ def compute_covariances_step(
             gradient_covariances=gradient_covariances,
         )
 
-        save_file(activation_covariances, os.path.join(covariance_test_path_rank, "activation_covariance.safetensors"))
-        save_file(gradient_covariances, os.path.join(covariance_test_path_rank, "gradient_covariance.safetensors"))
+        save_file(
+            activation_covariances,
+            os.path.join(
+                covariance_test_path_rank, "activation_covariance.safetensors"
+            ),
+        )
+        save_file(
+            gradient_covariances,
+            os.path.join(covariance_test_path_rank, "gradient_covariance.safetensors"),
+        )
         with open(os.path.join(covariance_test_path_rank, "stats.json"), "w") as f:
             json.dump({"total_processed_rank": d["total_processed_rank"]}, f, indent=4)
             print(f"Rank {rank} processed {d['total_processed_rank']} tokens.")
@@ -417,7 +448,9 @@ if __name__ == "__main__" or TYPE_CHECKING:
 
 
 # %%
-def combine_covariances_step(covariance_test_path: str, workers: int, device: torch.device) -> int:
+def combine_covariances_step(
+    covariance_test_path: str, workers: int, device: torch.device
+) -> int:
     """Combine covariance results from all ranks."""
     activation_covariances = TensorDict({})
     gradient_covariances = TensorDict({})
@@ -431,25 +464,41 @@ def combine_covariances_step(covariance_test_path: str, workers: int, device: to
             total_processed_global += d["total_processed_rank"]
 
         activation_covariances_rank = TensorDict(
-            load_file(os.path.join(covariance_test_path_rank, "activation_covariance.safetensors"))
+            load_file(
+                os.path.join(
+                    covariance_test_path_rank, "activation_covariance.safetensors"
+                )
+            )
         ).to(device)
 
         gradient_covariances_rank = TensorDict(
-            load_file(os.path.join(covariance_test_path_rank, "gradient_covariance.safetensors"))
+            load_file(
+                os.path.join(
+                    covariance_test_path_rank, "gradient_covariance.safetensors"
+                )
+            )
         ).to(device)
 
         if not activation_covariances:
             activation_covariances = activation_covariances_rank
         else:
-            activation_covariances = activation_covariances + activation_covariances_rank
+            activation_covariances = (
+                activation_covariances + activation_covariances_rank
+            )
 
         if not gradient_covariances:
             gradient_covariances = gradient_covariances_rank
         else:
             gradient_covariances = gradient_covariances + gradient_covariances_rank
 
-    save_file(activation_covariances.to_dict(), os.path.join(covariance_test_path, "activation_covariance.safetensors"))
-    save_file(gradient_covariances.to_dict(), os.path.join(covariance_test_path, "gradient_covariance.safetensors"))
+    save_file(
+        activation_covariances.to_dict(),
+        os.path.join(covariance_test_path, "activation_covariance.safetensors"),
+    )
+    save_file(
+        gradient_covariances.to_dict(),
+        os.path.join(covariance_test_path, "gradient_covariance.safetensors"),
+    )
     with open(os.path.join(covariance_test_path, "stats.json"), "w") as f:
         json.dump({"total_processed_global": total_processed_global}, f, indent=4)
         print(f"Global processed {total_processed_global} tokens.")
@@ -462,7 +511,9 @@ def combine_covariances_step(covariance_test_path: str, workers: int, device: to
 
 if __name__ == "__main__" or TYPE_CHECKING:
     print("\n=== Combining Covariances ===")
-    total_processed_global = combine_covariances_step(covariance_test_path, workers, device)
+    total_processed_global = combine_covariances_step(
+        covariance_test_path, workers, device
+    )
 
 
 # %% [markdown]
@@ -470,7 +521,9 @@ if __name__ == "__main__" or TYPE_CHECKING:
 
 
 # %%
-def compute_eigenvectors_step(test_path: str, device: torch.device, dtype: torch.dtype) -> str:
+def compute_eigenvectors_step(
+    test_path: str, device: torch.device, dtype: torch.dtype
+) -> str:
     """Compute eigenvectors from covariances."""
     covariance_test_path = os.path.join(test_path, "covariances")
     eigenvectors_test_path = os.path.join(test_path, "eigenvectors")
@@ -481,8 +534,12 @@ def compute_eigenvectors_step(test_path: str, device: torch.device, dtype: torch
         d = json.load(f)
         total_processed_global = d["total_processed_global"]
 
-    activation_covariances = load_file(os.path.join(covariance_test_path, "activation_covariance.safetensors"))
-    gradient_covariances = load_file(os.path.join(covariance_test_path, "gradient_covariance.safetensors"))
+    activation_covariances = load_file(
+        os.path.join(covariance_test_path, "activation_covariance.safetensors")
+    )
+    gradient_covariances = load_file(
+        os.path.join(covariance_test_path, "gradient_covariance.safetensors")
+    )
 
     eigenvectors_activations = {}
     eigenvectors_gradients = {}
@@ -497,12 +554,20 @@ def compute_eigenvectors_step(test_path: str, device: torch.device, dtype: torch
 
         eigenvalues_a, eigenvectors_a = torch.linalg.eigh(a)
         eigenvalues_g, eigenvectors_g = torch.linalg.eigh(g)
-        print(f"{name}: eigenvectors_a.sum()={eigenvectors_a.sum()}, eigenvectors_g.sum()={eigenvectors_g.sum()}")
+        print(
+            f"{name}: eigenvectors_a.sum()={eigenvectors_a.sum()}, eigenvectors_g.sum()={eigenvectors_g.sum()}"
+        )
         eigenvectors_activations[name] = eigenvectors_a.to(dtype=dtype).contiguous()
         eigenvectors_gradients[name] = eigenvectors_g.to(dtype=dtype).contiguous()
 
-    save_file(eigenvectors_activations, os.path.join(eigenvectors_test_path, "eigenvectors_activations.safetensors"))
-    save_file(eigenvectors_gradients, os.path.join(eigenvectors_test_path, "eigenvectors_gradients.safetensors"))
+    save_file(
+        eigenvectors_activations,
+        os.path.join(eigenvectors_test_path, "eigenvectors_activations.safetensors"),
+    )
+    save_file(
+        eigenvectors_gradients,
+        os.path.join(eigenvectors_test_path, "eigenvectors_gradients.safetensors"),
+    )
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -585,12 +650,18 @@ def compute_eigenvalue_corrections_step(
     os.makedirs(eigenvalue_correction_test_path, exist_ok=True)
 
     # Load eigenvectors
-    eigenvectors_activations = load_file(os.path.join(eigenvectors_test_path, "eigenvectors_activations.safetensors"))
-    eigenvectors_gradients = load_file(os.path.join(eigenvectors_test_path, "eigenvectors_gradients.safetensors"))
+    eigenvectors_activations = load_file(
+        os.path.join(eigenvectors_test_path, "eigenvectors_activations.safetensors")
+    )
+    eigenvectors_gradients = load_file(
+        os.path.join(eigenvectors_test_path, "eigenvectors_gradients.safetensors")
+    )
 
     total_processed_global = 0
     for rank in range(workers):
-        eigenvalue_correction_test_path_rank = os.path.join(eigenvalue_correction_test_path, f"rank_{rank}")
+        eigenvalue_correction_test_path_rank = os.path.join(
+            eigenvalue_correction_test_path, f"rank_{rank}"
+        )
         os.makedirs(eigenvalue_correction_test_path_rank, exist_ok=True)
 
         eigenvalue_corrections = {}
@@ -608,9 +679,14 @@ def compute_eigenvalue_corrections_step(
 
         save_file(
             eigenvalue_corrections,
-            os.path.join(eigenvalue_correction_test_path_rank, "eigenvalue_corrections.safetensors"),
+            os.path.join(
+                eigenvalue_correction_test_path_rank,
+                "eigenvalue_corrections.safetensors",
+            ),
         )
-        with open(os.path.join(eigenvalue_correction_test_path_rank, "stats.json"), "w") as f:
+        with open(
+            os.path.join(eigenvalue_correction_test_path_rank, "stats.json"), "w"
+        ) as f:
             json.dump({"total_processed_rank": d["total_processed_rank"]}, f, indent=4)
             print(f"Rank {rank} processed {d['total_processed_rank']} tokens.")
         total_processed_global += d["total_processed_rank"]
@@ -620,34 +696,50 @@ def compute_eigenvalue_corrections_step(
 
 if __name__ == "__main__" or TYPE_CHECKING:
     print("\n=== Computing Eigenvalue Corrections ===")
-    eigenvalue_correction_test_path, total_processed_global_lambda = compute_eigenvalue_corrections_step(
-        model, data, batches_world, device, target_modules, workers, test_path
+    eigenvalue_correction_test_path, total_processed_global_lambda = (
+        compute_eigenvalue_corrections_step(
+            model, data, batches_world, device, target_modules, workers, test_path
+        )
     )
 
 
 # %%
 def combine_eigenvalue_corrections_step(
-    eigenvalue_correction_test_path: str, workers: int, device: torch.device, total_processed_global: int
+    eigenvalue_correction_test_path: str,
+    workers: int,
+    device: torch.device,
+    total_processed_global: int,
 ) -> TensorDict:
     """Combine eigenvalue correction results from all ranks."""
     eigenvalue_corrections = TensorDict({})
 
     for rank in range(workers):
-        eigenvalue_correction_test_path_rank = os.path.join(eigenvalue_correction_test_path, f"rank_{rank}")
+        eigenvalue_correction_test_path_rank = os.path.join(
+            eigenvalue_correction_test_path, f"rank_{rank}"
+        )
 
         eigenvalue_corrections_rank = TensorDict(
-            load_file(os.path.join(eigenvalue_correction_test_path_rank, "eigenvalue_corrections.safetensors"))
+            load_file(
+                os.path.join(
+                    eigenvalue_correction_test_path_rank,
+                    "eigenvalue_corrections.safetensors",
+                )
+            )
         ).to(device)
 
         if not eigenvalue_corrections:
             eigenvalue_corrections = eigenvalue_corrections_rank
         else:
-            eigenvalue_corrections = eigenvalue_corrections + eigenvalue_corrections_rank
+            eigenvalue_corrections = (
+                eigenvalue_corrections + eigenvalue_corrections_rank
+            )
 
     eigenvalue_corrections.div_(total_processed_global)
     save_file(
         eigenvalue_corrections.to_dict(),
-        os.path.join(eigenvalue_correction_test_path, "eigenvalue_corrections.safetensors"),
+        os.path.join(
+            eigenvalue_correction_test_path, "eigenvalue_corrections.safetensors"
+        ),
     )
 
     return eigenvalue_corrections
