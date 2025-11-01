@@ -110,6 +110,9 @@ class QueryConfig:
     writer: Literal["csv", "memmap"] = "csv"
     """Writer to use for the query scores."""
 
+    create_custom_query: bool = False
+    """Whether to save a dictionary of query gradients in a torch file."""
+
 
 @dataclass
 class IndexConfig:
@@ -325,6 +328,46 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
     return allocation[rank]
 
 
+def create_unstructured_index(
+    root: str, num_grads: int, grad_sizes: dict[str, int], dtype: DTypeLike
+) -> np.memmap:
+    """Create a memory-mapped file for storing structured gradients
+    and persist metadata."""
+    grad_path = os.path.join(root, "gradients.bin")
+    rank = dist.get_rank() if dist.is_initialized() else 0
+
+    grad_len = sum(grad_sizes.values())
+
+    # ── 1. Rank-0 creates file & metadata exactly once ─────────────────────────
+    if rank == 0:
+        # Ensure the directory exists
+        os.makedirs(root, exist_ok=True)
+
+        # Allocate (extends file to right size without writing zeros byte-by-byte)
+        nbytes = np.dtype(dtype).itemsize * num_grads * grad_len   # type: ignore
+        with open(grad_path, "wb") as f:
+            f.truncate(nbytes)
+
+            # Force the directory entry + data to disk *before* other ranks continue
+            os.fsync(f.fileno())
+
+        # Persist metadata for future runs
+        dtype_str = "np.float32" if dtype == np.float32 else "np.float16"
+        with open(root + "/info.json", "w") as f:
+            json.dump({"num_grads": num_grads, "dtype": dtype_str, "grad_len": grad_len, "target_modules": list(grad_sizes.keys())}, f, indent=2)
+
+    # ── 2. Everyone blocks until the file is definitely there & sized ─────────────
+    if dist.is_initialized():
+        dist.barrier()
+
+    return np.memmap(
+        grad_path,
+        dtype=dtype,
+        mode="r+",
+        shape=(num_grads, grad_len),
+    )
+
+    
 def create_index(
     root: str, num_grads: int, grad_sizes: dict[str, int], dtype: DTypeLike
 ) -> np.memmap:
@@ -384,7 +427,7 @@ def load_data_string(
         try:
             if subset:
                 ds = load_dataset(
-                    data_str, split=split, subset=subset, streaming=streaming
+                    data_str, subset, split=split, streaming=streaming
                 )
             else:
                 ds = load_dataset(data_str, split=split, streaming=streaming)
@@ -411,7 +454,7 @@ def load_data_string(
     return ds
 
 
-def load_gradients(root_dir: str) -> np.memmap:
+def load_gradients(root_dir: str, structured: bool = True) -> np.memmap:
     """Map the structured gradients stored in `root_dir` into memory."""
 
     with open(os.path.join(root_dir, "info.json")) as f:
@@ -419,6 +462,16 @@ def load_gradients(root_dir: str) -> np.memmap:
 
     dtype = info["dtype"]
     num_grads = info["num_grads"]
+
+    if not structured:
+        grad_len = info["grad_len"]
+
+        return np.memmap(
+            os.path.join(root_dir, "gradients.bin"),
+            dtype=np.float32 if info["dtype"] == "np.float32" else np.float16,
+            mode="r",
+            shape=(num_grads, grad_len),
+        )
 
     return np.memmap(
         os.path.join(root_dir, "gradients.bin"),
@@ -429,17 +482,20 @@ def load_gradients(root_dir: str) -> np.memmap:
 
 
 def load_gradient_dataset(
-    root_dir: str, concatenate_gradients: bool = False
+    root_dir: str, concatenate_gradients: bool = False, structured: bool = True
 ) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
 
     def load_shard(dir: str) -> Dataset:
-        mmap = load_gradients(dir)
+        mmap = load_gradients(dir, structured=structured)
         ds = Dataset.load_from_disk(dir + "/data.hf")
 
         # concatenate the extracted module gradients into a single column
         if concatenate_gradients:
-            unstructured_data = structured_to_unstructured(mmap)
+            if mmap.dtype.names is None:
+                unstructured_data = mmap
+            else:
+                unstructured_data = structured_to_unstructured(mmap)
             flat = pa.array(unstructured_data.reshape(-1))
             col_arrow = pa.FixedSizeListArray.from_arrays(
                 flat, unstructured_data.shape[1]

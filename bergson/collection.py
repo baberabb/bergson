@@ -1,7 +1,7 @@
 import math
+import os
 from typing import Literal
 
-# import os
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -10,7 +10,7 @@ from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from .data import create_index, pad_and_tensor
+from .data import create_index, create_unstructured_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
 from .query_writer import QueryWriter
@@ -39,7 +39,7 @@ def collect_gradients(
     """
     Compute projected gradients using a subset of the dataset.
     """
-    assert not create_custom_query, "create_custom_query is commented out"
+    # assert not create_custom_query, "create_custom_query is commented out"
     if module_wise and query_writer:
         assert skip_preconditioners
 
@@ -74,22 +74,37 @@ def collect_gradients(
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
     # Allocate structured space ahead of time for the gradients
-    grad_buffer = (
-        create_index(path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np_dtype)
-        if save_index
-        else None
-    )
-    # if create_custom_query:
-    #     num_grads = sum(len(indices) for indices in batches)
-    #     print("file size in GB", sum(list(grad_sizes.values())) *
-    # np.dtype(np_dtype).itemsize / 1024**3)
-    #     grads = {
-    #         name: torch.zeros(1, grad_sizes[name], dtype=torch.float16, device="cpu")
-    #         for name in grad_sizes.keys()
-    #     }
-    # else:
-    #     grads = {}
-    #     num_grads = -1
+    if processor.projection_dim is None:
+        grad_buffer = (
+            create_unstructured_index(
+                path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np_dtype
+            )
+            if save_index
+            else None
+        )
+    else:
+        grad_buffer = (
+            create_index(
+                path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np_dtype
+            )
+            if save_index
+            else None
+        )
+    if create_custom_query:
+        num_grads = sum(len(indices) for indices in batches)
+        print(
+            "file size in GB",
+            sum(list(grad_sizes.values())) * np.dtype(np_dtype).itemsize / 1024**3,
+        )
+        custom_grads = {
+            name: torch.zeros(
+                num_grads, grad_sizes[name], dtype=torch.float16, device="cpu"
+            )
+            for name in grad_sizes.keys()
+        }
+    else:
+        custom_grads = {}
+        num_grads = -1
 
     def callback(name: str, g: torch.Tensor, indices: list[int]):
         g = g.flatten(1).clamp_(lo, hi)
@@ -210,6 +225,10 @@ def collect_gradients(
 
         model.zero_grad()
 
+        if create_custom_query:
+            for name in mod_grads.keys():
+                custom_grads[name][indices] = mod_grads[name]
+
         if grad_buffer is not None and not module_wise:
             # Weirdly you need to explicitly synchronize here in order to make
             # sure that the nonblocking copies actually finish before we call
@@ -219,12 +238,16 @@ def collect_gradients(
             # It turns out that it's very important for efficiency to write the
             # gradients sequentially instead of first concatenating them, then
             # writing to one vector
-            # if custom:
-            # for name in mod_grads.keys():
-            # grads[name] += mod_grads[name].sum(dim=0) / len(indices)
             # else:
-            for module_name in mod_grads.keys():
-                grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
+            if processor.projection_dim is None:
+                start = 0
+                for key, mod in mod_grads.items():
+                    end = start + mod.shape[1]
+                    grad_buffer[indices, start:end] = mod.numpy()
+                    start = end
+            else:
+                for module_name in mod_grads.keys():
+                    grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
 
         if query_writer and not module_wise:
             query_writer(indices, mod_grads)
@@ -261,9 +284,11 @@ def collect_gradients(
     if query_writer:
         query_writer.flush()
 
-    # if create_custom_query:
-    #     torch.save(grads, os.path.join(path, f"accum_mean_grads_{rank}.pth"))
-    #     torch.save(num_grads, os.path.join(path, f"num_grads_{rank}.pth"))
+    if create_custom_query:
+        print("saving custom grads")
+        print(custom_grads)
+        torch.save(custom_grads, os.path.join(path, f"custom_grads_{rank}.pth"))
+        torch.save(num_grads, os.path.join(path, f"num_grads_{rank}.pth"))
 
 
 def process_preconditioners(

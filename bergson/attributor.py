@@ -50,7 +50,8 @@ class Attributor:
         self.faiss_index = None
 
         # Load the gradient processor
-        self.processor = GradientProcessor.load(index_path, map_location=device)
+        self.processor = GradientProcessor(projection_dim=16)
+        # self.processor = GradientProcessor.load(index_path, map_location=device)
 
         # Load the gradient index
         if faiss_cfg:
@@ -125,7 +126,7 @@ class Attributor:
 
     @contextmanager
     def trace(
-        self, module: nn.Module, k: int, *, precondition: bool = False
+        self, module: nn.Module, k: int | None, *, precondition: bool = False, target_modules: set[str] | None = None
     ) -> Generator[TraceResult, None, None]:
         """
         Context manager to trace the gradients of a module and return the
@@ -134,7 +135,7 @@ class Attributor:
         mod_grads = defaultdict(list)
         result = TraceResult()
 
-        def callback(name: str, g: Tensor):
+        def callback(name: str, g: Tensor, indices: list[int]):
             # Precondition the gradient using Cholesky solve
             if precondition:
                 eigval, eigvec = self.processor.preconditioners_eigen[name]
@@ -148,7 +149,7 @@ class Attributor:
             # Store the gradient for later use
             mod_grads[name].append(g.to(self.device, self.dtype, non_blocking=True))
 
-        with GradientCollector(module, callback, self.processor):
+        with GradientCollector(module, callback, self.processor, target_modules):
             yield result
 
         if not mod_grads:

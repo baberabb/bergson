@@ -170,6 +170,7 @@ def worker(
             drop_columns=cfg.drop_columns,
             create_custom_query=cfg.in_memory_index,
             module_wise=cfg.module_wise,
+            token_batch_size=cfg.token_batch_size,
         )
     else:
         # Convert each shard to a Dataset then map over its gradients
@@ -198,6 +199,7 @@ def worker(
                 drop_columns=cfg.drop_columns,
                 create_custom_query=cfg.in_memory_index,
                 module_wise=cfg.module_wise,
+                token_batch_size=cfg.token_batch_size,
             )
             buf.clear()
             shard_id += 1

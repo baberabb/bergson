@@ -38,7 +38,7 @@ from .query_writer import CsvQueryWriter, MemmapQueryWriter
 from .utils import assert_type, get_layer_list
 
 
-def get_query_data(query_cfg: QueryConfig):
+def get_query_data(query_cfg: QueryConfig, projection_dim: int | None):
     """
     Load and optionally precondition the query dataset. Preconditioners
     may be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
@@ -55,19 +55,60 @@ def get_query_data(query_cfg: QueryConfig):
         query_ds = load_from_disk(query_cfg.query_path)
         if not query_cfg.modules:
             query_cfg.modules = list(query_ds.column_names)
-            print(f"Modules: {query_cfg.modules}")
         query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
 
         return query_ds
+    elif query_cfg.query_path.endswith("custom_grads_0.pth"):
+        print("Short circuiting code")
+        query_ds = torch.load(query_cfg.query_path)
+        if not query_cfg.modules:
+            query_cfg.modules = list(query_ds.keys())
+        query_ds = Dataset.from_dict(
+            {name: query_ds[name].numpy() for name in query_ds}
+        )
+        query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
+        print(query_ds)
+        return query_ds
+    elif query_cfg.query_path.endswith("custom_grads_1.pth"):
+        print("Short circuiting code")
+        query_ds = torch.load(query_cfg.query_path)
+        if not query_cfg.modules:
+            query_cfg.modules = list(query_ds.keys())
+        query_ds = Dataset.from_dict(
+            {name: query_ds[name].numpy() for name in query_ds}
+        )
+        query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
+        print(query_ds)
+        return query_ds
 
     # Load the query dataset
-    with open(os.path.join(query_cfg.query_path, "info.json"), "r") as f:
-        target_modules = json.load(f)["dtype"]["names"]
 
-    query_ds = load_gradient_dataset(query_cfg.query_path, concatenate_gradients=False)
-    query_ds = query_ds.with_format(
-        "torch", columns=target_modules, dtype=torch.float32
-    )
+    if projection_dim is None or projection_dim == 0:
+        with open(os.path.join(query_cfg.query_path, "info.json"), "r") as f:
+            target_modules = json.load(f)["target_modules"]
+        concatenate_gradients = True
+        query_ds = load_gradient_dataset(
+            query_cfg.query_path,
+            concatenate_gradients=concatenate_gradients,
+            structured=False,
+        )
+        query_ds = query_ds.with_format(
+            "torch", columns=["gradients"], dtype=torch.float32
+        )
+        return query_ds
+
+    else:
+        with open(os.path.join(query_cfg.query_path, "info.json"), "r") as f:
+            target_modules = json.load(f)["dtype"]["names"]
+        concatenate_gradients = False
+        query_ds = load_gradient_dataset(
+            query_cfg.query_path,
+            concatenate_gradients=concatenate_gradients,
+            structured=True,
+        )
+        query_ds = query_ds.with_format(
+            "torch", columns=target_modules, dtype=torch.float32
+        )
 
     # Ensure all gradient columns are materialized as float32 tensors with their native
     # sequence length.
@@ -248,6 +289,56 @@ def get_module_wise_mean_query(
         return module_scores, sum_of_squares
 
     return callback
+
+
+# def get_mean_query_full_grads(
+#     query_ds: Dataset, query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype
+# ):
+#     """
+#     Compute the mean query and return a callback function that scores gradients
+#     according to their inner products or cosine similarities with the mean query.
+#     """
+#     # Accumulate on CPU to avoid holding full-resolution gradients on GPU.
+#     acc_device = torch.device("cpu")
+#     acc = {
+#         module: torch.zeros_like(
+#             query_ds[0][module], device=acc_device, dtype=torch.float32
+#         )
+#         for module in query_cfg.modules
+#     }
+
+#     def sum_(*cols):
+#         for module, x in zip(query_cfg.modules, cols):
+#             x = x.to(device=acc_device, dtype=torch.float32)
+#             if query_cfg.unit_normalize:
+#                 x = x / (x.norm(dim=1, keepdim=True) + 1e-12)
+#             acc[module].add_(x.sum(0))
+
+#     query_ds.map(
+#         sum_,
+#         input_columns=query_cfg.modules,
+#         batched=True,
+#         batch_size=query_cfg.batch_size,
+#     )
+
+#     callback_query = torch.cat(
+#         [
+#             (acc[module] / len(query_ds)).to(
+#                 device=device, dtype=dtype, non_blocking=True
+#             )
+#             for module in query_cfg.modules
+#         ],
+#         dim=0,
+#     )
+
+#     @torch.inference_mode()
+#     def callback(mod_grads: dict[str, torch.Tensor]):
+#         grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=1)
+#         if query_cfg.unit_normalize:
+#             grads /= grads.norm(dim=1, keepdim=True)
+#         return grads @ callback_query
+
+#     return callback
 
 
 def get_mean_query(
@@ -471,7 +562,7 @@ def worker(
             init_method=f"tcp://{addr}:{port}",
             device_id=torch.device(f"cuda:{rank}"),
             rank=rank,
-            timeout=timedelta(minutes=20),
+            timeout=timedelta(minutes=15),
             world_size=world_size,
         )
 
@@ -585,9 +676,12 @@ def worker(
 
     if not query_cfg.modules:
         with open(os.path.join(query_cfg.query_path, "info.json"), "r") as f:
-            query_cfg.modules = json.load(f)["dtype"]["names"]
-
-    query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
+            if index_cfg.projection_dim is None or index_cfg.projection_dim == 0:
+                query_cfg.modules = json.load(f)["target_modules"]
+                query_ds = query_ds.with_format("torch", columns=["gradients"])
+            else:
+                query_cfg.modules = json.load(f)["dtype"]["names"]
+                query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
 
     query_dtype = dtype if dtype != "auto" else torch.float16
 
@@ -667,6 +761,7 @@ def worker(
             save_index=index_cfg.save_index,
             save_processor=index_cfg.save_processor,
             module_wise=index_cfg.module_wise,
+            create_custom_query=query_cfg.create_custom_query,
         )
     else:
         # Convert each shard to a Dataset then collect its gradients
@@ -763,7 +858,10 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
 
     # Do all the data loading and preprocessing on the main process
     ds = load_data_string(
-        index_cfg.data.dataset, index_cfg.data.split, streaming=index_cfg.streaming
+        index_cfg.data.dataset,
+        index_cfg.data.split,
+        subset=index_cfg.data.subset,
+        streaming=index_cfg.streaming,
     )
 
     os.makedirs(index_cfg.partial_run_path, exist_ok=True)
@@ -783,7 +881,7 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
             new_fingerprint="advantage",  # type: ignore
         )
 
-    query_ds = get_query_data(query_cfg)
+    query_ds = get_query_data(query_cfg, index_cfg.projection_dim)
 
     world_size = torch.cuda.device_count()
     if world_size <= 1:
