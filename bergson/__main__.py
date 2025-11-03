@@ -36,9 +36,9 @@ class Build:
 
     def execute(self):
         """Build the gradient dataset."""
-        if not self.cfg.save_index and not self.cfg.save_processor:
+        if not self.cfg.save_index and not self.cfg.save_processor and not self.cfg.create_custom_query:
             raise ValueError(
-                "At least one of save_index or save_processor must be True"
+                "At least one of save_index or save_processor or create_custom_query must be True"
             )
 
         build_gradient_dataset(self.cfg)

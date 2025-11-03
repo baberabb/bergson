@@ -1,3 +1,4 @@
+import psutil
 import json
 import os
 from dataclasses import dataclass
@@ -60,6 +61,25 @@ class Index(Protocol):
     def train(self, x: NDArray) -> None: ...
     def add(self, x: NDArray) -> None: ...
 
+
+def check_ram_usage(gradients_path, largest_shard_size):
+    available_ram_gb = psutil.virtual_memory().available / (1024**3)
+
+    first_batch = structured_to_unstructured(next(iter(gradients_loader(gradients_path))))
+    bytes_per_grad = first_batch.nbytes / first_batch.shape[0]
+    grad_dim = first_batch.shape[1]
+    estimated_shard_ram_gb = (largest_shard_size * bytes_per_grad) / (1024**3)
+
+    if estimated_shard_ram_gb > available_ram_gb:
+        raise ValueError(
+            f"Not enough RAM to build index."
+            f"Estimated RAM required for largest shard: {estimated_shard_ram_gb} GB"
+            f"Available RAM: {available_ram_gb} GB"
+            f"Increase the number of shards to reduce peak RAM usage."
+        )
+    else:
+        print(f"Estimated RAM required for largest shard: {estimated_shard_ram_gb} GB")
+        print(f"Available RAM: {available_ram_gb} GB")
 
 def normalize_grads(
     grads: NDArray,
@@ -183,6 +203,8 @@ class FaissIndex:
             shard_sizes = [base_shard_size] * (faiss_cfg.num_shards)
             shard_sizes[-1] += remainder
 
+            check_ram_usage(path, shard_sizes[-1])
+
             # Verify all gradients will be consumed
             assert (
                 sum(shard_sizes) == total_grads
@@ -267,10 +289,6 @@ class FaissIndex:
                 shard = index_to_device(shard, device)
 
             shards.append(shard)
-
-        # TODO raise?
-        if len(shards) != faiss_cfg.num_shards:
-            faiss_cfg.num_shards = len(shards)
 
         self.shards = shards
 

@@ -58,31 +58,28 @@ def get_query_data(query_cfg: QueryConfig, projection_dim: int | None):
         query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
 
         return query_ds
-    elif query_cfg.query_path.endswith("custom_grads_0.pth"):
-        print("Short circuiting code")
+
+    if query_cfg.query_path.endswith(".pth") or query_cfg.query_path.endswith(".pt"):
+        print("Loading custom query gradients")
         query_ds = torch.load(query_cfg.query_path)
         if not query_cfg.modules:
             query_cfg.modules = list(query_ds.keys())
-        query_ds = Dataset.from_dict(
-            {name: query_ds[name].numpy() for name in query_ds}
-        )
-        query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
-        print(query_ds)
-        return query_ds
-    elif query_cfg.query_path.endswith("custom_grads_1.pth"):
-        print("Short circuiting code")
-        query_ds = torch.load(query_cfg.query_path)
-        if not query_cfg.modules:
-            query_cfg.modules = list(query_ds.keys())
-        query_ds = Dataset.from_dict(
-            {name: query_ds[name].numpy() for name in query_ds}
-        )
+
+        try:
+            query_ds = Dataset.from_dict(
+                {name: query_ds[name].numpy() for name in query_ds}
+            )
+        except:
+            # Handling one-row dataset
+            query_ds = Dataset.from_dict(
+                {name: [query_ds[name].flatten().numpy()] for name in query_ds}
+            )
+
         query_ds = query_ds.with_format("torch", columns=query_cfg.modules)
         print(query_ds)
         return query_ds
 
     # Load the query dataset
-
     if projection_dim is None or projection_dim == 0:
         with open(os.path.join(query_cfg.query_path, "info.json"), "r") as f:
             target_modules = json.load(f)["target_modules"]
@@ -252,24 +249,22 @@ def get_module_wise_mean_query(
                 )
                 for module in query_cfg.modules
             }
+            torch.cuda.synchronize()
             norm = (
-                torch.cat(
+                torch.tensor(
                     [
-                        (query_ds[0][module].to(torch.float32) ** 2).sum(dim=1)
+                        (callback_query[module] ** 2).sum().item()
                         for module in query_cfg.modules
                     ],
-                    dim=0,
+                    device=device,
+                    dtype=torch.float32,
                 )
                 .sum()
                 .sqrt()
             )
-            print(norm.shape)
-            callback_query = {
-                module: (callback_query[module].to(torch.float32) / norm).to(
-                    dtype=dtype
-                )
-                for module in query_cfg.modules
-            }
+            for module in query_cfg.modules:
+                callback_query[module] /= norm
+                callback_query[module] = callback_query[module].to(dtype=dtype)
         else:
             callback_query = {
                 module: query_ds[0][module].to(
@@ -280,10 +275,10 @@ def get_module_wise_mean_query(
 
     @torch.inference_mode()
     def callback(mod_grads: dict[str, torch.Tensor], name: str):
-        module_scores = torch.inner(mod_grads[name], callback_query[name]).to(
-            "cpu", non_blocking=True
-        )
+        module_scores = torch.inner(mod_grads[name], callback_query[name])
         mod_grads[name].pow_(2)
+        module_scores = module_scores.to("cpu", non_blocking=True)
+
         sum_of_squares = mod_grads[name].sum(dim=1).to("cpu", non_blocking=True)
 
         return module_scores, sum_of_squares
@@ -685,6 +680,7 @@ def worker(
 
     query_dtype = dtype if dtype != "auto" else torch.float16
 
+    print("Getting query callback")
     if query_cfg.score == "mean":
         if index_cfg.module_wise:
             base_query_callback = get_module_wise_mean_query(
@@ -707,6 +703,8 @@ def worker(
         num_scores = len(query_ds)
     else:
         raise ValueError(f"Invalid query scoring method: {query_cfg.score}")
+
+    print("Query callback done")
 
     scores_dtype = torch.float32 if model.dtype == torch.float32 else torch.float16
 
@@ -744,6 +742,7 @@ def worker(
                 modules=query_cfg.modules,
                 module_wise=index_cfg.module_wise,
             )
+        print("Collecting")
         collect_gradients(
             model,
             ds,
@@ -761,7 +760,7 @@ def worker(
             save_index=index_cfg.save_index,
             save_processor=index_cfg.save_processor,
             module_wise=index_cfg.module_wise,
-            create_custom_query=query_cfg.create_custom_query,
+            create_custom_query=index_cfg.create_custom_query,
         )
     else:
         # Convert each shard to a Dataset then collect its gradients
@@ -882,6 +881,8 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
         )
 
     query_ds = get_query_data(query_cfg, index_cfg.projection_dim)
+
+    print("running dist")
 
     world_size = torch.cuda.device_count()
     if world_size <= 1:

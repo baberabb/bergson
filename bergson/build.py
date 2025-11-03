@@ -168,7 +168,7 @@ def worker(
             save_index=cfg.save_index,
             save_processor=cfg.save_processor,
             drop_columns=cfg.drop_columns,
-            create_custom_query=cfg.in_memory_index,
+            create_custom_query=cfg.create_custom_query,
             module_wise=cfg.module_wise,
             token_batch_size=cfg.token_batch_size,
         )
@@ -197,7 +197,7 @@ def worker(
                 # Save a processor state checkpoint after each shard
                 save_processor=cfg.save_processor,
                 drop_columns=cfg.drop_columns,
-                create_custom_query=cfg.in_memory_index,
+                create_custom_query=cfg.create_custom_query,
                 module_wise=cfg.module_wise,
                 token_batch_size=cfg.token_batch_size,
             )
@@ -240,15 +240,19 @@ def build_gradient_dataset(cfg: IndexConfig):
     tokenizer.model_max_length = min(tokenizer.model_max_length, cfg.token_batch_size)
 
     # Do all the data loading and preprocessing on the main process
-    ds = load_data_string(cfg.data.dataset, cfg.data.split, streaming=cfg.streaming)
+    if cfg.data.subset:
+        ds = load_data_string(cfg.data.dataset, cfg.data.split, cfg.data.subset, streaming=cfg.streaming)
+    else:
+        ds = load_data_string(cfg.data.dataset, cfg.data.split, streaming=cfg.streaming)
 
     remove_columns = ds.column_names if cfg.drop_columns else None
-    ds = ds.map(
-        tokenize,
-        batched=True,
-        fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
-        remove_columns=remove_columns,
-    )
+    if not cfg.skip_tokenization:
+        ds = ds.map(
+            tokenize,
+            batched=True,
+            fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
+            remove_columns=remove_columns,
+        )
     if cfg.data.reward_column:
         assert isinstance(ds, Dataset), "Dataset required for advantage estimation"
         ds = ds.add_column(

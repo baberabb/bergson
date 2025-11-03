@@ -110,10 +110,6 @@ class QueryConfig:
     writer: Literal["csv", "memmap"] = "csv"
     """Writer to use for the query scores."""
 
-    create_custom_query: bool = False
-    """Whether to save a dictionary of query gradients in a torch file."""
-
-
 @dataclass
 class IndexConfig:
     """Config for building the index and running the model/dataset pipeline."""
@@ -124,8 +120,8 @@ class IndexConfig:
     save_index: bool = True
     """Whether to write the gradient index to disk."""
 
-    in_memory_index: bool = False
-    """Whether to keep the gradient index in memory and torch.save it to disk."""
+    # in_memory_index: bool = False
+    # """Whether to keep the gradient index in memory and torch.save it to disk."""
 
     save_processor: bool = True
     """Whether to write the gradient processor to disk."""
@@ -141,6 +137,9 @@ class IndexConfig:
 
     precision: Literal["auto", "bf16", "fp16", "fp32", "int4", "int8"] = "auto"
     """Precision (dtype) to use for the model parameters."""
+
+    skip_tokenization: bool = False
+    """Whether to skip tokenization of the dataset."""
 
     projection_dim: int = 16
     """Dimension of the random projection for the index, or 0 to disable it."""
@@ -190,6 +189,9 @@ class IndexConfig:
 
     module_wise: bool = False
     """Whether to compute the gradients module-wise."""
+
+    create_custom_query: bool = False
+    """Whether to save a dictionary of custom gradients in a torch file."""
 
     @property
     def partial_run_path(self) -> str:
@@ -344,7 +346,7 @@ def create_unstructured_index(
         os.makedirs(root, exist_ok=True)
 
         # Allocate (extends file to right size without writing zeros byte-by-byte)
-        nbytes = np.dtype(dtype).itemsize * num_grads * grad_len   # type: ignore
+        nbytes = np.dtype(dtype).itemsize * num_grads * grad_len  # type: ignore
         with open(grad_path, "wb") as f:
             f.truncate(nbytes)
 
@@ -354,7 +356,16 @@ def create_unstructured_index(
         # Persist metadata for future runs
         dtype_str = "np.float32" if dtype == np.float32 else "np.float16"
         with open(root + "/info.json", "w") as f:
-            json.dump({"num_grads": num_grads, "dtype": dtype_str, "grad_len": grad_len, "target_modules": list(grad_sizes.keys())}, f, indent=2)
+            json.dump(
+                {
+                    "num_grads": num_grads,
+                    "dtype": dtype_str,
+                    "grad_len": grad_len,
+                    "target_modules": list(grad_sizes.keys()),
+                },
+                f,
+                indent=2,
+            )
 
     # ── 2. Everyone blocks until the file is definitely there & sized ─────────────
     if dist.is_initialized():
@@ -367,7 +378,7 @@ def create_unstructured_index(
         shape=(num_grads, grad_len),
     )
 
-    
+
 def create_index(
     root: str, num_grads: int, grad_sizes: dict[str, int], dtype: DTypeLike
 ) -> np.memmap:
@@ -426,9 +437,7 @@ def load_data_string(
     else:
         try:
             if subset:
-                ds = load_dataset(
-                    data_str, subset, split=split, streaming=streaming
-                )
+                ds = load_dataset(data_str, subset, split=split, streaming=streaming)
             else:
                 ds = load_dataset(data_str, split=split, streaming=streaming)
 
