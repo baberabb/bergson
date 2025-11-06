@@ -18,8 +18,15 @@ def assert_type(typ: Type[T], obj: Any) -> T:
 
 
 def get_layer_list(model: PreTrainedModel) -> nn.ModuleList:
-    """Get the list of layers to train SAEs on."""
-    N = assert_type(int, model.config.num_hidden_layers)
+    """Get the list of model layers."""
+    if hasattr(model.config, "num_hidden_layers"):
+        N = assert_type(int, model.config.num_hidden_layers)
+    elif hasattr(model.config, "text_config"):
+        N = assert_type(int, model.config.text_config.num_hidden_layers)
+    else:
+        print(model.config)
+        raise ValueError("Could not find the number of hidden layers.")
+
     candidates = [
         mod
         for mod in model.base_model.modules()

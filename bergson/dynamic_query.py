@@ -69,7 +69,7 @@ def get_query_data(query_cfg: QueryConfig, projection_dim: int | None):
             query_ds = Dataset.from_dict(
                 {name: query_ds[name].numpy() for name in query_ds}
             )
-        except:
+        except Exception:
             # Handling one-row dataset
             query_ds = Dataset.from_dict(
                 {name: [query_ds[name].flatten().numpy()] for name in query_ds}
@@ -276,9 +276,9 @@ def get_module_wise_mean_query(
     @torch.inference_mode()
     def callback(mod_grads: dict[str, torch.Tensor], name: str):
         module_scores = torch.inner(mod_grads[name], callback_query[name])
-        mod_grads[name].pow_(2)
         module_scores = module_scores.to("cpu", non_blocking=True)
 
+        mod_grads[name].pow_(2)
         sum_of_squares = mod_grads[name].sum(dim=1).to("cpu", non_blocking=True)
 
         return module_scores, sum_of_squares
@@ -286,54 +286,54 @@ def get_module_wise_mean_query(
     return callback
 
 
-# def get_mean_query_full_grads(
-#     query_ds: Dataset, query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype
-# ):
-#     """
-#     Compute the mean query and return a callback function that scores gradients
-#     according to their inner products or cosine similarities with the mean query.
-#     """
-#     # Accumulate on CPU to avoid holding full-resolution gradients on GPU.
-#     acc_device = torch.device("cpu")
-#     acc = {
-#         module: torch.zeros_like(
-#             query_ds[0][module], device=acc_device, dtype=torch.float32
-#         )
-#         for module in query_cfg.modules
-#     }
+def get_mean_query_full_grads(
+    query_ds: Dataset, query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype
+):
+    """
+    Compute the mean query and return a callback function that scores gradients
+    according to their inner products or cosine similarities with the mean query.
+    """
+    # Accumulate on CPU to avoid holding full-resolution gradients on GPU.
+    acc_device = torch.device("cpu")
+    acc = {
+        module: torch.zeros_like(
+            query_ds[0][module], device=acc_device, dtype=torch.float32
+        )
+        for module in query_cfg.modules
+    }
 
-#     def sum_(*cols):
-#         for module, x in zip(query_cfg.modules, cols):
-#             x = x.to(device=acc_device, dtype=torch.float32)
-#             if query_cfg.unit_normalize:
-#                 x = x / (x.norm(dim=1, keepdim=True) + 1e-12)
-#             acc[module].add_(x.sum(0))
+    def sum_(*cols):
+        for module, x in zip(query_cfg.modules, cols):
+            x = x.to(device=acc_device, dtype=torch.float32)
+            if query_cfg.unit_normalize:
+                x = x / (x.norm(dim=1, keepdim=True) + 1e-12)
+            acc[module].add_(x.sum(0))
 
-#     query_ds.map(
-#         sum_,
-#         input_columns=query_cfg.modules,
-#         batched=True,
-#         batch_size=query_cfg.batch_size,
-#     )
+    query_ds.map(
+        sum_,
+        input_columns=query_cfg.modules,
+        batched=True,
+        batch_size=query_cfg.batch_size,
+    )
 
-#     callback_query = torch.cat(
-#         [
-#             (acc[module] / len(query_ds)).to(
-#                 device=device, dtype=dtype, non_blocking=True
-#             )
-#             for module in query_cfg.modules
-#         ],
-#         dim=0,
-#     )
+    callback_query = torch.cat(
+        [
+            (acc[module] / len(query_ds)).to(
+                device=device, dtype=dtype, non_blocking=True
+            )
+            for module in query_cfg.modules
+        ],
+        dim=0,
+    )
 
-#     @torch.inference_mode()
-#     def callback(mod_grads: dict[str, torch.Tensor]):
-#         grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=1)
-#         if query_cfg.unit_normalize:
-#             grads /= grads.norm(dim=1, keepdim=True)
-#         return grads @ callback_query
+    @torch.inference_mode()
+    def callback(mod_grads: dict[str, torch.Tensor]):
+        grads = torch.cat([mod_grads[name] for name in query_cfg.modules], dim=1)
+        if query_cfg.unit_normalize:
+            grads /= grads.norm(dim=1, keepdim=True)
+        return grads @ callback_query
 
-#     return callback
+    return callback
 
 
 def get_mean_query(

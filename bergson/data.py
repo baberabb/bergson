@@ -110,6 +110,7 @@ class QueryConfig:
     writer: Literal["csv", "memmap"] = "csv"
     """Writer to use for the query scores."""
 
+
 @dataclass
 class IndexConfig:
     """Config for building the index and running the model/dataset pipeline."""
@@ -192,6 +193,9 @@ class IndexConfig:
 
     create_custom_query: bool = False
     """Whether to save a dictionary of custom gradients in a torch file."""
+
+    add_unembed: bool = False
+    """Whether to add the unembed layer to the target modules."""
 
     @property
     def partial_run_path(self) -> str:
@@ -300,7 +304,7 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
 
     # Split arbitrary (non-singleton) batches until we reach the target
     i = 0
-    while len(batches) < target_batches:
+    while len(batches) < target_batches and i < len(batches):
         batch = batches[i % len(batches)]
         if len(batch) == 1:
             i += 1  # try another batch
@@ -308,7 +312,10 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
         batches.append([batch.pop()])  # split off a singleton
         i += 1
 
-    assert len(batches) == target_batches
+    assert len(batches) == target_batches, (
+        "There may not be enough splittable batches to meet target number "
+        "of batches. Consider changing the dataset size or token batch size."
+    )
     assert all(
         max(doc_lengths[i] for i in batch) * len(batch) <= N for batch in batches
     )
@@ -516,17 +523,22 @@ def load_gradient_dataset(
             for field_name in mmap.dtype.names:
                 flat = pa.array(mmap[field_name].reshape(-1))
                 col = pa.FixedSizeListArray.from_arrays(flat, mmap[field_name].shape[1])
-                ds = ds.add_column(field_name, col, new_fingerprint=field_name)
+                fingerprint = field_name if len(field_name) <= 64 else field_name[:64]
+                ds = ds.add_column(field_name, col, new_fingerprint=fingerprint)
         return ds
 
     root = Path(root_dir)
 
-    if (root / "data.hf").exists():
+    if (root / "gradients.bin").exists():
         return load_shard(root_dir)
 
     # Flatten indices to avoid CPU OOM
     return concatenate_datasets(
-        [load_shard(str(path)) for path in sorted(root.iterdir()) if path.is_dir()]
+        [
+            load_shard(str(path))
+            for path in sorted(root.iterdir())
+            if path.is_dir() and "shard" in path.name
+        ]
     ).flatten_indices()
 
 

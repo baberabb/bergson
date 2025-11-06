@@ -1,4 +1,6 @@
+import gc
 import os
+import shutil
 import socket
 from datetime import timedelta
 from typing import cast
@@ -118,6 +120,12 @@ def worker(
     embed = model.get_input_embeddings()
     model.requires_grad_(False)  # Freeze the model
     embed.requires_grad_(True)  # Make sure backward hooks are called though
+
+    if cfg.add_unembed:
+        if hasattr(model, "lm_head"):
+            model.base_model.unembed = model.lm_head
+            print("Added unembed reference to base_model")
+            print(type(model.lm_head))
 
     if cfg.fsdp:
         # Shard each individual transformer layer
@@ -241,7 +249,9 @@ def build_gradient_dataset(cfg: IndexConfig):
 
     # Do all the data loading and preprocessing on the main process
     if cfg.data.subset:
-        ds = load_data_string(cfg.data.dataset, cfg.data.split, cfg.data.subset, streaming=cfg.streaming)
+        ds = load_data_string(
+            cfg.data.dataset, cfg.data.split, cfg.data.subset, streaming=cfg.streaming
+        )
     else:
         ds = load_data_string(cfg.data.dataset, cfg.data.split, streaming=cfg.streaming)
 
@@ -292,6 +302,7 @@ def build_gradient_dataset(cfg: IndexConfig):
         ctx.wait()
 
     try:
-        os.rename(cfg.partial_run_path, cfg.run_path)
+        gc.collect()
+        shutil.move(cfg.partial_run_path, cfg.run_path)
     except Exception:
         pass

@@ -292,7 +292,14 @@ class GradientProcessor:
 
 
 class LayerAdapter:
-    supported_modules = (nn.Linear, HFConv1D, nn.Conv1d, nn.Conv2d, nn.Conv3d)
+    supported_modules = (
+        nn.Linear,
+        HFConv1D,
+        nn.Conv1d,
+        nn.Conv2d,
+        nn.Conv3d,
+        nn.Embedding,
+    )
 
     @staticmethod
     def in_attr(layer: nn.Module) -> str:
@@ -303,6 +310,8 @@ class LayerAdapter:
                 return "nx"
             case nn.Conv1d() | nn.Conv2d() | nn.Conv3d():
                 return "in_channels"
+            case nn.Embedding():
+                return "num_embeddings"
             case _:
                 raise ValueError(f"Unsupported layer type: {type(layer)}")
 
@@ -315,6 +324,8 @@ class LayerAdapter:
                 return "nf"
             case nn.Conv1d() | nn.Conv2d() | nn.Conv3d():
                 return "out_channels"
+            case nn.Embedding():
+                return "embedding_dim"
             case _:
                 raise ValueError(f"Unsupported layer type: {type(layer)}")
 
@@ -368,6 +379,10 @@ class GradientCollector(ContextDecorator):
                 continue
 
             if self.target_modules is not None and name not in self.target_modules:
+                continue
+
+            # Skip embedding layers unless specified
+            if self.target_modules is None and isinstance(layer, nn.Embedding):
                 continue
 
             # Users of this class really like to know ahead of time what the shapes are
@@ -456,6 +471,10 @@ class GradientCollector(ContextDecorator):
 
     def _save_input(self, module: nn.Module, inp: tuple, _):
         """Save the input to the module for later use in the backward pass."""
+        if isinstance(module, nn.Embedding):
+            module._inputs = inp[0].detach()
+            return
+
         x = inp[0].detach()
         assert x.ndim == 3, f"Expected input of shape [N, S, I], got {x.shape}"
 
@@ -477,8 +496,54 @@ class GradientCollector(ContextDecorator):
 
         module._inputs = x
 
+    def _process_embedding_grad(self, module: nn.Module, _, grad_out):
+        """Process the incoming gradient wrt the output of the module.
+        Restricted to non-normalized gradients."""
+        # Sanity checks
+        assert isinstance(module, nn.Embedding), "Expected a Embedding module"
+        # Use unnormalized embeddings to make not materializing the full gradient
+        # simple
+        name = assert_type(str, module._name)
+        norm = self.processor.normalizers.get(name)
+        assert norm is None, "Normalization not supported for embedding gradients"
+
+        G = grad_out[0]  # [N, S, O]
+
+        p = self.processor.projection_dim
+
+        o, v = module.weight.shape[1], module.weight.shape[0]
+
+        ids = assert_type(Tensor, module._inputs)
+
+        if p is None:
+            X = torch.nn.functional.one_hot(ids, num_classes=v).to(G.dtype)  # [N, S, V]
+        else:
+            A = self.projection(name, p, o, "left", G.device, G.dtype)  # [p, O]
+            B = self.projection(
+                name, p, v, "right", G.device, module.weight.dtype
+            )  # [p, V]
+
+            G = G @ A.t()  # [N, S, p]
+
+            X = B.t().index_select(0, ids.reshape(-1)).to(G.dtype)  # [N*S, p]
+            X = X.view(*ids.shape, p)  # [N, S, p]
+
+        P = G.mT @ X  # [N, p, p]
+
+        if self.processor.reshape_to_square:
+            P = reshape_to_nearest_square(P)
+
+        self.closure(name, P, self.indices)
+
+        # Save memory ASAP
+        del module._inputs
+
     def _process_grad(self, module: nn.Module, _, grad_out):
         """Process the incoming gradient wrt the output of the module."""
+        if isinstance(module, nn.Embedding):
+            self._process_embedding_grad(module, _, grad_out)
+            return
+
         # Sanity checks
         assert isinstance(module, LayerAdapter.supported_modules), (
             f"Expected a module of type {LayerAdapter.supported_modules}, "

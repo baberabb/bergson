@@ -10,7 +10,7 @@ from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from .data import create_index, create_unstructured_index, pad_and_tensor
+from .data import create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
 from .query_writer import QueryWriter
@@ -84,13 +84,11 @@ def collect_gradients(
     #     )
     # else:
     grad_buffer = (
-        create_index(
-            path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np_dtype
-        )
+        create_index(path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np_dtype)
         if save_index
         else None
     )
-    
+
     if create_custom_query:
         assert mean_custom_query
         num_grads_all_ranks = len(data)
@@ -100,15 +98,14 @@ def collect_gradients(
             1 * sum(list(grad_sizes.values())) * np.dtype(np_dtype).itemsize / 1024**3,
         )
         custom_grads = {
-            name: torch.zeros(
-                grad_sizes[name], dtype=dtype, device=model.device
-            )
+            name: torch.zeros(grad_sizes[name], dtype=dtype, device=model.device)
             for name in grad_sizes.keys()
         }
         # num_grads = len(data)
         # print(
         #     "file size in GB",
-        #     num_grads * sum(list(grad_sizes.values())) * np.dtype(np_dtype).itemsize / 1024**3,
+        #     num_grads * sum(list(grad_sizes.values()))
+        # * np.dtype(np_dtype).itemsize / 1024**3,
         # )
         # custom_grads = {
         #     name: torch.zeros(
@@ -136,7 +133,7 @@ def collect_gradients(
                     grad_buffer[name][indices] = mod_grads[name].numpy()
 
                 mod_grads.pop(name)
-        
+
         if query_writer:
             # TODO do we need the dtype conversion
             mod_grads[name] = g.to(dtype=dtype)
@@ -145,7 +142,9 @@ def collect_gradients(
                 mod_grads.pop(name)
 
         if create_custom_query and module_wise:
-            custom_grads[name] += (g.sum(dim=0) / num_grads_all_ranks).to(custom_grads[name].device)
+            custom_grads[name] += (g.sum(dim=0) / num_grads_all_ranks).to(
+                custom_grads[name].device
+            )
 
         # Compute the outer product of the flattened gradient
         if not skip_preconditioners:
@@ -187,6 +186,7 @@ def collect_gradients(
     )
 
     for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
+
         batch = data[indices]
         x, y = pad_and_tensor(
             batch["input_ids"],  # type: ignore
@@ -247,7 +247,9 @@ def collect_gradients(
             for name in mod_grads.keys():
                 assert mean_custom_query
                 # accumulate the mean gradient
-                custom_grads[name] += (mod_grads[name].sum(dim=0) / num_grads_all_ranks).to(custom_grads[name].device)
+                custom_grads[name] += (
+                    mod_grads[name].sum(dim=0) / num_grads_all_ranks
+                ).to(custom_grads[name].device)
 
         if grad_buffer is not None and not module_wise:
             # Weirdly you need to explicitly synchronize here in order to make
@@ -282,21 +284,20 @@ def collect_gradients(
     if dist.is_initialized():
         dist.reduce(per_doc_losses, dst=0)
 
-    # TODO all reduce across ranks
     if drop_columns:
         data = data.remove_columns(["input_ids"])
-
-    data = data.add_column(
-        "loss",
-        per_doc_losses.cpu().numpy(),
-        feature=Value("float16" if dtype == torch.float16 else "float32"),
-        new_fingerprint="loss",
-    )
-    data.save_to_disk(path + f"/rank_{rank}/data.hf")
 
     if rank == 0:
         if save_processor:
             processor.save(path)
+
+        data = data.add_column(
+            "loss",
+            per_doc_losses.cpu().numpy(),
+            feature=Value("float16" if dtype == torch.float16 else "float32"),
+            new_fingerprint="loss",
+        )
+        data.save_to_disk(path + "/data.hf")
 
     if dist.is_initialized():
         dist.barrier()
@@ -317,8 +318,8 @@ def collect_gradients(
 
         if rank == 0:
             assert mean_custom_query
-            torch.save(custom_grads, os.path.join(path, f"mean_custom_grads.pth"))
-            torch.save(num_grads_all_ranks, os.path.join(path, f"num_grads.pth"))
+            torch.save(custom_grads, os.path.join(path, "mean_custom_grads.pth"))
+            torch.save(num_grads_all_ranks, os.path.join(path, "num_grads.pth"))
             # torch.save(custom_grads, os.path.join(path, f"custom_grads.pth"))
             # torch.save(num_grads_all_ranks, os.path.join(path, f"num_grads.pth"))
 
