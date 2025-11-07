@@ -1,5 +1,5 @@
 import math
-from typing import Callable, Literal
+from typing import Literal
 
 import numpy as np
 import torch
@@ -12,6 +12,7 @@ from transformers import PreTrainedModel
 from .data import create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
+from .score_writer import ScoreWriter
 
 
 def collect_gradients(
@@ -29,7 +30,9 @@ def collect_gradients(
     save_index: bool = True,
     save_processor: bool = True,
     drop_columns: bool = False,
-    query_callback: Callable[[dict[str, torch.Tensor]], torch.Tensor] | None = None,
+    score_writer: ScoreWriter | None = None,
+    token_batch_size: int | None = None,
+    module_wise: bool = False,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -156,9 +159,11 @@ def collect_gradients(
             for module_name in mod_grads.keys():
                 grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
 
-        if query_callback is not None:
-            scores = query_callback(mod_grads)
-            per_doc_scores[indices] = scores.detach().type_as(per_doc_scores)
+        if score_writer is not None:
+            if module_wise:
+                score_writer.finalize_module_wise(indices)
+            else:
+                score_writer(indices, mod_grads)
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)

@@ -31,10 +31,11 @@ from .data import (
 )
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
+from .score_writer import MemmapScoreWriter
 from .utils import assert_type, get_layer_list
 
 
-def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
+def get_query_data(query_cfg: QueryConfig):
     """
     Load and optionally precondition the query dataset. Preconditioners
     may be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
@@ -94,7 +95,7 @@ def get_query_data(index_cfg: IndexConfig, query_cfg: QueryConfig):
     return query_ds
 
 
-def get_mean_query(
+def get_mean_scorer(
     query_ds: Dataset, query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype
 ):
     """
@@ -127,7 +128,7 @@ def get_mean_query(
             for module in query_cfg.modules
         ],
         dim=0,
-    )
+    ).unsqueeze(-1)
 
     @torch.inference_mode()
     def callback(mod_grads: dict[str, torch.Tensor]):
@@ -307,16 +308,26 @@ def worker(
     query_device = torch.device(f"cuda:{rank}")
     query_dtype = dtype if dtype != "auto" else torch.float16
 
-    if query_cfg.query_method == "mean":
-        query_callback = get_mean_query(query_ds, query_cfg, query_device, query_dtype)
-    elif query_cfg.query_method == "nearest":
+    if query_cfg.score == "mean":
+        query_callback = get_mean_scorer(query_ds, query_cfg, query_device, query_dtype)
+    elif query_cfg.score == "nearest":
+
         query_callback = get_nearest_query(
             query_ds, query_cfg, query_device, query_dtype
         )
     else:
-        raise ValueError(f"Invalid query method: {query_cfg.query_method}")
+        raise ValueError(f"Invalid scoring method: {query_cfg.score}")
 
     if isinstance(ds, Dataset):
+        score_writer = MemmapScoreWriter(
+            query_callback,
+            len(ds),
+            1,
+            query_cfg.scores_path,
+            rank=rank,
+            modules=query_cfg.modules,
+            module_wise=index_cfg.module_wise,
+        )
         batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
         collect_gradients(
             model,
@@ -330,9 +341,10 @@ def worker(
             target_modules=target_modules,
             attention_cfgs=attention_cfgs,
             drop_columns=index_cfg.drop_columns,
-            query_callback=query_callback,
+            score_writer=score_writer,
             save_index=index_cfg.save_index,
             save_processor=index_cfg.save_processor,
+            module_wise=index_cfg.module_wise,
         )
     else:
         # Convert each shard to a Dataset then collect its gradients
@@ -346,6 +358,16 @@ def worker(
             batches = allocate_batches(
                 ds_shard["length"][:], index_cfg.token_batch_size
             )
+            score_writer = MemmapScoreWriter(
+                query_callback,
+                len(ds_shard),
+                # TODO fix this
+                1,
+                os.path.join(query_cfg.scores_path, f"shard-{shard_id:05d}"),
+                rank=rank,
+                modules=query_cfg.modules,
+                module_wise=index_cfg.module_wise,
+            )
             collect_gradients(
                 model,
                 ds_shard,
@@ -358,7 +380,7 @@ def worker(
                 target_modules=target_modules,
                 attention_cfgs=attention_cfgs,
                 drop_columns=index_cfg.drop_columns,
-                query_callback=query_callback,
+                score_writer=score_writer,
                 save_index=index_cfg.save_index,
                 save_processor=index_cfg.save_processor,
             )
@@ -416,7 +438,7 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
             new_fingerprint="advantage",  # type: ignore
         )
 
-    query_ds = get_query_data(index_cfg, query_cfg)
+    query_ds = get_query_data(query_cfg)
 
     world_size = torch.cuda.device_count()
     if world_size <= 1:

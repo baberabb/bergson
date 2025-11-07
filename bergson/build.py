@@ -1,6 +1,8 @@
 import json
 import os
+import shutil
 import socket
+from dataclasses import is_dataclass
 from datetime import timedelta
 from typing import cast
 
@@ -170,6 +172,8 @@ def worker(
             save_index=cfg.save_index,
             save_processor=cfg.save_processor,
             drop_columns=cfg.drop_columns,
+            token_batch_size=cfg.token_batch_size,
+            module_wise=cfg.module_wise,
         )
     else:
         # Convert each shard to a Dataset then map over its gradients
@@ -196,6 +200,8 @@ def worker(
                 # Save a processor state checkpoint after each shard
                 save_processor=cfg.save_processor,
                 drop_columns=cfg.drop_columns,
+                token_batch_size=cfg.token_batch_size,
+                module_wise=cfg.module_wise,
             )
             buf.clear()
             shard_id += 1
@@ -254,8 +260,14 @@ def build_gradient_dataset(cfg: IndexConfig):
         )
 
     # Write index config to json
+    os.makedirs(cfg.partial_run_path, exist_ok=True)
     with open(os.path.join(cfg.partial_run_path, "index_config.json"), "w") as f:
-        json.dump(cfg, f)
+        index_cfg_dict = cfg.__dict__
+        for key in index_cfg_dict:
+            if is_dataclass(index_cfg_dict[key]):
+                index_cfg_dict[key] = index_cfg_dict[key].__dict__
+
+        json.dump(index_cfg_dict, f)
 
     world_size = torch.cuda.device_count()
     if world_size <= 1:
@@ -288,6 +300,6 @@ def build_gradient_dataset(cfg: IndexConfig):
         ctx.wait()
 
     try:
-        os.rename(cfg.partial_run_path, cfg.run_path)
+        shutil.move(cfg.partial_run_path, cfg.run_path)
     except Exception:
         pass

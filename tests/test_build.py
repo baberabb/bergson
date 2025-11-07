@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,29 @@ from bergson import (
     collect_gradients,
 )
 from bergson.data import load_gradients
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_build_e2e(tmp_path: Path):
+    result = subprocess.run(
+        [
+            "python",
+            "-m",
+            "bergson",
+            "build",
+            "test_e2e",
+            "--model",
+            "EleutherAI/pythia-14m",
+            "--dataset",
+            "NeelNanda/pile-10k",
+            "--split",
+            "train[:100]",
+            "--truncation",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -65,7 +89,7 @@ def test_conv1d_build(tmp_path: Path, dataset):
     collect_gradients(
         model=model,
         data=dataset,
-        processor=GradientProcessor(),
+        processor=GradientProcessor(projection_dim=16),
         path=str(tmp_path),
         # This build hangs in pytest with preconditioners enabled.
         # It works when run directly so it may be a pytest issue.

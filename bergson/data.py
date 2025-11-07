@@ -33,6 +33,9 @@ class DataConfig:
     split: str = "train"
     """Split of the dataset to use for building the index."""
 
+    subset: str | None = None
+    """Subset of the dataset to use for building the index."""
+
     prompt_column: str = "text"
     """Column in the dataset that contains the prompts."""
 
@@ -70,29 +73,30 @@ class QueryConfig:
     """Config for querying an index on the fly."""
 
     query_path: str = ""
-    """Path to the query dataset."""
+    """Path to the existing query index."""
 
-    query_method: Literal["mean", "nearest"] = "mean"
-    """Method to use for computing the query."""
+    score: Literal["mean", "nearest", "individual"] = "mean"
+    """Method for scoring the gradients with the query. If mean
+    gradients will be scored by their similarity with the mean
+    query gradients, if max by the most similar query gradient,
+    if individual by each separate query gradient."""
 
-    save_processor: bool = True
-    """Whether to write the query dataset gradient processor
-    to disk."""
+    scores_path: str = ""
+    """Path to the directory where query scores should be written."""
 
     query_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner. The precomputed
-    preconditioner is applied to the query dataset gradients."""
+    """Path to a precomputed preconditioner to be applied to
+    the query dataset gradients."""
 
     index_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner. The precomputed
-    preconditioner is applied to the query dataset gradients.
-    This does not affect the ability to compute a new
-    preconditioner during gradient collection."""
+    """Path to a precomputed preconditioner to be applied to
+    the query dataset gradients. This does not affect the
+    ability to compute a new preconditioner during the query."""
 
-    mixing_coefficient: float = 0.5
+    mixing_coefficient: float = 0.99
     """Coefficient to weight the application of the query preconditioner
     and the pre-computed index preconditioner. 0.0 means only use the
-    query preconditioner and 1.0 means only use the index preconditioner."""
+    index preconditioner and 1.0 means only use the query preconditioner."""
 
     modules: list[str] = field(default_factory=list)
     """Modules to use for the query. If empty, all modules will be used."""
@@ -161,6 +165,10 @@ class IndexConfig:
 
     loss_reduction: Literal["mean", "sum"] = "mean"
     """Reduction method for the loss function."""
+
+    # TODO consider renaming this
+    module_wise: bool = False
+    """Whether to process the module gradients individually."""
 
     streaming: bool = False
     """Whether to use streaming mode for the dataset."""
@@ -285,7 +293,7 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
 
     # Split arbitrary (non-singleton) batches until we reach the target
     i = 0
-    while len(batches) < target_batches:
+    while len(batches) < target_batches and i < len(batches):
         batch = batches[i % len(batches)]
         if len(batch) == 1:
             i += 1  # try another batch
@@ -293,7 +301,11 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
         batches.append([batch.pop()])  # split off a singleton
         i += 1
 
-    assert len(batches) == target_batches
+    assert len(batches) == target_batches, (
+        "Could not construct a number of batches divisible by the world size."
+        " If variability of item lengths in your dataset is low "
+        "consider using a different dataset size or token batch size."
+    )
     assert all(
         max(doc_lengths[i] for i in batch) * len(batch) <= N for batch in batches
     )
@@ -360,7 +372,10 @@ def create_index(
 
 
 def load_data_string(
-    data_str: str, split: str = "train", streaming: bool = False
+    data_str: str,
+    split: str = "train",
+    subset: str | None = None,
+    streaming: bool = False,
 ) -> Dataset | IterableDataset:
     """Load a dataset from a string identifier or path."""
     if data_str.endswith(".csv"):
@@ -369,7 +384,7 @@ def load_data_string(
         ds = assert_type(Dataset, Dataset.from_json(data_str))
     else:
         try:
-            ds = load_dataset(data_str, split=split, streaming=streaming)
+            ds = load_dataset(data_str, subset, split=split, streaming=streaming)
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
                 raise NotImplementedError(
