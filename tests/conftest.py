@@ -1,11 +1,15 @@
 import pytest
+import torch
 from datasets import Dataset
 from transformers import AutoConfig, AutoModelForCausalLM
 
 
 @pytest.fixture
 def model():
-    """Create a small test model."""
+    """Randomly initialize a small test model."""
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
     config = AutoConfig.from_pretrained("trl-internal-testing/tiny-Phi3ForCausalLM")
     return AutoModelForCausalLM.from_config(config)
 
