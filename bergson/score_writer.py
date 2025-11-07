@@ -2,7 +2,7 @@ import json
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 import numpy as np
 import torch
@@ -19,7 +19,6 @@ class ScoreWriter(ABC):
         self,
         indices: list[int],
         mod_grads: dict[str, torch.Tensor],
-        **kwargs: Any,
     ):
         """
         Write the scores to the score writer.
@@ -48,7 +47,7 @@ class MemmapScoreWriter(ScoreWriter):
 
     def __init__(
         self,
-        scorer: Callable[..., torch.Tensor],
+        scorer: Callable,
         num_items: int,
         num_scores: int,
         scores_path: str,
@@ -58,7 +57,6 @@ class MemmapScoreWriter(ScoreWriter):
         modules: list[str],
         module_wise: bool = False,
         flush_batches_interval: int = 40,
-        score_names: list[str] | None = None,
     ):
         self._scorer = scorer
         self._scores_path = Path(scores_path)
@@ -69,32 +67,29 @@ class MemmapScoreWriter(ScoreWriter):
         self.flush_interval = flush_batches_interval
         self.num_batches_since_flush = 0
 
-        self.module_to_idx = {mod: i for i, mod in enumerate(modules)}
         self.num_modules = len(modules)
+
+        self.num_scores = num_scores
 
         self._scores_path.mkdir(parents=True, exist_ok=True)
         scores_file_path = self._scores_path / "scores.bin"
 
         # Build a json-serializable structured dtype
-        if num_items == 1:
-            names = ["score", "written"]
-        else:
-            names = [
-                item
-                for i in range(num_items)
-                for item in (f"score_{i}", f"written_{i}")
-            ]
+        names = []
+        formats = []
+        offsets = []
+        for i in range(num_scores):
+            names.append(f"score_{i}")
+            formats.append("float32")
+            offsets.append(i * 6)
 
-        formats = ["float32"] * num_items + ["bool"] * num_items
-        offsets = [0]
-        for i in range(num_items):
-            offsets.append(offsets[-1] + 4)
-            offsets.append(offsets[-1] + 2)
-        offsets.pop()
-        print("offsets", offsets)
+            names.append(f"written_{i}")
+            formats.append("bool")
+            offsets.append(i * 6 + 4)
 
-        itemsize = offsets[-1] + 2
-        print("itemsize", itemsize)
+        total_bytes = sum(np.dtype(fmt).itemsize for fmt in formats)
+        # Round up to the nearest 8 bytes
+        itemsize = ((total_bytes + 7) // 8) * 8
 
         struct_dtype = {
             "names": names,
@@ -149,10 +144,9 @@ class MemmapScoreWriter(ScoreWriter):
         self.module_wise_sum_squares = {}
 
     def _write_to_memmap(self, indices: list[int], scores: torch.Tensor):
-        # self.scores["index"][indices] = np.array(indices, dtype=np.uint32)
-
+        print("len indices", len(indices))
         # scores is [len(indices), num_scores]
-        for i in range(scores.shape[-1]):
+        for i in range(self.num_scores):
             self.scores[f"score_{i}"][indices] = (
                 scores[:, i].cpu().numpy().astype(np.float32).flatten()
             )
@@ -171,13 +165,13 @@ class MemmapScoreWriter(ScoreWriter):
         # Module-wise scores
         if name:
             scores, sum_of_squares = self._scorer(mod_grads, name)
+            print("scores from cb shape", scores.shape)
             self.module_wise_scores[name] = scores.to(device="cpu", dtype=self.dtype)
             self.module_wise_sum_squares[name] = sum_of_squares.to(
                 device="cpu", dtype=self.dtype
             )
         else:
             scores = self._scorer(mod_grads)
-            print("scores", type(scores), scores)
             scores = scores.to(device="cpu", dtype=self.dtype)
 
             self._write_to_memmap(indices, scores)
@@ -200,7 +194,7 @@ class MemmapScoreWriter(ScoreWriter):
                     for sum_of_squares in self.module_wise_sum_squares.values()
                 ],
             ).sum(dim=0)
-            assert scores.shape == sum_of_squares.shape
+            assert scores.shape[0] == sum_of_squares.shape[0]
             scores *= sum_of_squares.rsqrt()
 
         # Write accumulated scores

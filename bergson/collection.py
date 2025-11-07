@@ -56,13 +56,16 @@ def collect_gradients(
     lo = torch.finfo(dtype).min
     hi = torch.finfo(dtype).max
 
-    def callback(name: str, g: torch.Tensor):
+    def callback(name: str, g: torch.Tensor, indices: list[int]):
         g = g.flatten(1).clamp_(lo, hi)
         if save_index:
             # Asynchronously move the gradient to CPU and convert to the final dtype
             mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
         else:
             mod_grads[name] = g.to(dtype=dtype)
+
+        if score_writer and module_wise:
+            score_writer(indices, mod_grads, name=name)
 
         # Compute the outer product of the flattened gradient
         if not skip_preconditioners:
@@ -97,12 +100,6 @@ def collect_gradients(
         dtype=dtype,
         fill_value=0.0,
     )
-    per_doc_scores = torch.full(
-        (len(data),),
-        device=model.device,
-        dtype=dtype,
-        fill_value=0.0,
-    )
 
     for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
         batch = data[indices]
@@ -121,6 +118,8 @@ def collect_gradients(
                 set_peft_enabled(model, True)
 
             with collector:
+                collector.indices = indices
+
                 ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
 
                 # Compute average KL across all unmasked tokens
@@ -132,6 +131,8 @@ def collect_gradients(
                 losses.mean().backward()
         else:
             with collector:
+                collector.indices = indices
+
                 logits = model(x).logits[:, :-1]
 
                 losses = F.cross_entropy(
@@ -182,12 +183,6 @@ def collect_gradients(
             per_doc_losses.cpu().numpy(),
             feature=Value("float16" if dtype == torch.float16 else "float32"),
             new_fingerprint="loss",
-        )
-        data = data.add_column(
-            "scores",
-            per_doc_scores.cpu().numpy(),
-            feature=Value("float16" if dtype == torch.float16 else "float32"),
-            new_fingerprint="scores",
         )
         data.save_to_disk(path + "/data.hf")
 
