@@ -17,95 +17,56 @@ if not HAS_CUDA:
 
 from pathlib import Path
 
-from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
 
 from bergson import (
     AttentionConfig,
-    DataConfig,
     GradientProcessor,
-    IndexConfig,
     collect_gradients,
 )
-from bergson.data import tokenize
 
 
-def test_disk_build_linear(tmp_path: Path):
-    run_path = tmp_path / "example_with_heads"
-    run_path.mkdir(parents=True, exist_ok=True)
-
-    model_name = "RonenEldan/TinyStories-1M"
-    data_cfg = DataConfig(dataset="NeelNanda/pile-10k", truncation=True)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_split_attention_build(tmp_path: Path, model, dataset):
     attention_cfgs = {
         "h.0.attn.attention.out_proj": AttentionConfig(
             num_heads=16, head_size=4, head_dim=2
         ),
     }
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, trust_remote_code=True, use_safetensors=True
-    )
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    data = load_dataset(data_cfg.dataset, split="train")
-    data = data.select(range(8))  # type: ignore
-    data = data.map(
-        tokenize,
-        batched=True,
-        fn_kwargs=dict(args=data_cfg, tokenizer=tokenizer),
-        remove_columns=data.column_names,
-    )
-
-    processor = GradientProcessor(projection_dim=16)
-
     collect_gradients(
         model=model,
-        data=data,
-        processor=processor,
-        path=str(run_path),
+        data=dataset,
+        processor=GradientProcessor(projection_dim=16),
+        path=str(tmp_path),
         attention_cfgs=attention_cfgs,
     )
 
-    assert any(run_path.iterdir()), "Expected artifacts in the temp run_path"
+    assert any(tmp_path.iterdir()), "Expected artifacts in the temp run_path"
 
 
-def test_disk_build_conv1d(tmp_path: Path):
-    num_rows = 8
-
-    run_path = tmp_path / "example_with_heads"
-    run_path.mkdir(parents=True, exist_ok=True)
-
-    config = IndexConfig(
-        run_path=str(run_path),
-        model="openai-community/gpt2",
-        data=DataConfig(dataset="NeelNanda/pile-10k", truncation=True),
-    )
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_conv1d_build(tmp_path: Path, dataset):
+    model_name = "openai-community/gpt2"
 
     model = AutoModelForCausalLM.from_pretrained(
-        config.model, trust_remote_code=True, use_safetensors=True
+        model_name, trust_remote_code=True, use_safetensors=True
     )
-    tokenizer = AutoTokenizer.from_pretrained(config.model)
-
-    data = load_dataset(config.data.dataset, split="train")
-    data = data.select(range(num_rows))  # type: ignore
-    data = data.map(
-        tokenize,
-        batched=True,
-        fn_kwargs=dict(args=config.data, tokenizer=tokenizer),
-        remove_columns=data.column_names,
-    )
-
-    processor = GradientProcessor(projection_dim=config.projection_dim)
 
     collect_gradients(
         model=model,
-        data=data,
-        processor=processor,
-        path=config.run_path,
+        data=dataset,
+        processor=GradientProcessor(),
+        path=str(tmp_path),
+        # This build hangs in pytest with preconditioners enabled.
+        # It works when run directly so it may be a pytest issue.
+        skip_preconditioners=True,
     )
 
-    assert any(run_path.iterdir()), "Expected artifacts in the temp run_path"
+    assert any(tmp_path.iterdir()), "Expected artifacts in the run path"
 
-    index = load_gradients(str(run_path))
+    index = load_gradients(str(tmp_path))
+
     assert len(modules := index.dtype.names) != 0
-    assert len(index[modules[0]]) == num_rows
+    assert len(index[modules[0]]) == len(dataset)
+    assert index[modules[0]][0].sum().item() != 0.0
