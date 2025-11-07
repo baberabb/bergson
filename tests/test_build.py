@@ -17,41 +17,13 @@ if not HAS_CUDA:
 
 from pathlib import Path
 
-from datasets import Dataset
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM
 
 from bergson import (
     AttentionConfig,
     GradientProcessor,
     collect_gradients,
 )
-
-
-@pytest.fixture
-def model():
-    """Randomly initialize a small test model."""
-    config = AutoConfig.from_pretrained("trl-internal-testing/tiny-Phi3ForCausalLM")
-    return AutoModelForCausalLM.from_config(config)
-
-
-@pytest.fixture
-def dataset():
-    """Create a small test dataset."""
-    data = {
-        "input_ids": [
-            [1, 2, 3, 4, 5],
-            [6, 7, 8, 9, 10],
-        ],
-        "labels": [
-            [1, 2, 3, 4, 5],
-            [6, 7, 8, 9, 10],
-        ],
-        "attention_mask": [
-            [1, 1, 1, 1, 1],
-            [1, 1, 1, 1, 1],
-        ],
-    }
-    return Dataset.from_dict(data)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

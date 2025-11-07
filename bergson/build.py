@@ -1,3 +1,4 @@
+import json
 import os
 import socket
 from datetime import timedelta
@@ -251,6 +252,10 @@ def build_gradient_dataset(cfg: IndexConfig):
             estimate_advantage(ds, cfg.data),
             new_fingerprint="advantage",  # type: ignore
         )
+
+    # Write index config to json
+    with open(os.path.join(cfg.partial_run_path, "index_config.json"), "w") as f:
+        json.dump(cfg, f)
 
     world_size = torch.cuda.device_count()
     if world_size <= 1:

@@ -71,7 +71,7 @@ def validate_ram(batch: NDArray, max_shard_size: int):
     print(f"Estimated RAM required for largest shard: {estimated_shard_ram_gb} GB")
     print(f"Available RAM: {available_ram_gb} GB")
 
-    assert estimated_shard_ram_gb > available_ram_gb, (
+    assert estimated_shard_ram_gb <= available_ram_gb, (
         "Not enough RAM to build index."
         "Increase the number of shards to reduce peak RAM usage."
     )
@@ -156,6 +156,8 @@ class FaissIndex:
 
     faiss_cfg: FaissConfig
 
+    ordered_modules: list[str]
+
     def __init__(self, path: Path, device: str, mmap_index: bool):
         faiss = _require_faiss()
 
@@ -171,6 +173,7 @@ class FaissIndex:
             config = json.load(f)
 
         self.unit_norm = config["unit_norm"]
+        self.ordered_modules = config["ordered_modules"]
         self.faiss_cfg = FaissConfig(**config["faiss_cfg"])
 
         shard_paths = sorted(
@@ -199,8 +202,12 @@ class FaissIndex:
         device: str,
         unit_norm: bool,
     ):
+        faiss = _require_faiss()
+
         print("Building FAISS index...")
         start = perf_counter()
+
+        faiss_path.mkdir(exist_ok=True, parents=True)
 
         # Write the gradients into an on-disk FAISS index
         root_path = Path(gradients_path)
@@ -209,8 +216,8 @@ class FaissIndex:
         else:
             info_paths = [
                 shard_path / "info.json"
-                for shard_path in sorted(root_path.iterdir())
-                if shard_path.is_dir() and (shard_path / "info.json").exists()
+                for shard_path in root_path.iterdir()
+                if (shard_path / "info.json").exists()
             ]
 
         assert info_paths, f"No gradient metadata found under {gradients_path}"
@@ -268,7 +275,11 @@ class FaissIndex:
             index = index_to_device(index, "cpu")
             faiss.write_index(index, str(shard_path))
 
+        ordered_modules = []
         for i, grads in enumerate(tqdm(dl, desc="Loading gradients")):
+            if i == 0:
+                ordered_modules = list(grads.dtype.names)
+
             grads = structured_to_unstructured(grads)
 
             if i == 0:
@@ -300,10 +311,11 @@ class FaissIndex:
         with open(faiss_path / "config.json", "w") as f:
             json.dump(
                 {
-                    **faiss_cfg.__dict__,
+                    "faiss_cfg": faiss_cfg.__dict__,
                     "gradients_path": gradients_path,
                     "device": device,
                     "unit_norm": unit_norm,
+                    "ordered_modules": ordered_modules,
                 },
                 f,
                 indent=2,

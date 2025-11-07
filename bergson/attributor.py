@@ -55,17 +55,13 @@ class Attributor:
 
         # Load the gradients into a FAISS index
         if faiss_cfg:
-            faiss_path = (
-                Path(index_path)
-                / "faiss"
-                / (
-                    f"{faiss_cfg.index_factory.replace(',', '_')}"
-                    f"{'_cosine' if unit_norm else ''}"
-                )
+            faiss_index_name = (
+                f"faiss_{faiss_cfg.index_factory.replace(',', '_')}"
+                f"{'_cosine' if unit_norm else ''}"
             )
+            faiss_path = Path(index_path) / faiss_index_name
 
             if not (faiss_path / "config.json").exists():
-                faiss_path.mkdir(exist_ok=True, parents=True)
                 FaissIndex.create_index(
                     index_path, faiss_path, faiss_cfg, device, unit_norm
                 )
@@ -74,6 +70,7 @@ class Attributor:
                 faiss_path, device, mmap_index=faiss_cfg.mmap_index
             )
             self.N = self.faiss_index.ntotal
+            self.ordered_modules = self.faiss_index.ordered_modules
             return
 
         # Load the gradients into memory
@@ -86,10 +83,12 @@ class Attributor:
         }
         self.N = mmap[mmap.dtype.names[0]].shape[0]
 
+        self.ordered_modules = mmap.dtype.names
+
         if unit_norm:
-            norm = torch.cat([grad for grad in self.grads.values()], dim=1).norm(
-                dim=1, keepdim=True
-            )
+            norm = torch.cat(
+                [self.grads[name] for name in self.ordered_modules], dim=1
+            ).norm(dim=1, keepdim=True)
             for name in self.grads:
                 self.grads[name] /= norm
 
@@ -112,13 +111,16 @@ class Attributor:
             A namedtuple containing the top `k` indices and inner products for each
             query. Both have shape [..., k].
         """
-        q = {name: item.to(self.device, self.dtype) for name, item in queries.items()}
+        q = {
+            name: queries[name].to(self.device, self.dtype)
+            for name in self.ordered_modules
+        }
 
         if self.unit_norm:
             norm = torch.cat(list(q.values()), dim=1).norm(dim=1, keepdim=True)
 
             for name in q:
-                q[name] /= norm + 1e-8
+                q[name] /= norm + torch.finfo(norm.dtype).eps
 
         if self.faiss_index:
             if modules:
@@ -126,15 +128,21 @@ class Attributor:
                     "FAISS index does not implement module-specific search."
                 )
 
-            q = torch.cat([q[name] for name in q], dim=1).cpu().numpy()
+            q = (
+                torch.cat([q[name] for name in self.ordered_modules], dim=1)
+                .cpu()
+                .numpy()
+            )
 
             distances, indices = self.faiss_index.search(q, k)
 
-            return torch.from_numpy(distances.squeeze()), torch.from_numpy(
-                indices.squeeze()
-            )
+            return torch.from_numpy(distances), torch.from_numpy(indices)
 
-        modules = modules or set(q.keys())
+        if modules:
+            modules = set([name for name in self.ordered_modules if name in modules])
+        else:
+            modules = set(self.ordered_modules)
+
         k = min(k or self.N, self.N)
 
         scores = torch.stack(
@@ -159,16 +167,16 @@ class Attributor:
         mod_grads = defaultdict(list)
         result = TraceResult()
 
-        def callback(name: str, g: Tensor, _: list[int]):
+        def callback(name: str, g: Tensor):
+            g = g.flatten(1)
+
             # Precondition the gradient using Cholesky solve
             if precondition:
                 eigval, eigvec = self.processor.preconditioners_eigen[name]
                 eigval_inverse_sqrt = 1.0 / (eigval).sqrt()
                 P = eigvec * eigval_inverse_sqrt @ eigvec.mT
-                g = g.flatten(1).type_as(P)
+                g = g.type_as(P)
                 g = g @ P
-            else:
-                g = g.flatten(1)
 
             # Store the gradient for later use
             mod_grads[name].append(g.to(self.device, self.dtype, non_blocking=True))
@@ -179,7 +187,11 @@ class Attributor:
         if not mod_grads:
             raise ValueError("No grads collected. Did you forget to call backward?")
 
-        queries = {name: torch.cat(g, dim=1) for name, g in mod_grads.items()}
+        queries = {
+            name: torch.cat(mod_grads[name], dim=1)
+            for name in self.ordered_modules
+            if name in mod_grads
+        }
 
         if any(q.isnan().any() for q in queries.values()):
             raise ValueError("NaN found in queries.")
