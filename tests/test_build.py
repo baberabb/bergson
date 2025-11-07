@@ -1,6 +1,8 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
+import torch
 from transformers import AutoModelForCausalLM
 
 from bergson import (
@@ -11,6 +13,7 @@ from bergson import (
 from bergson.data import load_gradients
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_build_consistency(tmp_path: Path, model, dataset):
     collect_gradients(
         model=model,
@@ -32,6 +35,7 @@ def test_build_consistency(tmp_path: Path, model, dataset):
     assert np.allclose(first_module_grad, cached_item_grad, atol=1e-6)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_split_attention_build(tmp_path: Path, model, dataset):
     attention_cfgs = {
         "h.0.attn.attention.out_proj": AttentionConfig(
@@ -50,6 +54,7 @@ def test_split_attention_build(tmp_path: Path, model, dataset):
     assert any(tmp_path.iterdir()), "Expected artifacts in the temp run_path"
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_conv1d_build(tmp_path: Path, dataset):
     model_name = "openai-community/gpt2"
 
