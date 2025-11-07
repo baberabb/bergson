@@ -155,9 +155,9 @@ class AdamNormalizer(Normalizer):
         and the factored second moments.
         """
         # We assume avg_sq is a square matrix of shape [O, I]
-        assert self.avg_sq.ndim == 2, (
-            f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
-        )
+        assert (
+            self.avg_sq.ndim == 2
+        ), f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
 
         # Compute row and column means
         return AdafactorNormalizer(
@@ -447,7 +447,8 @@ class GradientCollector(ContextDecorator):
         self.processor._projection_matrices[key] = A
         return A
 
-    def get_head_name(self, name: str, head_idx: int) -> str:
+    @staticmethod
+    def get_head_name(name: str, head_idx: int) -> str:
         """Get the name of an attention head with index `head_idx` in a
         module with name `name`."""
         return f"{name}.head_{head_idx}"
@@ -523,7 +524,7 @@ class GradientCollector(ContextDecorator):
             )
             setattr(module, LayerAdapter.out_attr(module), head_size)
             for h in range(num_heads):
-                module._name = self.get_head_name(name, h)  # type: ignore
+                module._name = GradientCollector.get_head_name(name, h)  # type: ignore
                 module._inputs = module_inputs
 
                 try:
