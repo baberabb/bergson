@@ -2,11 +2,12 @@ import json
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import torch
 import torch.distributed as dist
+
+from .query_callback import Scorer
 
 
 class ScoreWriter(ABC):
@@ -37,7 +38,9 @@ class ScoreWriter(ABC):
         """
         Finalize the module-wise scores and write to the memmap.
         """
-        raise NotImplementedError("Subclasses must implement this method")
+        raise NotImplementedError(
+            "Module-wise scoring is not supported by this score writer."
+        )
 
 
 class MemmapScoreWriter(ScoreWriter):
@@ -47,9 +50,8 @@ class MemmapScoreWriter(ScoreWriter):
 
     def __init__(
         self,
-        scorer: Callable,
+        scorer: Scorer,
         num_items: int,
-        num_scores: int,
         scores_path: str,
         *,
         dtype: torch.dtype = torch.float32,
@@ -58,8 +60,9 @@ class MemmapScoreWriter(ScoreWriter):
         module_wise: bool = False,
         flush_batches_interval: int = 40,
     ):
-        self._scorer = scorer
-        self._scores_path = Path(scores_path)
+        self.scorer = scorer
+        self.num_scores = scorer.num_scores
+        self.scores_path = Path(scores_path)
         self.rank = rank
         self.dtype = dtype
         self.module_wise = module_wise
@@ -69,16 +72,14 @@ class MemmapScoreWriter(ScoreWriter):
 
         self.num_modules = len(modules)
 
-        self.num_scores = num_scores
-
-        self._scores_path.mkdir(parents=True, exist_ok=True)
-        scores_file_path = self._scores_path / "scores.bin"
+        self.scores_path.mkdir(parents=True, exist_ok=True)
+        scores_file_path = self.scores_path / "scores.bin"
 
         # Build a json-serializable structured dtype
         names = []
         formats = []
         offsets = []
-        for i in range(num_scores):
+        for i in range(self.scorer.num_scores):
             names.append(f"score_{i}")
             formats.append("float32")
             offsets.append(i * 6)
@@ -105,7 +106,7 @@ class MemmapScoreWriter(ScoreWriter):
                 str(scores_file_path),
                 dtype=np.dtype(struct_dtype),  # type: ignore
                 mode="w+",
-                shape=(num_items * self.num_modules,),
+                shape=(num_items,),
             )
 
             # Write zeros
@@ -145,6 +146,7 @@ class MemmapScoreWriter(ScoreWriter):
 
     def _write_to_memmap(self, indices: list[int], scores: torch.Tensor):
         print("len indices", len(indices))
+        print("scores shape", scores.shape)
         # scores is [len(indices), num_scores]
         for i in range(self.num_scores):
             self.scores[f"score_{i}"][indices] = (
@@ -164,14 +166,13 @@ class MemmapScoreWriter(ScoreWriter):
     ):
         # Module-wise scores
         if name:
-            scores, sum_of_squares = self._scorer(mod_grads, name)
-            print("scores from cb shape", scores.shape)
+            scores, sum_of_squares = self.scorer(mod_grads, name=name)
             self.module_wise_scores[name] = scores.to(device="cpu", dtype=self.dtype)
             self.module_wise_sum_squares[name] = sum_of_squares.to(
                 device="cpu", dtype=self.dtype
             )
         else:
-            scores = self._scorer(mod_grads)
+            scores = self.scorer(mod_grads)
             scores = scores.to(device="cpu", dtype=self.dtype)
 
             self._write_to_memmap(indices, scores)

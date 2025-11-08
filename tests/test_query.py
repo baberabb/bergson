@@ -11,7 +11,7 @@ from bergson import (
     collect_gradients,
 )
 from bergson.data import QueryConfig
-from bergson.query import get_mean_scorer, get_module_wise_mean_scorer
+from bergson.query_callback import get_mean_scorer, get_module_wise_mean_scorer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -35,7 +35,6 @@ def test_query(tmp_path: Path, model, dataset):
     score_writer = MemmapScoreWriter(
         scorer,
         len(dataset),
-        1,
         str(tmp_path),
         rank=0,
         modules=list(shapes.keys()),
@@ -76,7 +75,6 @@ def test_module_wise_query(tmp_path: Path, model, dataset):
     score_writer = MemmapScoreWriter(
         scorer,
         len(dataset),
-        1,
         str(tmp_path),
         rank=0,
         modules=list(shapes.keys()),
