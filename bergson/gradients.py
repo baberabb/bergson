@@ -1,8 +1,8 @@
 import json
-import os
 from abc import ABC, abstractmethod
 from contextlib import ContextDecorator
 from dataclasses import asdict, astuple, dataclass, field
+from pathlib import Path
 from typing import Callable, Literal, Mapping
 
 import torch
@@ -219,20 +219,20 @@ class GradientProcessor:
     @classmethod
     def load(
         cls,
-        path: str,
+        path: Path,
         *,
         map_location: str | torch.device | None = None,
     ) -> "GradientProcessor":
         """
         Load the normalizers and preconditioners from a file.
         """
-        cfg_path = os.path.join(path, "processor_config.json")
-        norm_path = os.path.join(path, "normalizers.pth")
-        precond_path = os.path.join(path, "preconditioners.pth")
-        precond_eigen_path = os.path.join(path, "preconditioners_eigen.pth")
+        cfg_path = path / "processor_config.json"
+        norm_path = path / "normalizers.pth"
+        precond_path = path / "preconditioners.pth"
+        precond_eigen_path = path / "preconditioners_eigen.pth"
 
         # Load configuration
-        with open(cfg_path, "r") as f:
+        with cfg_path.open("r") as f:
             cfg = json.load(f)
 
         # Backward compatibility
@@ -267,23 +267,23 @@ class GradientProcessor:
             **cfg,
         )
 
-    def save(self, path: str):
+    def save(self, path: Path):
         """
         Save the normalizers and preconditioners to a file.
         """
-        os.makedirs(path, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
 
-        cfg_path = os.path.join(path, "processor_config.json")
-        norm_path = os.path.join(path, "normalizers.pth")
-        precond_path = os.path.join(path, "preconditioners.pth")
-        precond_eigen_path = os.path.join(path, "preconditioners_eigen.pth")
+        cfg_path = path / "processor_config.json"
+        norm_path = path / "normalizers.pth"
+        precond_path = path / "preconditioners.pth"
+        precond_eigen_path = path / "preconditioners_eigen.pth"
 
         # Save configuration separately
         cfg = asdict(self)
         del cfg["normalizers"]
         del cfg["preconditioners"]
         del cfg["preconditioners_eigen"]
-        with open(cfg_path, "w") as f:
+        with cfg_path.open("w") as f:
             json.dump(cfg, f, indent=2)
 
         # Save normalizers

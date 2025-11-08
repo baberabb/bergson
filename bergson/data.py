@@ -187,9 +187,9 @@ class IndexConfig:
     Used for attention modules specified in `split_attention_modules`."""
 
     @property
-    def partial_run_path(self) -> str:
+    def partial_run_path(self) -> Path:
         """Temporary path used while writing build artifacts."""
-        return f"{self.run_path}.part"
+        return Path(self.run_path + ".part")
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -328,11 +328,11 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
 
 
 def create_index(
-    root: str, num_grads: int, grad_sizes: dict[str, int], dtype: DTypeLike
+    root: Path, num_grads: int, grad_sizes: dict[str, int], dtype: DTypeLike
 ) -> np.memmap:
     """Create a memory-mapped file for storing structured gradients
     and persist metadata."""
-    grad_path = os.path.join(root, "gradients.bin")
+    grad_path = root / "gradients.bin"
     rank = dist.get_rank() if dist.is_initialized() else 0
 
     # Build a json-serializable structured dtype
@@ -345,7 +345,7 @@ def create_index(
     # ── 1. Rank-0 creates file & metadata exactly once ─────────────────────────
     if rank == 0:
         # Ensure the directory exists
-        os.makedirs(root, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
 
         # Allocate (extends file to right size without writing zeros byte-by-byte)
         nbytes = np.dtype(struct_dtype).itemsize * num_grads  # type: ignore
@@ -356,7 +356,7 @@ def create_index(
             os.fsync(f.fileno())
 
         # Persist metadata for future runs
-        with open(root + "/info.json", "w") as f:
+        with (root / "info.json").open("w") as f:
             json.dump({"num_grads": num_grads, "dtype": struct_dtype}, f, indent=2)
 
     # ── 2. Everyone blocks until the file is definitely there & sized ─────────────
@@ -400,17 +400,17 @@ def load_data_string(
     return ds
 
 
-def load_gradients(root_dir: str) -> np.memmap:
+def load_gradients(root_dir: Path) -> np.memmap:
     """Map the structured gradients stored in `root_dir` into memory."""
 
-    with open(os.path.join(root_dir, "info.json")) as f:
+    with (root_dir / "info.json").open("r") as f:
         info = json.load(f)
 
     dtype = info["dtype"]
     num_grads = info["num_grads"]
 
     return np.memmap(
-        os.path.join(root_dir, "gradients.bin"),
+        root_dir / "gradients.bin",
         dtype=dtype,
         mode="r",
         shape=(num_grads,),
@@ -418,13 +418,13 @@ def load_gradients(root_dir: str) -> np.memmap:
 
 
 def load_gradient_dataset(
-    root_dir: str, concatenate_gradients: bool = False
+    root_dir: Path, concatenate_gradients: bool = False
 ) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
 
-    def load_shard(dir: str) -> Dataset:
+    def load_shard(dir: Path) -> Dataset:
         mmap = load_gradients(dir)
-        ds = Dataset.load_from_disk(dir + "/data.hf")
+        ds = Dataset.load_from_disk(dir / "data.hf")
 
         # concatenate the extracted module gradients into a single column
         if concatenate_gradients:
@@ -443,14 +443,12 @@ def load_gradient_dataset(
                 ds = ds.add_column(field_name, col, new_fingerprint=field_name)
         return ds
 
-    root = Path(root_dir)
-
-    if (root / "data.hf").exists():
+    if (root_dir / "data.hf").exists():
         return load_shard(root_dir)
 
     # Flatten indices to avoid CPU OOM
     return concatenate_datasets(
-        [load_shard(str(path)) for path in sorted(root.iterdir()) if path.is_dir()]
+        [load_shard(path) for path in sorted(root_dir.iterdir()) if path.is_dir()]
     ).flatten_indices()
 
 

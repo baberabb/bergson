@@ -1,12 +1,46 @@
 import json
 import os
-from typing import Callable
+from pathlib import Path
+from typing import Callable, Literal
 
 import torch
 from datasets import Dataset
 
 from .data import QueryConfig, load_gradient_dataset
 from .gradients import GradientProcessor
+
+# Do we want to map from HF ds to HF ds or memmap to memmap?
+# We need info.json, so let's do HF to HF.
+
+
+# LESS does mean gradient for task -> unit normalization
+# And then they sum the result across checkpoints (one mean grad per checkpoint)
+def transform_gradients(
+    source_path: Path,
+    destination_path: Path,
+    unit_normalize_individual_grads: bool,
+    normalize_accumulated_grad: bool,
+    accumulate_grads: Literal["mean", "sum", "none"] = "none",
+    batch_size: int = 1024,
+):
+    pass
+
+    # Load the source dataset
+    source_ds = load_gradient_dataset(source_path)
+    with open(os.path.join(source_path, "info.json"), "r") as f:
+        source_modules = json.load(f)["dtype"]["names"]
+    source_ds = source_ds.with_format("torch", columns=source_modules)
+
+    # Load the destination dataset
+    destination_ds = load_gradient_dataset(destination_path)
+    destination_ds = destination_ds.with_format(
+        "torch", columns=source_modules, output_all_columns=True
+    )
+
+    # Transform the gradients
+    destination_ds = destination_ds.map(
+        transform_gradients, batched=True, batch_size=batch_size
+    )
 
 
 class Scorer:
@@ -39,7 +73,9 @@ def get_query_data(query_cfg: QueryConfig):
     if not query_cfg.modules:
         query_cfg.modules = target_modules
 
-    query_ds = load_gradient_dataset(query_cfg.query_path, concatenate_gradients=False)
+    query_ds = load_gradient_dataset(
+        Path(query_cfg.query_path), concatenate_gradients=False
+    )
     query_ds = query_ds.with_format("torch", columns=target_modules)
 
     use_q = query_cfg.query_preconditioner_path is not None
@@ -50,13 +86,13 @@ def get_query_data(query_cfg: QueryConfig):
         if use_q:
             assert query_cfg.query_preconditioner_path is not None
             q = GradientProcessor.load(
-                query_cfg.query_preconditioner_path,
+                Path(query_cfg.query_preconditioner_path),
                 map_location="cuda",
             ).preconditioners
         if use_i:
             assert query_cfg.index_preconditioner_path is not None
             i = GradientProcessor.load(
-                query_cfg.index_preconditioner_path, map_location="cuda"
+                Path(query_cfg.index_preconditioner_path), map_location="cuda"
             ).preconditioners
 
         mixed_preconditioner = (

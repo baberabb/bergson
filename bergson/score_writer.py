@@ -52,7 +52,7 @@ class MemmapScoreWriter(ScoreWriter):
         self,
         scorer: Scorer,
         num_items: int,
-        scores_path: str,
+        scores_path: Path,
         *,
         dtype: torch.dtype = torch.float32,
         rank: int,
@@ -62,7 +62,7 @@ class MemmapScoreWriter(ScoreWriter):
     ):
         self.scorer = scorer
         self.num_scores = scorer.num_scores
-        self.scores_path = Path(scores_path)
+        self.scores_path = scores_path
         self.rank = rank
         self.dtype = dtype
         self.module_wise = module_wise
@@ -119,7 +119,7 @@ class MemmapScoreWriter(ScoreWriter):
             self.flush()
 
             # Persist metadata for future runs
-            with open(scores_path + "/info.json", "w") as f:
+            with (scores_path / "info.json").open("w") as f:
                 json.dump(
                     {
                         "num_items": num_items,

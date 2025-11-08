@@ -1,6 +1,7 @@
 import os
 import socket
 from datetime import timedelta
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -56,7 +57,7 @@ def worker(
     )
 
     callback = GradientCollectorCallback(
-        f"{run_name}/gradients",
+        Path(run_name) / "gradients",
         accumulate_grads=True,
     )
 

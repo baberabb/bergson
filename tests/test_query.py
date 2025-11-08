@@ -35,7 +35,7 @@ def test_query(tmp_path: Path, model, dataset):
     score_writer = MemmapScoreWriter(
         scorer,
         len(dataset),
-        str(tmp_path),
+        tmp_path,
         rank=0,
         modules=list(shapes.keys()),
         module_wise=False,
@@ -45,7 +45,7 @@ def test_query(tmp_path: Path, model, dataset):
         model=model,
         data=dataset,
         processor=processor,
-        path=str(tmp_path),
+        path=tmp_path,
         score_writer=score_writer,
         module_wise=False,
     )
@@ -75,7 +75,7 @@ def test_module_wise_query(tmp_path: Path, model, dataset):
     score_writer = MemmapScoreWriter(
         scorer,
         len(dataset),
-        str(tmp_path),
+        tmp_path,
         rank=0,
         modules=list(shapes.keys()),
         module_wise=True,
@@ -85,10 +85,10 @@ def test_module_wise_query(tmp_path: Path, model, dataset):
         model=model,
         data=dataset,
         processor=processor,
-        path=str(tmp_path),
+        path=tmp_path,
         score_writer=score_writer,
         module_wise=True,
     )
 
     assert any(tmp_path.iterdir()), "Expected artifacts in the temp run_path"
-    assert any(Path(tmp_path).glob("scores.bin")), "Expected scores file"
+    assert any(tmp_path.glob("scores.bin")), "Expected scores file"

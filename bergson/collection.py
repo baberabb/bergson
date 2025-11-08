@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -19,7 +20,7 @@ def collect_gradients(
     model: PreTrainedModel,
     data: Dataset,
     processor: GradientProcessor,
-    path: str,
+    path: Path,
     *,
     batches: list[list[int]] | None = None,
     kl_divergence: bool | None = None,
@@ -184,7 +185,7 @@ def collect_gradients(
             feature=Value("float16" if dtype == torch.float16 else "float32"),
             new_fingerprint="loss",
         )
-        data.save_to_disk(path + "/data.hf")
+        data.save_to_disk(path / "data.hf")
 
         if save_processor:
             processor.save(path)

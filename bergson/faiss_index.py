@@ -1,5 +1,4 @@
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -93,25 +92,24 @@ def normalize_grads(
     return normalized_grads
 
 
-def gradients_loader(root_dir: str):
-    def load_shard(shard_dir: str) -> np.memmap:
-        with open(os.path.join(shard_dir, "info.json")) as f:
+def gradients_loader(root_dir: Path):
+    def load_shard(shard_dir: Path) -> np.memmap:
+        with (shard_dir / "info.json").open("r") as f:
             info = json.load(f)
 
         return np.memmap(
-            os.path.join(shard_dir, "gradients.bin"),
+            shard_dir / "gradients.bin",
             dtype=info["dtype"],
             mode="r",
             shape=(info["num_grads"],),
         )
 
-    root_path = Path(root_dir)
-    if (root_path / "info.json").exists():
+    if (root_dir / "info.json").exists():
         yield load_shard(root_dir)
     else:
-        for path in sorted(root_path.iterdir()):
+        for path in sorted(root_dir.iterdir()):
             if "shard" in path.name:
-                yield load_shard(str(path))
+                yield load_shard(path)
 
 
 def _require_faiss() -> ModuleType:
@@ -196,7 +194,7 @@ class FaissIndex:
 
     @staticmethod
     def create_index(
-        gradients_path: str,
+        gradients_path: Path,
         faiss_path: Path,
         faiss_cfg: FaissConfig,
         device: str,
@@ -210,13 +208,12 @@ class FaissIndex:
         faiss_path.mkdir(exist_ok=True, parents=True)
 
         # Write the gradients into an on-disk FAISS index
-        root_path = Path(gradients_path)
-        if (root_path / "info.json").exists():
-            info_paths = [root_path / "info.json"]
+        if (gradients_path / "info.json").exists():
+            info_paths = [gradients_path / "info.json"]
         else:
             info_paths = [
                 shard_path / "info.json"
-                for shard_path in root_path.iterdir()
+                for shard_path in gradients_path.iterdir()
                 if (shard_path / "info.json").exists()
             ]
 
@@ -312,7 +309,7 @@ class FaissIndex:
             json.dump(
                 {
                     "faiss_cfg": faiss_cfg.__dict__,
-                    "gradients_path": gradients_path,
+                    "gradients_path": str(gradients_path),
                     "device": device,
                     "unit_norm": unit_norm,
                     "ordered_modules": ordered_modules,

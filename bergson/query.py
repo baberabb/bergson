@@ -1,6 +1,7 @@
 import os
 import socket
 from datetime import timedelta
+from pathlib import Path
 from typing import cast
 
 import torch
@@ -136,7 +137,7 @@ def worker(
         # Shard the entire model
         fully_shard(model)
 
-    processor_dir = index_cfg.processor_path or index_cfg.run_path
+    processor_dir = Path(index_cfg.processor_path or index_cfg.run_path)
     processor_cfg_path = os.path.join(processor_dir, "processor_config.json")
 
     if os.path.exists(processor_cfg_path):
@@ -177,7 +178,7 @@ def worker(
         score_writer = MemmapScoreWriter(
             scorer,
             len(ds),
-            query_cfg.scores_path,
+            Path(query_cfg.scores_path),
             rank=rank,
             modules=query_cfg.modules,
             module_wise=index_cfg.module_wise,
@@ -222,7 +223,7 @@ def worker(
             score_writer = MemmapScoreWriter(
                 scorer,
                 len(ds_shard),
-                os.path.join(query_cfg.scores_path, f"shard-{shard_id:05d}"),
+                Path(query_cfg.scores_path) / f"shard-{shard_id:05d}",
                 rank=rank,
                 modules=query_cfg.modules,
                 module_wise=index_cfg.module_wise,
@@ -231,7 +232,7 @@ def worker(
                 model,
                 ds_shard,
                 processor,
-                os.path.join(index_cfg.partial_run_path, f"shard-{shard_id:05d}"),
+                index_cfg.partial_run_path / f"shard-{shard_id:05d}",
                 batches=batches,
                 kl_divergence=index_cfg.loss_fn == "kl",
                 loss_reduction=index_cfg.loss_reduction,

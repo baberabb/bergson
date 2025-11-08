@@ -4,6 +4,7 @@ import shutil
 import socket
 from dataclasses import is_dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import cast
 
 import pandas as pd
@@ -135,7 +136,7 @@ def worker(
             print(f"Loading processor from '{cfg.processor_path}'")
 
         processor = GradientProcessor.load(
-            cfg.processor_path,
+            Path(cfg.processor_path),
             map_location=f"cuda:{rank}",
         )
     else:
@@ -189,7 +190,7 @@ def worker(
                 model,
                 ds_shard,
                 processor,
-                os.path.join(cfg.partial_run_path, f"shard-{shard_id:05d}"),
+                cfg.partial_run_path / f"shard-{shard_id:05d}",
                 batches=batches,
                 kl_divergence=cfg.loss_fn == "kl",
                 loss_reduction=cfg.loss_reduction,
