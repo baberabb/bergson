@@ -7,22 +7,27 @@ from transformers import AutoModelForCausalLM
 
 from bergson import (
     AttentionConfig,
-    GradientProcessor,
-    collect_gradients,
 )
-from bergson.data import load_gradients
+from bergson.collection import collect_gradients
+from bergson.data import IndexConfig, load_gradients
+from bergson.gradients import GradientProcessor
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_build_consistency(tmp_path: Path, model, dataset):
-    collect_gradients(
-        model=model,
-        data=dataset,
-        processor=GradientProcessor(),
-        path=str(tmp_path),
-        skip_preconditioners=True,
-    )
-    index = load_gradients(str(tmp_path))
+    cfg = IndexConfig(run_path=str(tmp_path))
+    cfg.skip_preconditioners = True
+    print(str(tmp_path))
+    kwargs = {
+        "model": model,
+        "data": dataset,
+        "processor": GradientProcessor(),
+        "cfg": cfg,
+    }
+
+    collect_gradients(**kwargs)
+
+    index = load_gradients(cfg.partial_run_path)
 
     # Regenerate cache
     cache_path = Path("runs/test_build_cache.npy")
@@ -43,15 +48,20 @@ def test_split_attention_build(tmp_path: Path, model, dataset):
         ),
     }
 
-    collect_gradients(
-        model=model,
-        data=dataset,
-        processor=GradientProcessor(projection_dim=16),
-        path=str(tmp_path),
-        attention_cfgs=attention_cfgs,
-    )
+    cfg = IndexConfig(run_path=str(tmp_path))
 
-    assert any(tmp_path.iterdir()), "Expected artifacts in the temp run_path"
+    kwargs = {
+        "model": model,
+        "data": dataset,
+        "processor": GradientProcessor(projection_dim=16),
+        "cfg": cfg,
+        "attention_cfgs": attention_cfgs,
+    }
+    collect_gradients(**kwargs)
+
+    assert any(
+        Path(cfg.partial_run_path).iterdir()
+    ), "Expected artifacts in the temp run_path"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -62,19 +72,22 @@ def test_conv1d_build(tmp_path: Path, dataset):
         model_name, trust_remote_code=True, use_safetensors=True
     )
 
-    collect_gradients(
-        model=model,
-        data=dataset,
-        processor=GradientProcessor(),
-        path=str(tmp_path),
-        # This build hangs in pytest with preconditioners enabled.
-        # It works when run directly so it may be a pytest issue.
-        skip_preconditioners=True,
-    )
+    cfg = IndexConfig(run_path=str(tmp_path))
 
-    assert any(tmp_path.iterdir()), "Expected artifacts in the run path"
+    cfg.skip_preconditioners = True
+    kwargs = {
+        "model": model,
+        "data": dataset,
+        "processor": GradientProcessor(projection_dim=16),
+        "cfg": cfg,
+    }
+    collect_gradients(**kwargs)
 
-    index = load_gradients(str(tmp_path))
+    assert any(
+        Path(cfg.partial_run_path).iterdir()
+    ), "Expected artifacts in the run path"
+
+    index = load_gradients(cfg.partial_run_path)
 
     assert len(modules := index.dtype.names) != 0
     assert len(index[modules[0]]) == len(dataset)

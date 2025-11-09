@@ -2,9 +2,11 @@ import os
 from dataclasses import dataclass
 from typing import Optional, Union
 
-from simple_parsing import ArgumentParser, ConflictResolution
+from simple_parsing import ArgumentParser, ConflictResolution, parse
 
-from .build import build_gradient_dataset
+from bergson.collection import collect_gradients
+
+from .build import distributed_computing
 from .data import IndexConfig, QueryConfig
 from .query import query_gradient_dataset
 
@@ -22,7 +24,7 @@ class Build:
                 "At least one of save_index or save_processor must be True"
             )
 
-        build_gradient_dataset(self.cfg)
+        distributed_computing(cfg=parse(IndexConfig), worker_fn=collect_gradients)
 
 
 @dataclass
