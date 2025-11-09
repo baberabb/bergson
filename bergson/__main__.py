@@ -24,7 +24,7 @@ class Build:
                 "At least one of save_index or save_processor must be True"
             )
 
-        distributed_computing(cfg=parse(IndexConfig), worker_fn=collect_gradients)
+        distributed_computing(cfg=self.cfg, worker_fn=collect_gradients)
 
 
 @dataclass

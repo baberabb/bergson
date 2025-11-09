@@ -92,7 +92,7 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
 
 
 def setup_model_and_peft(
-    cfg: IndexConfig, rank: int, dtype: torch.dtype
+    cfg: IndexConfig, rank: int, dtype: torch.dtype | str
 ) -> tuple[AutoModelForCausalLM, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
 
@@ -239,6 +239,8 @@ def worker_wrapper(
                         if torch.cuda.is_bf16_supported()
                         else torch.float16
                     )
+                case "auto":
+                    dtype = "auto"
                 case other:
                     raise ValueError(f"Unsupported precision: {other}")
 
