@@ -118,9 +118,6 @@ class IndexConfig:
     save_index: bool = True
     """Whether to write the gradient index to disk."""
 
-    save_processor: bool = True
-    """Whether to write the gradient processor to disk."""
-
     data: DataConfig = field(default_factory=DataConfig)
     """Specification of the data on which to build the index."""
 

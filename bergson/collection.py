@@ -29,7 +29,6 @@ def collect_gradients(
     target_modules: set[str] | None = None,
     attention_cfgs: dict[str, AttentionConfig] | None = None,
     save_index: bool = True,
-    save_processor: bool = True,
     drop_columns: bool = False,
     score_writer: ScoreWriter | None = None,
     token_batch_size: int | None = None,
@@ -187,8 +186,7 @@ def collect_gradients(
         )
         data.save_to_disk(path / "data.hf")
 
-        if save_processor:
-            processor.save(path)
+        processor.save(path)
 
     # Make sure the gradients are written to disk
     if grad_buffer is not None:

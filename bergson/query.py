@@ -157,7 +157,7 @@ def worker(
             projection_type=index_cfg.projection_type,
             include_bias=index_cfg.include_bias,
         )
-        if rank == 0 and index_cfg.save_processor:
+        if rank == 0:
             processor.save(index_cfg.partial_run_path)
 
     if index_cfg.split_attention_modules:
@@ -200,7 +200,6 @@ def worker(
             drop_columns=index_cfg.drop_columns,
             score_writer=score_writer,
             save_index=index_cfg.save_index,
-            save_processor=index_cfg.save_processor,
             module_wise=index_cfg.module_wise,
         )
     else:
@@ -243,7 +242,6 @@ def worker(
                 drop_columns=index_cfg.drop_columns,
                 score_writer=score_writer,
                 save_index=index_cfg.save_index,
-                save_processor=index_cfg.save_processor,
             )
             buf.clear()
             shard_id += 1
@@ -253,6 +251,9 @@ def worker(
             if len(buf) == index_cfg.stream_shard_size:
                 flush()
         flush()
+
+        if rank == 0:
+            processor.save(index_cfg.partial_run_path)
 
 
 def dist_worker(
