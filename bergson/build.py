@@ -147,7 +147,7 @@ def worker(
             projection_type=cfg.projection_type,
             include_bias=cfg.include_bias,
         )
-        if rank == 0 and cfg.save_processor:
+        if rank == 0:
             processor.save(cfg.partial_run_path)
 
     if cfg.split_attention_modules:
@@ -171,7 +171,6 @@ def worker(
             target_modules=target_modules,
             attention_cfgs=attention_cfgs,
             save_index=cfg.save_index,
-            save_processor=cfg.save_processor,
             drop_columns=cfg.drop_columns,
             token_batch_size=cfg.token_batch_size,
             module_wise=cfg.module_wise,
@@ -199,7 +198,6 @@ def worker(
                 attention_cfgs=attention_cfgs,
                 save_index=cfg.save_index,
                 # Save a processor state checkpoint after each shard
-                save_processor=cfg.save_processor,
                 drop_columns=cfg.drop_columns,
                 token_batch_size=cfg.token_batch_size,
                 module_wise=cfg.module_wise,
@@ -213,7 +211,7 @@ def worker(
                 flush()
         flush()
 
-        if cfg.save_processor:
+        if rank == 0:
             processor.save(cfg.partial_run_path)
 
 

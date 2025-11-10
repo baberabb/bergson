@@ -17,9 +17,9 @@ class Build:
 
     def execute(self):
         """Build the gradient dataset."""
-        if not self.cfg.save_index and not self.cfg.save_processor:
+        if not self.cfg.save_index and self.cfg.skip_preconditioners:
             raise ValueError(
-                "At least one of save_index or save_processor must be True"
+                "Either save_index must be True or skip_preconditioners must be False"
             )
 
         build_gradient_dataset(self.cfg)
