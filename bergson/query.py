@@ -1,4 +1,5 @@
 import os
+import shutil
 import socket
 from datetime import timedelta
 from pathlib import Path
@@ -30,8 +31,8 @@ from .data import (
 )
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
-from .query_callback import get_scorer_callback
 from .score_writer import MemmapScoreWriter
+from .scorer import get_scorer
 from .utils import assert_type, get_layer_list
 
 
@@ -138,7 +139,7 @@ def worker(
         fully_shard(model)
 
     processor_dir = Path(index_cfg.processor_path or index_cfg.run_path)
-    processor_cfg_path = os.path.join(processor_dir, "processor_config.json")
+    processor_cfg_path = processor_dir / "processor_config.json"
 
     if os.path.exists(processor_cfg_path):
         if rank == 0:
@@ -169,7 +170,7 @@ def worker(
     score_writer_dtype = dtype if dtype != "auto" else torch.float32
     if isinstance(ds, Dataset):
 
-        scorer = get_scorer_callback(
+        scorer = get_scorer(
             query_cfg,
             index_cfg.module_wise,
             torch.device(f"cuda:{rank}"),
@@ -214,7 +215,7 @@ def worker(
             batches = allocate_batches(
                 ds_shard["length"][:], index_cfg.token_batch_size
             )
-            scorer = get_scorer_callback(
+            scorer = get_scorer(
                 query_cfg,
                 index_cfg.module_wise,
                 torch.device(f"cuda:{rank}"),
@@ -330,6 +331,6 @@ def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
         ctx.wait()
 
     try:
-        os.rename(index_cfg.partial_run_path, index_cfg.run_path)
+        shutil.move(index_cfg.partial_run_path, index_cfg.run_path)
     except Exception:
         pass

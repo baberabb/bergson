@@ -1,5 +1,4 @@
 import json
-import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -7,7 +6,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from .query_callback import Scorer
+from .scorer import Scorer
 
 
 class ScoreWriter(ABC):
@@ -20,6 +19,7 @@ class ScoreWriter(ABC):
         self,
         indices: list[int],
         mod_grads: dict[str, torch.Tensor],
+        name: str | None = None,
     ):
         """
         Write the scores to the score writer.
@@ -99,7 +99,7 @@ class MemmapScoreWriter(ScoreWriter):
             "itemsize": itemsize,
         }
 
-        if rank == 0 and not os.path.exists(scores_file_path):
+        if rank == 0 and not scores_file_path.exists():
             print(f"Creating new scores file: {scores_file_path}")
 
             self.scores = np.memmap(

@@ -11,7 +11,7 @@ from bergson import (
     collect_gradients,
 )
 from bergson.data import QueryConfig
-from bergson.query_callback import get_mean_scorer, get_module_wise_mean_scorer
+from bergson.scorer import build_scorer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -26,11 +26,18 @@ def test_query(tmp_path: Path, model, dataset):
         ]
     ).with_format("torch", columns=list(shapes.keys()))
 
-    scorer = get_mean_scorer(
+    scorer = build_scorer(
         query_gradient_ds,
-        QueryConfig(modules=list(shapes.keys())),
-        torch.device("cpu"),
-        torch.float32,
+        QueryConfig(
+            query_path=str(tmp_path / "query_gradient_ds"),
+            modules=list(shapes.keys()),
+            score="mean",
+        ),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        module_wise=False,
+        accumulate_grads="mean",
+        normalize_accumulated_grad=True,
     )
     score_writer = MemmapScoreWriter(
         scorer,
@@ -66,11 +73,18 @@ def test_module_wise_query(tmp_path: Path, model, dataset):
         ]
     ).with_format("torch", columns=list(shapes.keys()))
 
-    scorer = get_module_wise_mean_scorer(
+    scorer = build_scorer(
         query_gradient_ds,
-        QueryConfig(modules=list(shapes.keys())),
-        torch.device("cpu"),
-        torch.float32,
+        QueryConfig(
+            query_path=str(tmp_path / "query_gradient_ds"),
+            modules=list(shapes.keys()),
+            score="mean",
+        ),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        module_wise=True,
+        accumulate_grads="mean",
+        normalize_accumulated_grad=True,
     )
     score_writer = MemmapScoreWriter(
         scorer,
