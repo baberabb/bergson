@@ -17,7 +17,7 @@ from bergson.gradients import GradientProcessor
 def test_build_consistency(tmp_path: Path, model, dataset):
     cfg = IndexConfig(run_path=str(tmp_path))
     cfg.skip_preconditioners = True
-    print(str(tmp_path))
+
     kwargs = {
         "model": model,
         "data": dataset,

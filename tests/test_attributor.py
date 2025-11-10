@@ -5,13 +5,21 @@ import pytest
 import torch
 
 from bergson import Attributor, FaissConfig, GradientProcessor, collect_gradients
+from bergson.data import IndexConfig
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_attributor(tmp_path: Path, model, dataset):
-    collect_gradients(
-        model=model, data=dataset, processor=GradientProcessor(), path=str(tmp_path)
-    )
+    cfg = IndexConfig(run_path=str(tmp_path))
+    cfg.skip_preconditioners = True
+
+    kwargs = {
+        "model": model,
+        "data": dataset,
+        "processor": GradientProcessor(),
+        "cfg": cfg,
+    }
+    collect_gradients(**kwargs)
 
     attr = Attributor(str(tmp_path), device="cpu", unit_norm=True)
 
@@ -32,12 +40,15 @@ def test_faiss(tmp_path: Path, model, dataset):
     model.to("cuda")
     dtype = torch.float32 if model.dtype == torch.float32 else torch.float16
 
-    collect_gradients(
-        model=model,
-        data=dataset,
-        processor=GradientProcessor(projection_dim=16),
-        path=str(tmp_path),
-    )
+    cfg = IndexConfig(run_path=str(tmp_path))
+
+    kwargs = {
+        "model": model,
+        "data": dataset,
+        "processor": GradientProcessor(projection_dim=16),
+        "cfg": cfg,
+    }
+    collect_gradients(**kwargs)
 
     attr = Attributor(
         str(tmp_path),
