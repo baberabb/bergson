@@ -33,6 +33,9 @@ class DataConfig:
     split: str = "train"
     """Split of the dataset to use for building the index."""
 
+    subset: str | None = None
+    """Subset of the dataset to use for building the index."""
+
     prompt_column: str = "text"
     """Column in the dataset that contains the prompts."""
 
@@ -70,29 +73,30 @@ class QueryConfig:
     """Config for querying an index on the fly."""
 
     query_path: str = ""
-    """Path to the query dataset."""
+    """Path to the existing query index."""
 
-    query_method: Literal["mean", "nearest"] = "mean"
-    """Method to use for computing the query."""
+    score: Literal["mean", "nearest", "individual"] = "mean"
+    """Method for scoring the gradients with the query. If mean
+    gradients will be scored by their similarity with the mean
+    query gradients, if max by the most similar query gradient,
+    if individual by each separate query gradient."""
 
-    save_processor: bool = True
-    """Whether to write the query dataset gradient processor
-    to disk."""
+    scores_path: str = ""
+    """Path to the directory where query scores should be written."""
 
     query_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner. The precomputed
-    preconditioner is applied to the query dataset gradients."""
+    """Path to a precomputed preconditioner to be applied to
+    the query dataset gradients."""
 
     index_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner. The precomputed
-    preconditioner is applied to the query dataset gradients.
-    This does not affect the ability to compute a new
-    preconditioner during gradient collection."""
+    """Path to a precomputed preconditioner to be applied to
+    the query dataset gradients. This does not affect the
+    ability to compute a new preconditioner during the query."""
 
-    mixing_coefficient: float = 0.5
+    mixing_coefficient: float = 0.99
     """Coefficient to weight the application of the query preconditioner
     and the pre-computed index preconditioner. 0.0 means only use the
-    query preconditioner and 1.0 means only use the index preconditioner."""
+    index preconditioner and 1.0 means only use the query preconditioner."""
 
     modules: list[str] = field(default_factory=list)
     """Modules to use for the query. If empty, all modules will be used."""
@@ -162,6 +166,10 @@ class IndexConfig:
     loss_reduction: Literal["mean", "sum"] = "mean"
     """Reduction method for the loss function."""
 
+    # TODO consider renaming this
+    module_wise: bool = False
+    """Whether to process the module gradients individually."""
+
     streaming: bool = False
     """Whether to use streaming mode for the dataset."""
 
@@ -179,9 +187,9 @@ class IndexConfig:
     Used for attention modules specified in `split_attention_modules`."""
 
     @property
-    def partial_run_path(self) -> str:
+    def partial_run_path(self) -> Path:
         """Temporary path used while writing build artifacts."""
-        return f"{self.run_path}.part"
+        return Path(self.run_path + ".part")
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -285,7 +293,7 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
 
     # Split arbitrary (non-singleton) batches until we reach the target
     i = 0
-    while len(batches) < target_batches:
+    while len(batches) < target_batches and i < len(batches):
         batch = batches[i % len(batches)]
         if len(batch) == 1:
             i += 1  # try another batch
@@ -293,7 +301,11 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
         batches.append([batch.pop()])  # split off a singleton
         i += 1
 
-    assert len(batches) == target_batches
+    assert len(batches) == target_batches, (
+        "Could not construct a number of batches divisible by the world size."
+        " If variability of item lengths in your dataset is low "
+        "consider using a different dataset size or token batch size."
+    )
     assert all(
         max(doc_lengths[i] for i in batch) * len(batch) <= N for batch in batches
     )
@@ -316,11 +328,11 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
 
 
 def create_index(
-    root: str, num_grads: int, grad_sizes: dict[str, int], dtype: DTypeLike
+    root: Path, num_grads: int, grad_sizes: dict[str, int], dtype: DTypeLike
 ) -> np.memmap:
     """Create a memory-mapped file for storing structured gradients
     and persist metadata."""
-    grad_path = os.path.join(root, "gradients.bin")
+    grad_path = root / "gradients.bin"
     rank = dist.get_rank() if dist.is_initialized() else 0
 
     # Build a json-serializable structured dtype
@@ -333,7 +345,7 @@ def create_index(
     # ── 1. Rank-0 creates file & metadata exactly once ─────────────────────────
     if rank == 0:
         # Ensure the directory exists
-        os.makedirs(root, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
 
         # Allocate (extends file to right size without writing zeros byte-by-byte)
         nbytes = np.dtype(struct_dtype).itemsize * num_grads  # type: ignore
@@ -344,7 +356,7 @@ def create_index(
             os.fsync(f.fileno())
 
         # Persist metadata for future runs
-        with open(root + "/info.json", "w") as f:
+        with (root / "info.json").open("w") as f:
             json.dump({"num_grads": num_grads, "dtype": struct_dtype}, f, indent=2)
 
     # ── 2. Everyone blocks until the file is definitely there & sized ─────────────
@@ -360,7 +372,10 @@ def create_index(
 
 
 def load_data_string(
-    data_str: str, split: str = "train", streaming: bool = False
+    data_str: str,
+    split: str = "train",
+    subset: str | None = None,
+    streaming: bool = False,
 ) -> Dataset | IterableDataset:
     """Load a dataset from a string identifier or path."""
     if data_str.endswith(".csv"):
@@ -369,7 +384,7 @@ def load_data_string(
         ds = assert_type(Dataset, Dataset.from_json(data_str))
     else:
         try:
-            ds = load_dataset(data_str, split=split, streaming=streaming)
+            ds = load_dataset(data_str, subset, split=split, streaming=streaming)
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
                 raise NotImplementedError(
@@ -385,17 +400,17 @@ def load_data_string(
     return ds
 
 
-def load_gradients(root_dir: str) -> np.memmap:
+def load_gradients(root_dir: Path) -> np.memmap:
     """Map the structured gradients stored in `root_dir` into memory."""
 
-    with open(os.path.join(root_dir, "info.json")) as f:
+    with (root_dir / "info.json").open("r") as f:
         info = json.load(f)
 
     dtype = info["dtype"]
     num_grads = info["num_grads"]
 
     return np.memmap(
-        os.path.join(root_dir, "gradients.bin"),
+        root_dir / "gradients.bin",
         dtype=dtype,
         mode="r",
         shape=(num_grads,),
@@ -403,13 +418,13 @@ def load_gradients(root_dir: str) -> np.memmap:
 
 
 def load_gradient_dataset(
-    root_dir: str, concatenate_gradients: bool = False
+    root_dir: Path, concatenate_gradients: bool = False
 ) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
 
-    def load_shard(dir: str) -> Dataset:
+    def load_shard(dir: Path) -> Dataset:
         mmap = load_gradients(dir)
-        ds = Dataset.load_from_disk(dir + "/data.hf")
+        ds = Dataset.load_from_disk(dir / "data.hf")
 
         # concatenate the extracted module gradients into a single column
         if concatenate_gradients:
@@ -428,14 +443,12 @@ def load_gradient_dataset(
                 ds = ds.add_column(field_name, col, new_fingerprint=field_name)
         return ds
 
-    root = Path(root_dir)
-
-    if (root / "data.hf").exists():
+    if (root_dir / "data.hf").exists():
         return load_shard(root_dir)
 
     # Flatten indices to avoid CPU OOM
     return concatenate_datasets(
-        [load_shard(str(path)) for path in sorted(root.iterdir()) if path.is_dir()]
+        [load_shard(path) for path in sorted(root_dir.iterdir()) if path.is_dir()]
     ).flatten_indices()
 
 

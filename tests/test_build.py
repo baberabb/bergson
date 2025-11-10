@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -14,15 +15,38 @@ from bergson.data import load_gradients
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_build_e2e(tmp_path: Path):
+    result = subprocess.run(
+        [
+            "python",
+            "-m",
+            "bergson",
+            "build",
+            "test_e2e",
+            "--model",
+            "EleutherAI/pythia-14m",
+            "--dataset",
+            "NeelNanda/pile-10k",
+            "--split",
+            "train[:100]",
+            "--truncation",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_build_consistency(tmp_path: Path, model, dataset):
     collect_gradients(
         model=model,
         data=dataset,
         processor=GradientProcessor(),
-        path=str(tmp_path),
+        path=tmp_path,
         skip_preconditioners=True,
     )
-    index = load_gradients(str(tmp_path))
+    index = load_gradients(tmp_path)
 
     # Regenerate cache
     cache_path = Path("runs/test_build_cache.npy")
@@ -47,7 +71,7 @@ def test_split_attention_build(tmp_path: Path, model, dataset):
         model=model,
         data=dataset,
         processor=GradientProcessor(projection_dim=16),
-        path=str(tmp_path),
+        path=tmp_path,
         attention_cfgs=attention_cfgs,
     )
 
@@ -65,8 +89,8 @@ def test_conv1d_build(tmp_path: Path, dataset):
     collect_gradients(
         model=model,
         data=dataset,
-        processor=GradientProcessor(),
-        path=str(tmp_path),
+        processor=GradientProcessor(projection_dim=16),
+        path=tmp_path,
         # This build hangs in pytest with preconditioners enabled.
         # It works when run directly so it may be a pytest issue.
         skip_preconditioners=True,
@@ -74,7 +98,7 @@ def test_conv1d_build(tmp_path: Path, dataset):
 
     assert any(tmp_path.iterdir()), "Expected artifacts in the run path"
 
-    index = load_gradients(str(tmp_path))
+    index = load_gradients(tmp_path)
 
     assert len(modules := index.dtype.names) != 0
     assert len(index[modules[0]]) == len(dataset)

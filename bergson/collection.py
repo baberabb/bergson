@@ -1,5 +1,6 @@
 import math
-from typing import Callable, Literal
+from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -12,13 +13,14 @@ from transformers import PreTrainedModel
 from .data import create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
+from .score_writer import ScoreWriter
 
 
 def collect_gradients(
     model: PreTrainedModel,
     data: Dataset,
     processor: GradientProcessor,
-    path: str,
+    path: Path,
     *,
     batches: list[list[int]] | None = None,
     kl_divergence: bool | None = None,
@@ -29,7 +31,9 @@ def collect_gradients(
     save_index: bool = True,
     save_processor: bool = True,
     drop_columns: bool = False,
-    query_callback: Callable[[dict[str, torch.Tensor]], torch.Tensor] | None = None,
+    score_writer: ScoreWriter | None = None,
+    token_batch_size: int | None = None,
+    module_wise: bool = False,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -53,13 +57,16 @@ def collect_gradients(
     lo = torch.finfo(dtype).min
     hi = torch.finfo(dtype).max
 
-    def callback(name: str, g: torch.Tensor):
+    def callback(name: str, g: torch.Tensor, indices: list[int]):
         g = g.flatten(1).clamp_(lo, hi)
         if save_index:
             # Asynchronously move the gradient to CPU and convert to the final dtype
             mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
         else:
             mod_grads[name] = g.to(dtype=dtype)
+
+        if score_writer and module_wise:
+            score_writer(indices, mod_grads, name=name)
 
         # Compute the outer product of the flattened gradient
         if not skip_preconditioners:
@@ -94,12 +101,6 @@ def collect_gradients(
         dtype=dtype,
         fill_value=0.0,
     )
-    per_doc_scores = torch.full(
-        (len(data),),
-        device=model.device,
-        dtype=dtype,
-        fill_value=0.0,
-    )
 
     for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
         batch = data[indices]
@@ -118,6 +119,8 @@ def collect_gradients(
                 set_peft_enabled(model, True)
 
             with collector:
+                collector.indices = indices
+
                 ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
 
                 # Compute average KL across all unmasked tokens
@@ -129,6 +132,8 @@ def collect_gradients(
                 losses.mean().backward()
         else:
             with collector:
+                collector.indices = indices
+
                 logits = model(x).logits[:, :-1]
 
                 losses = F.cross_entropy(
@@ -156,9 +161,11 @@ def collect_gradients(
             for module_name in mod_grads.keys():
                 grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
 
-        if query_callback is not None:
-            scores = query_callback(mod_grads)
-            per_doc_scores[indices] = scores.detach().type_as(per_doc_scores)
+        if score_writer is not None:
+            if module_wise:
+                score_writer.finalize_module_wise(indices)
+            else:
+                score_writer(indices, mod_grads)
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
@@ -178,13 +185,7 @@ def collect_gradients(
             feature=Value("float16" if dtype == torch.float16 else "float32"),
             new_fingerprint="loss",
         )
-        data = data.add_column(
-            "scores",
-            per_doc_scores.cpu().numpy(),
-            feature=Value("float16" if dtype == torch.float16 else "float32"),
-            new_fingerprint="scores",
-        )
-        data.save_to_disk(path + "/data.hf")
+        data.save_to_disk(path / "data.hf")
 
         if save_processor:
             processor.save(path)

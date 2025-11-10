@@ -35,12 +35,14 @@ class Query:
 
     def execute(self):
         """Query the gradient dataset."""
+        assert self.query_cfg.scores_path
+        assert self.query_cfg.query_path
 
         if os.path.exists(self.index_cfg.run_path) and self.index_cfg.save_index:
             raise ValueError(
                 "Index path already exists and save_index is True - "
                 "running this query will overwrite the existing gradients. "
-                "If you meant to query the existing gradients, use "
+                "If you meant to query the existing gradients use "
                 "Attributor instead."
             )
 

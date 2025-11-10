@@ -67,12 +67,12 @@ def test_phi3():
             previous_collected_grads = {}
             for do_load in (False, True):
                 if do_load:
-                    processor = GradientProcessor.load(str(temp_dir / "processor"))
+                    processor = GradientProcessor.load(temp_dir / "processor")
                 else:
                     processor = GradientProcessor(
                         normalizers=normalizers, projection_dim=p
                     )
-                    processor.save(str(temp_dir / "processor"))
+                    processor.save(temp_dir / "processor")
                 collector = GradientCollector(model, closure, processor)
                 with collector:
                     model.zero_grad()

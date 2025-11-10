@@ -10,10 +10,13 @@ from bergson import Attributor, FaissConfig, GradientProcessor, collect_gradient
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_attributor(tmp_path: Path, model, dataset):
     collect_gradients(
-        model=model, data=dataset, processor=GradientProcessor(), path=str(tmp_path)
+        model=model,
+        data=dataset,
+        processor=GradientProcessor(projection_dim=16),
+        path=tmp_path,
     )
 
-    attr = Attributor(str(tmp_path), device="cpu", unit_norm=True)
+    attr = Attributor(tmp_path, device="cpu", unit_norm=True)
 
     x = torch.tensor(dataset[0]["input_ids"]).unsqueeze(0)
 
@@ -35,11 +38,11 @@ def test_faiss(tmp_path: Path, model, dataset):
         model=model,
         data=dataset,
         processor=GradientProcessor(projection_dim=16),
-        path=str(tmp_path),
+        path=tmp_path,
     )
 
     attr = Attributor(
-        str(tmp_path),
+        tmp_path,
         device="cuda",
         unit_norm=True,
         faiss_cfg=FaissConfig(),

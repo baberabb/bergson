@@ -1,26 +1,10 @@
 import os
 
-import pytest
-
-try:
-    import torch
-
-    HAS_CUDA = torch.cuda.is_available()
-except Exception:
-    HAS_CUDA = False
-
-if not HAS_CUDA:
-    pytest.skip(
-        "Skipping GPU-only tests: no CUDA/NVIDIA driver available.",
-        allow_module_level=True,
-    )
-
-
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["WANDB_MODE"] = "disabled"
 
-
 import pytest
+import torch
 from datasets import Dataset
 from transformers import AutoConfig, AutoModelForCausalLM, Trainer, TrainingArguments
 from trl import SFTConfig, SFTTrainer
@@ -59,6 +43,7 @@ class TestGradientCollectorCallback:
         }
         return Dataset.from_dict(data)
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_single_gpu_order_tracking(self, tmp_path, model, dataset):
         """Test that every step has an associated order record in single-GPU mode."""
         # Train the model with the callback
@@ -74,7 +59,7 @@ class TestGradientCollectorCallback:
         )
 
         callback = GradientCollectorCallback(
-            path=str(tmp_path / "gradients"),
+            path=tmp_path / "gradients",
             track_order=True,
             use_optimizer_state=False,
         )
@@ -121,6 +106,7 @@ class TestGradientCollectorCallback:
         for record in callback.order:
             assert 0 <= record["_idx"] < len(dataset)
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_order_tracking_disabled(self, tmp_path, model, dataset):
         """Test that no order records are created when tracking is disabled."""
         # Train the model with the callback
@@ -136,7 +122,7 @@ class TestGradientCollectorCallback:
         )
 
         callback = GradientCollectorCallback(
-            path=str(tmp_path / "gradients"), use_optimizer_state=False
+            path=tmp_path / "gradients", use_optimizer_state=False
         )
 
         trainer = Trainer(
@@ -152,6 +138,7 @@ class TestGradientCollectorCallback:
         # Verify no order records were created
         assert callback.order is None
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_order_save_and_load(self, tmp_path, model, dataset):
         """Test that order records are properly saved and can be loaded."""
         # Train the model with the callback
@@ -167,7 +154,7 @@ class TestGradientCollectorCallback:
         )
 
         callback = GradientCollectorCallback(
-            path=str(tmp_path / "gradients"),
+            path=tmp_path / "gradients",
             track_order=True,
             use_optimizer_state=False,
         )
@@ -201,6 +188,7 @@ class TestGradientCollectorCallback:
             assert record["global_step"] == callback.order[i]["global_step"]
             assert record["epoch"] == callback.order[i]["epoch"]
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_sft_trainer(self, tmp_path, model, dataset):
         """Test that gradient and order files are created and
         can be loaded after training with SFTTrainer."""
@@ -217,7 +205,7 @@ class TestGradientCollectorCallback:
         )
 
         callback = GradientCollectorCallback(
-            path=str(tmp_path / "gradients"),
+            path=tmp_path / "gradients",
             track_order=True,
             use_optimizer_state=False,
         )
@@ -247,7 +235,7 @@ class TestGradientCollectorCallback:
         assert (gradient_dir / "order.hf").exists()
 
         # Test loading the gradient data directly
-        gradients = load_gradients(str(train_gradient_dir))
+        gradients = load_gradients(train_gradient_dir)
         assert len(gradients) > 0
 
         # Verify order data was saved and can be loaded
