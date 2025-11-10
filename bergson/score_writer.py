@@ -6,8 +6,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from .scorer import Scorer
-
 
 class ScoreWriter(ABC):
     """
@@ -18,8 +16,7 @@ class ScoreWriter(ABC):
     def __call__(
         self,
         indices: list[int],
-        mod_grads: dict[str, torch.Tensor],
-        name: str | None = None,
+        scores: torch.Tensor,
     ):
         """
         Write the scores to the score writer.
@@ -33,15 +30,6 @@ class ScoreWriter(ABC):
         """
         raise NotImplementedError("Subclasses must implement this method")
 
-    @abstractmethod
-    def finalize_module_wise(self, indices: list[int]):
-        """
-        Finalize the module-wise scores and write to the memmap.
-        """
-        raise NotImplementedError(
-            "Module-wise scoring is not supported by this score writer."
-        )
-
 
 class MemmapScoreWriter(ScoreWriter):
     """
@@ -50,27 +38,21 @@ class MemmapScoreWriter(ScoreWriter):
 
     def __init__(
         self,
-        scorer: Scorer,
-        num_items: int,
         scores_path: Path,
+        num_items: int,
+        num_scores: int,
         *,
-        dtype: torch.dtype = torch.float32,
         rank: int,
-        modules: list[str],
-        module_wise: bool = False,
-        flush_batches_interval: int = 40,
+        dtype: torch.dtype = torch.float32,
+        flush_interval: int = 64,
     ):
-        self.scorer = scorer
-        self.num_scores = scorer.num_scores
         self.scores_path = scores_path
+        self.num_scores = num_scores
         self.rank = rank
         self.dtype = dtype
-        self.module_wise = module_wise
+        self.flush_interval = flush_interval
 
-        self.flush_interval = flush_batches_interval
         self.num_batches_since_flush = 0
-
-        self.num_modules = len(modules)
 
         self.scores_path.mkdir(parents=True, exist_ok=True)
         scores_file_path = self.scores_path / "scores.bin"
@@ -79,7 +61,7 @@ class MemmapScoreWriter(ScoreWriter):
         names = []
         formats = []
         offsets = []
-        for i in range(self.scorer.num_scores):
+        for i in range(self.num_scores):
             names.append(f"score_{i}")
             formats.append("float32")
             offsets.append(i * 6)
@@ -109,11 +91,7 @@ class MemmapScoreWriter(ScoreWriter):
                 shape=(num_items,),
             )
 
-            # Write zeros
-            zeros = np.zeros(len(self.scores), dtype=np.float32)
             for name in names:
-                if "score" in name:
-                    self.scores[name][:] = zeros
                 if "written" in name:
                     self.scores[name][:] = False
             self.flush()
@@ -123,7 +101,7 @@ class MemmapScoreWriter(ScoreWriter):
                 json.dump(
                     {
                         "num_items": num_items,
-                        "num_modules": self.num_modules,
+                        "num_scores": num_scores,
                         "dtype": struct_dtype,
                     },
                     f,
@@ -141,13 +119,8 @@ class MemmapScoreWriter(ScoreWriter):
         )
         print(f"Loaded {len(self.scores)} scores from {scores_file_path}")
 
-        self.module_wise_scores = {}
-        self.module_wise_sum_squares = {}
-
-    def _write_to_memmap(self, indices: list[int], scores: torch.Tensor):
-        print("len indices", len(indices))
-        print("scores shape", scores.shape)
-        # scores is [len(indices), num_scores]
+    def __call__(self, indices: list[int], scores: torch.Tensor):
+        # scores: [num_indices, num_scores]
         for i in range(self.num_scores):
             self.scores[f"score_{i}"][indices] = (
                 scores[:, i].cpu().numpy().astype(np.float32).flatten()
@@ -157,49 +130,6 @@ class MemmapScoreWriter(ScoreWriter):
         self.num_batches_since_flush += 1
         if self.num_batches_since_flush >= self.flush_interval:
             self.flush()
-
-    def __call__(
-        self,
-        indices: list[int],
-        mod_grads: dict[str, torch.Tensor],
-        name: str | None = None,
-    ):
-        # Module-wise scores
-        if name:
-            scores, sum_of_squares = self.scorer(mod_grads, name=name)
-            self.module_wise_scores[name] = scores.to(device="cpu", dtype=self.dtype)
-            self.module_wise_sum_squares[name] = sum_of_squares.to(
-                device="cpu", dtype=self.dtype
-            )
-        else:
-            scores = self.scorer(mod_grads)
-            scores = scores.to(device="cpu", dtype=self.dtype)
-
-            self._write_to_memmap(indices, scores)
-
-    def finalize_module_wise(self, indices: list[int]):
-        """Finalize the score by accumulating module-wise scores and writing
-        to the memmap. Normalize with the sum of squares if needed."""
-
-        # Accumulate scores
-        scores = torch.cat(
-            [scores for scores in self.module_wise_scores.values()], dim=1
-        )
-
-        # Normalize with the sum of squares
-        if self.module_wise_sum_squares:
-            # [num_modules, num_items, num_scores] -> [num_items, num_scores]
-            sum_of_squares = torch.stack(
-                [
-                    sum_of_squares
-                    for sum_of_squares in self.module_wise_sum_squares.values()
-                ],
-            ).sum(dim=0)
-            assert scores.shape[0] == sum_of_squares.shape[0]
-            scores *= sum_of_squares.rsqrt()
-
-        # Write accumulated scores
-        self._write_to_memmap(indices, scores)
 
     def flush(self):
         self.scores.flush()

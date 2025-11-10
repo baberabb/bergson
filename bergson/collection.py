@@ -13,7 +13,7 @@ from transformers import PreTrainedModel
 from .data import create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
-from .score_writer import ScoreWriter
+from .scorer import Scorer
 
 
 def collect_gradients(
@@ -30,7 +30,7 @@ def collect_gradients(
     attention_cfgs: dict[str, AttentionConfig] | None = None,
     save_index: bool = True,
     drop_columns: bool = False,
-    score_writer: ScoreWriter | None = None,
+    scorer: Scorer | None = None,
     token_batch_size: int | None = None,
     module_wise: bool = False,
 ):
@@ -64,8 +64,8 @@ def collect_gradients(
         else:
             mod_grads[name] = g.to(dtype=dtype)
 
-        if score_writer and module_wise:
-            score_writer(indices, mod_grads, name=name)
+        if scorer and module_wise:
+            scorer(indices, mod_grads, name=name)
 
         # Compute the outer product of the flattened gradient
         if not skip_preconditioners:
@@ -160,11 +160,11 @@ def collect_gradients(
             for module_name in mod_grads.keys():
                 grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
 
-        if score_writer is not None:
+        if scorer is not None:
             if module_wise:
-                score_writer.finalize_module_wise(indices)
+                scorer.finalize_module_wise(indices)
             else:
-                score_writer(indices, mod_grads)
+                scorer(indices, mod_grads)
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)

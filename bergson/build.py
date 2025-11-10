@@ -211,6 +211,9 @@ def worker(
                 flush()
         flush()
 
+        if rank == 0:
+            processor.save(cfg.partial_run_path)
+
 
 def dist_worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
     try:
