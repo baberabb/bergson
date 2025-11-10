@@ -1,3 +1,4 @@
+import torch
 from datasets import Dataset
 from transformers import PreTrainedModel
 
@@ -44,3 +45,21 @@ def collect_gradients(
         cfg=cfg,
     )
     computer.run_with_collector_hooks(desc="New worker - Collecting gradients")
+
+
+def validate_batch_size(
+    model: PreTrainedModel,
+    token_batch_size: int | None,
+    collector: GradientCollector,
+):
+    """Validate that the specified token batch size fits on device."""
+    if token_batch_size is None:
+        return
+
+    random_tokens = torch.randint(
+        0, 10, (1, token_batch_size), device=model.device, dtype=torch.long
+    )
+    with collector:
+        loss = model(random_tokens).logits[0, 0, 0].float()
+        loss.backward()
+        model.zero_grad()
