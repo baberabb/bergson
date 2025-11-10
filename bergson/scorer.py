@@ -143,7 +143,12 @@ def build_scorer(
         if query_tensor is None:
             name = kwargs["name"]
             module_scores = mod_grads[name] @ query_grads[name].T
-            ssq = mod_grads[name].pow(2).sum(dim=1)
+
+            # Save sum of squares for post-hoc normalization
+            # TODO only compute sum of squares if normalization requested
+            mod_grads[name].pow_(2)
+            ssq = mod_grads[name].sum(dim=1)
+
             return module_scores, ssq
 
         grads = torch.cat([mod_grads[m] for m in query_cfg.modules], dim=1)
