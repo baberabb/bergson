@@ -87,9 +87,15 @@ def collect_gradients(
     # Allocate space ahead of time for the gradients
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
-    # Allocate structured space ahead of time for the gradients
+    # Allocate space ahead of time for the gradients
     grad_buffer = (
-        create_index(path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np_dtype)
+        create_index(
+            path,
+            num_grads=len(data),
+            grad_sizes=grad_sizes,
+            dtype=np_dtype,
+            with_structure=False,
+        )
         if save_index
         else None
     )
@@ -157,8 +163,12 @@ def collect_gradients(
             # It turns out that it's very important for efficiency to write the
             # gradients sequentially instead of first concatenating them, then
             # writing to one vector
-            for module_name in mod_grads.keys():
-                grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
+            offset = 0
+            for module_name in grad_sizes.keys():
+                grad_buffer[
+                    indices, offset : offset + mod_grads[module_name].shape[1]
+                ] = mod_grads[module_name].numpy()
+                offset += mod_grads[module_name].shape[1]
 
         if scorer is not None:
             if module_wise:

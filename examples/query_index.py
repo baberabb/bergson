@@ -1,9 +1,10 @@
 from argparse import ArgumentParser
 
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from bergson import Attributor, FaissConfig
+from bergson.utils import assert_type
 
 
 def main():
@@ -21,6 +22,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model, device_map={"": "cuda:0"})
     dataset = load_dataset(args.dataset, split="train")
+    dataset = assert_type(Dataset, dataset)
 
     faiss_cfg = FaissConfig() if args.faiss else None
     attr = Attributor(args.index, device="cuda", faiss_cfg=faiss_cfg)
@@ -48,7 +50,7 @@ def main():
                 print("Found invalid result, skipping")
                 continue
 
-            text = dataset[idx.item()][args.text_field]
+            text = dataset[int(idx.item())][args.text_field]
             print(text[:5000])
 
             print(f"{i + 1}: (distance: {d.item():.4f})")

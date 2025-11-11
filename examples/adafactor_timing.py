@@ -12,7 +12,8 @@ from bergson.gradients import (
     GradientProcessor,
 )
 
-torch._dynamo.cache_size = 0  # Disable cache size limit for this example
+# Disable cache size limit for this example
+torch._dynamo.cache_size = 0  # type: ignore
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -71,7 +72,7 @@ if __name__ == "__main__":
     torch.cuda.synchronize()
     start = time.monotonic()
 
-    with GradientCollector(model) as collector:
+    with GradientCollector(model, closure=(lambda _: None)) as collector:
         model(**inputs).loss.backward()
 
     torch.cuda.synchronize()
@@ -90,8 +91,12 @@ if __name__ == "__main__":
             continue
 
         o, i = layer.out_features, layer.in_features
-        A = collector.projection(name, p, o, "left")
-        B = collector.projection(name, p, i, "right")
+        A = collector.projection(
+            name, p, o, "left", device=model.device, dtype=model.dtype
+        )
+        B = collector.projection(
+            name, p, i, "right", device=model.device, dtype=model.dtype
+        )
 
         g = layer.weight.grad
         assert g is not None
@@ -111,7 +116,9 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         start = time.monotonic()
 
-        with GradientCollector(model, GradientProcessor(normalizers)) as collector:
+        with GradientCollector(
+            model, closure=(lambda _: None), processor=GradientProcessor(normalizers)
+        ) as collector:
             model(**inputs).loss.backward()
 
         torch.cuda.synchronize()
