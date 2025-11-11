@@ -92,7 +92,7 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
 
 
 def setup_model_and_peft(
-    cfg: IndexConfig, rank: int, dtype: torch.dtype | str
+    cfg: IndexConfig, rank: int, dtype: torch.dtype
 ) -> tuple[AutoModelForCausalLM, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
 
@@ -239,8 +239,6 @@ def worker_wrapper(
                         if torch.cuda.is_bf16_supported()
                         else torch.float16
                     )
-                case "auto":
-                    dtype = "auto"
                 case other:
                     raise ValueError(f"Unsupported precision: {other}")
 
@@ -326,6 +324,8 @@ def distributed_computing(
     setup_model: bool = True,
     setup_processor: bool = True,
 ):
+    os.makedirs(cfg.partial_run_path, exist_ok=True)
+    # Write index config to json
     os.makedirs(cfg.partial_run_path, exist_ok=True)
     # Write index config to json
     with open(os.path.join(cfg.partial_run_path, "index_config.json"), "w") as f:

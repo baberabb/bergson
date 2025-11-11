@@ -14,10 +14,33 @@ from bergson.gradients import GradientProcessor
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_build_e2e(tmp_path: Path):
+    result = subprocess.run(
+        [
+            "python",
+            "-m",
+            "bergson",
+            "build",
+            "test_e2e",
+            "--model",
+            "EleutherAI/pythia-14m",
+            "--dataset",
+            "NeelNanda/pile-10k",
+            "--split",
+            "train[:100]",
+            "--truncation",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_build_consistency(tmp_path: Path, model, dataset):
     cfg = IndexConfig(run_path=str(tmp_path))
     cfg.skip_preconditioners = True
-
+    print(str(tmp_path))
     kwargs = {
         "model": model,
         "data": dataset,

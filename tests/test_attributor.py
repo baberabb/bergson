@@ -34,7 +34,7 @@ def test_attributor(tmp_path: Path, model, dataset):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-@pytest.mark.skipif(not pytest.importorskip("faiss"), reason="faiss not installed")
+@pytest.mark.skipif(not pytest.importorskip("faiss", reason="faiss not installed"))
 def test_faiss(tmp_path: Path, model, dataset):
     dtype: Any = model.dtype
     model.to("cuda")
