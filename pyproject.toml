@@ -45,7 +45,6 @@ include = ["bergson*"]
 
 [tool.ruff]
 lint.ignore = ["E741"]   # Ambiguous variable name
-select = ["I"]  # Enable isort rules
 # Enable pycodestyle (`E`), Pyflakes (`F`), and isort (`I`) codes
 # See https://beta.ruff.rs/docs/rules/ for more possible rules
 lint.select = ["E", "F", "I"]
@@ -71,5 +70,3 @@ allowed_tags = ["feat", "fix", "perf", "build", "chore", "ci", "docs", "style", 
 default_bump_level = 0
 parse_squash_commits = false
 ignore_merge_commits = false
-
-

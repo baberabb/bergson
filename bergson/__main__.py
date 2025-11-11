@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional, Union
 
-from simple_parsing import ArgumentParser, ConflictResolution, parse
+from simple_parsing import ArgumentParser, ConflictResolution
 
 from bergson.collection import collect_gradients
 

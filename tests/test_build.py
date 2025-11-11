@@ -41,9 +41,9 @@ def test_build_e2e(tmp_path: Path):
         print(f"STDOUT:\n{result.stdout}")
         print(f"STDERR:\n{result.stderr}")
 
-    assert result.returncode == 0, (
-        f"Command failed with:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"Command failed with:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -92,9 +92,9 @@ def test_split_attention_build(tmp_path: Path, model, dataset):
     }
     collect_gradients(**kwargs)
 
-    assert any(Path(cfg.partial_run_path).iterdir()), (
-        "Expected artifacts in the temp run_path"
-    )
+    assert any(
+        Path(cfg.partial_run_path).iterdir()
+    ), "Expected artifacts in the temp run_path"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -117,9 +117,9 @@ def test_conv1d_build(tmp_path: Path, dataset):
     }
     collect_gradients(**kwargs)
 
-    assert any(Path(cfg.partial_run_path).iterdir()), (
-        "Expected artifacts in the run path"
-    )
+    assert any(
+        Path(cfg.partial_run_path).iterdir()
+    ), "Expected artifacts in the run path"
 
     index = load_gradients(cfg.partial_run_path)
 

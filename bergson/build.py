@@ -248,7 +248,8 @@ def worker_wrapper(
         if setup_processor:
             if model is None:
                 raise ValueError(
-                    "Cannot create processor without model. Set setup_model=True or provide model externally."
+                    "Cannot create processor without model. "
+                    "Set setup_model=True or provide model externally."
                 )
             processor = create_processor(cfg, rank)
 
