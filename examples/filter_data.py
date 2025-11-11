@@ -2,6 +2,7 @@ import os
 import socket
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import Literal, Sequence
 
 import torch
@@ -15,8 +16,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.modeling_utils import PreTrainedModel
 from trl import SFTConfig, SFTTrainer, setup_chat_format
 
-from bergson.data import DataConfig, load_gradient_dataset, tokenize, unflatten
 from bergson.collection import GradientCollector, GradientProcessor
+from bergson.data import DataConfig, load_gradient_dataset, tokenize, unflatten
 from bergson.utils import assert_type
 
 
@@ -129,7 +130,7 @@ def worker(rank: int, world_size: int, cfg: FilterConfig, train, eval, run_name)
         eval_dataset=eval,
         args=SFTConfig(
             max_length=8192,
-            max_seq_length=8192,
+            # max_seq_length=8192,
             output_dir=f"examples/runs/{run_name}",
             per_device_train_batch_size=1,
             per_device_eval_batch_size=1,
@@ -182,7 +183,7 @@ def set_seeds(seed: int):
 
 def add_index(
     dataset: Dataset,
-    index: str | None = None,
+    index: Path | None = None,
 ) -> Dataset:
     assert index is not None, "Index must be provided for attribution or loss filtering"
 
@@ -224,7 +225,9 @@ def attribution_filter(
     if args.query_scores:
         query_dataset = train.filter(lambda x: x["quality"] == "excellent")
     elif args.query_dataset:
-        query_dataset = load_gradient_dataset(args.query_dataset).with_format("torch")
+        query_dataset = load_gradient_dataset(Path(args.query_dataset)).with_format(
+            "torch"
+        )
     else:
         query_dataset = train
 
@@ -250,7 +253,7 @@ def attribution_filter(
     if args.precondition:
         # Load the gradient processor
         index_processor = GradientProcessor.load(
-            args.index_dataset, map_location="cuda"
+            Path(args.index_dataset), map_location="cuda"
         )
         target_info = GradientCollector(
             model.base_model, lambda _: _, index_processor
@@ -260,7 +263,7 @@ def attribution_filter(
         }
 
         query_processor = (
-            GradientProcessor.load(args.query_dataset, map_location="cuda")
+            GradientProcessor.load(Path(args.query_dataset), map_location="cuda")
             if args.query_dataset
             else index_processor
         )
@@ -345,7 +348,7 @@ def main(
         run_name = args.name
 
     if args.filter == "attribution" or args.filter == "loss":
-        dataset = load_gradient_dataset(args.index_dataset)
+        dataset = load_gradient_dataset(Path(args.index_dataset))
     else:
         dataset = assert_type(Dataset, load_dataset(args.dataset, split="train"))
 
@@ -399,7 +402,7 @@ def main(
             remove_columns=["gradients"],
         )
         # Select the top-k items
-        sorted_scores = torch.argsort(train["loss"])
+        sorted_scores = torch.argsort(train[:]["loss"])
         selected_indices = (
             sorted_scores[: args.num_examples]
             if args.lowest

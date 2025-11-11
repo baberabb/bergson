@@ -18,7 +18,7 @@ def assert_type(typ: Type[T], obj: Any) -> T:
 
 
 def get_layer_list(model: PreTrainedModel) -> nn.ModuleList:
-    """Get the list of layers to train SAEs on."""
+    """Get the list of layers to train on."""
     N = assert_type(int, model.config.num_hidden_layers)
     candidates = [
         mod

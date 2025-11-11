@@ -1,8 +1,10 @@
 import json
 import os
+import shutil
 import socket
 from dataclasses import asdict
 from datetime import timedelta
+from pathlib import Path
 from typing import Callable
 
 import pandas as pd
@@ -179,7 +181,7 @@ def create_processor(
             print(f"Loading processor from '{cfg.processor_path}'")
 
         processor = GradientProcessor.load(
-            cfg.processor_path,
+            Path(cfg.processor_path),
             map_location=f"cuda:{rank}",
         )
     else:
@@ -190,7 +192,7 @@ def create_processor(
             projection_type=cfg.projection_type,
             include_bias=cfg.include_bias,
         )
-        if rank == 0 and cfg.save_processor:
+        if rank == 0:
             processor.save(cfg.partial_run_path)
 
     return processor
@@ -270,6 +272,7 @@ def worker_wrapper(
         }
 
         if setup_model and setup_processor:
+            assert processor is not None
             if isinstance(ds, Dataset):
                 batches = allocate_batches(ds["length"], cfg.token_batch_size)
                 kwargs["batches"] = batches
@@ -299,8 +302,7 @@ def worker_wrapper(
                         flush(worker_fn=worker_fn, kwargs=kwargs)
 
                 flush(worker_fn=worker_fn, kwargs=kwargs)  # Final flush
-                if cfg.save_processor:
-                    assert processor is not None, "Processor should be initialized"
+                if rank == 0:
                     processor.save(cfg.partial_run_path)
         else:
             worker_fn(**kwargs)
@@ -328,6 +330,7 @@ def distributed_computing(
 ):
     os.makedirs(cfg.partial_run_path, exist_ok=True)
     # Write index config to json
+    os.makedirs(cfg.partial_run_path, exist_ok=True)
     with open(os.path.join(cfg.partial_run_path, "index_config.json"), "w") as f:
         json.dump(asdict(cfg), f, indent=4)
 
@@ -377,6 +380,6 @@ def distributed_computing(
                 ctx.close()  # Kill any processes that are still running
 
     try:
-        os.rename(cfg.partial_run_path, cfg.run_path)
+        shutil.move(cfg.partial_run_path, cfg.run_path)
     except Exception:
         pass

@@ -1,5 +1,4 @@
 import math
-from typing import Callable
 
 import numpy as np
 import torch
@@ -23,7 +22,6 @@ def collect_gradients(
     batches: list[list[int]] | None = None,
     target_modules: set[str] | None = None,
     attention_cfgs: dict[str, AttentionConfig] | None = None,
-    query_callback: Callable[[dict[str, torch.Tensor]], torch.Tensor] | None = None,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -47,7 +45,7 @@ def collect_gradients(
     lo = torch.finfo(dtype).min
     hi = torch.finfo(dtype).max
 
-    def callback(name: str, g: torch.Tensor):
+    def callback(name: str, g: torch.Tensor, indices: list[int]):
         g = g.flatten(1).clamp_(lo, hi)
         if cfg.save_index:
             # Asynchronously move the gradient to CPU and convert to the final dtype
@@ -55,7 +53,12 @@ def collect_gradients(
         else:
             mod_grads[name] = g.to(dtype=dtype)
 
+        # TODO: Fix
+        # if scorer and module_wise:
+        #     scorer(indices, mod_grads, name=name)
+
         # Compute the outer product of the flattened gradient
+
         if not cfg.skip_preconditioners:
             g = g.float()
             preconditioner = preconditioners.get(name, None)
@@ -75,25 +78,21 @@ def collect_gradients(
     # Allocate space ahead of time for the gradients
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
-    # Allocate structured space ahead of time for the gradients
+    # Allocate space ahead of time for the gradients
+
     grad_buffer = (
         create_index(
             cfg.partial_run_path,
             num_grads=len(data),
             grad_sizes=grad_sizes,
             dtype=np_dtype,
+            with_structure=False,
         )
         if cfg.save_index
         else None
     )
 
     per_doc_losses = torch.full(
-        (len(data),),
-        device=model.device,
-        dtype=dtype,
-        fill_value=0.0,
-    )
-    per_doc_scores = torch.full(
         (len(data),),
         device=model.device,
         dtype=dtype,
@@ -117,6 +116,8 @@ def collect_gradients(
                 set_peft_enabled(model, True)
 
             with collector:
+                collector.indices = indices
+
                 ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
 
                 # Compute average KL across all unmasked tokens
@@ -128,6 +129,8 @@ def collect_gradients(
                 losses.mean().backward()
         else:
             with collector:
+                collector.indices = indices
+
                 logits = model(x).logits[:, :-1]
 
                 losses = F.cross_entropy(
@@ -152,12 +155,19 @@ def collect_gradients(
             # It turns out that it's very important for efficiency to write the
             # gradients sequentially instead of first concatenating them, then
             # writing to one vector
-            for module_name in mod_grads.keys():
-                grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
+            offset = 0
+            for module_name in grad_sizes.keys():
+                grad_buffer[
+                    indices, offset : offset + mod_grads[module_name].shape[1]
+                ] = mod_grads[module_name].numpy()
+                offset += mod_grads[module_name].shape[1]
 
-        if query_callback is not None:
-            scores = query_callback(mod_grads)
-            per_doc_scores[indices] = scores.detach().type_as(per_doc_scores)
+        # TODO: Fix
+        # if scorer is not None:
+        #     if module_wise:
+        #         scorer.finalize_module_wise(indices)
+        #     else:
+        #         scorer(indices, mod_grads)
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
@@ -177,16 +187,10 @@ def collect_gradients(
             feature=Value("float16" if dtype == torch.float16 else "float32"),
             new_fingerprint="loss",
         )
-        data = data.add_column(
-            "scores",
-            per_doc_scores.cpu().numpy(),
-            feature=Value("float16" if dtype == torch.float16 else "float32"),
-            new_fingerprint="scores",
-        )
-        data.save_to_disk(cfg.partial_run_path + "/data.hf")
 
-        if cfg.save_processor:
-            processor.save(cfg.partial_run_path)
+        data.save_to_disk(cfg.partial_run_path / "data.hf")
+
+        processor.save(cfg.partial_run_path)
 
     # Make sure the gradients are written to disk
     if grad_buffer is not None:
