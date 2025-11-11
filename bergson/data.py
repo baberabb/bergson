@@ -325,7 +325,11 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
 
 
 def create_index(
-    root: Path, num_grads: int, grad_sizes: dict[str, int], dtype: DTypeLike
+    root: Path,
+    num_grads: int,
+    grad_sizes: dict[str, int],
+    dtype: DTypeLike,
+    with_structure: bool = True,
 ) -> np.memmap:
     """Create a memory-mapped file for storing structured gradients
     and persist metadata."""
@@ -344,8 +348,12 @@ def create_index(
         # Ensure the directory exists
         root.mkdir(parents=True, exist_ok=True)
 
+        # Ensure no existing file is overwritten
+        if grad_path.exists():
+            raise FileExistsError(f"File {grad_path} already exists.")
+
         # Allocate (extends file to right size without writing zeros byte-by-byte)
-        nbytes = np.dtype(struct_dtype).itemsize * num_grads  # type: ignore
+        nbytes = struct_dtype["itemsize"] * num_grads
         with open(grad_path, "wb") as f:
             f.truncate(nbytes)
 
@@ -354,17 +362,33 @@ def create_index(
 
         # Persist metadata for future runs
         with (root / "info.json").open("w") as f:
-            json.dump({"num_grads": num_grads, "dtype": struct_dtype}, f, indent=2)
+            json.dump(
+                {
+                    "num_grads": num_grads,
+                    "dtype": struct_dtype,
+                    "unstructured_dtype": np.dtype(dtype).str,
+                    "grad_dimension": sum(grad_sizes.values()),
+                },
+                f,
+                indent=2,
+            )
 
     # ── 2. Everyone blocks until the file is definitely there & sized ─────────────
     if dist.is_initialized():
         dist.barrier()
 
+    if with_structure:
+        dtype = np.dtype(struct_dtype)  # type: ignore
+        shape = (num_grads,)
+    else:
+        dtype = np.dtype(dtype)
+        shape = (num_grads, sum(grad_sizes.values()))
+
     return np.memmap(
         grad_path,
-        dtype=np.dtype(struct_dtype),  # type: ignore
+        dtype=dtype,
         mode="r+",
-        shape=(num_grads,),
+        shape=shape,
     )
 
 
@@ -397,20 +421,27 @@ def load_data_string(
     return ds
 
 
-def load_gradients(root_dir: Path) -> np.memmap:
+def load_gradients(root_dir: Path, with_structure: bool = True) -> np.memmap:
     """Map the structured gradients stored in `root_dir` into memory."""
 
     with (root_dir / "info.json").open("r") as f:
         info = json.load(f)
 
-    dtype = info["dtype"]
     num_grads = info["num_grads"]
+
+    if with_structure:
+        dtype = info["dtype"]
+        shape = (num_grads,)
+    else:
+        dtype = info["unstructured_dtype"]
+        grad_dimension = info["grad_dimension"]
+        shape = (num_grads, grad_dimension)
 
     return np.memmap(
         root_dir / "gradients.bin",
         dtype=dtype,
         mode="r",
-        shape=(num_grads,),
+        shape=shape,
     )
 
 

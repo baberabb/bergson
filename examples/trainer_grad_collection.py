@@ -23,6 +23,7 @@ from bergson.huggingface import (
     GradientCollectorCallback,
     prepare_for_gradient_collection,
 )
+from bergson.utils import assert_type
 
 
 def worker(
@@ -128,6 +129,7 @@ def main(args: IndexConfig):
         batched=True,
         fn_kwargs=dict(args=data_config, tokenizer=tokenizer),
     )
+    dataset = assert_type(Dataset, dataset)
 
     train, eval = dataset.train_test_split(
         test_size=0.05,
