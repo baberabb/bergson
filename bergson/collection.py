@@ -8,6 +8,8 @@ from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
+from bergson.scorer import Scorer
+
 from .data import IndexConfig, create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
@@ -22,6 +24,7 @@ def collect_gradients(
     batches: list[list[int]] | None = None,
     target_modules: set[str] | None = None,
     attention_cfgs: dict[str, AttentionConfig] | None = None,
+    scorer: Scorer | None = None,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -53,9 +56,8 @@ def collect_gradients(
         else:
             mod_grads[name] = g.to(dtype=dtype)
 
-        # TODO: Fix
-        # if scorer and module_wise:
-        #     scorer(indices, mod_grads, name=name)
+        if scorer and cfg.module_wise:
+            scorer(indices, mod_grads, name=name)
 
         # Compute the outer product of the flattened gradient
 
@@ -162,12 +164,11 @@ def collect_gradients(
                 ] = mod_grads[module_name].numpy()
                 offset += mod_grads[module_name].shape[1]
 
-        # TODO: Fix
-        # if scorer is not None:
-        #     if module_wise:
-        #         scorer.finalize_module_wise(indices)
-        #     else:
-        #         scorer(indices, mod_grads)
+        if scorer is not None:
+            if cfg.module_wise:
+                scorer.finalize_module_wise(indices)
+            else:
+                scorer(indices, mod_grads)
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
