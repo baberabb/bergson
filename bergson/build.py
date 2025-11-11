@@ -94,9 +94,24 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
 
 
 def setup_model_and_peft(
-    cfg: IndexConfig, rank: int, dtype: torch.dtype
+    cfg: IndexConfig,
+    rank: int,
 ) -> tuple[AutoModelForCausalLM, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
+
+    match cfg.precision:
+        case "bf16":
+            dtype = torch.bfloat16
+        case "fp16":
+            dtype = torch.float16
+        case "fp32":
+            dtype = torch.float32
+        case "int4" | "int8":
+            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        case "auto":
+            dtype = "auto"
+        case other:
+            raise ValueError(f"Unsupported precision: {other}")
 
     # Common configuration
     device_map = {"": f"cuda:{rank}"} if not cfg.fsdp else "cpu"
@@ -228,23 +243,7 @@ def worker_wrapper(
         model, target_modules, processor = None, None, None
 
         if setup_model:
-            match cfg.precision:
-                case "bf16":
-                    dtype = torch.bfloat16
-                case "fp16":
-                    dtype = torch.float16
-                case "fp32":
-                    dtype = torch.float32
-                case "int4" | "int8":
-                    dtype = (
-                        torch.bfloat16
-                        if torch.cuda.is_bf16_supported()
-                        else torch.float16
-                    )
-                case other:
-                    raise ValueError(f"Unsupported precision: {other}")
-
-            model, target_modules = setup_model_and_peft(cfg, rank, dtype)
+            model, target_modules = setup_model_and_peft(cfg, rank)
 
         if setup_processor:
             if model is None:
@@ -326,10 +325,6 @@ def distributed_computing(
     setup_model: bool = True,
     setup_processor: bool = True,
 ):
-    os.makedirs(cfg.partial_run_path, exist_ok=True)
-    # Write index config to json
-    os.makedirs(cfg.partial_run_path, exist_ok=True)
-    # Write index config to json
     os.makedirs(cfg.partial_run_path, exist_ok=True)
     with open(os.path.join(cfg.partial_run_path, "index_config.json"), "w") as f:
         json.dump(asdict(cfg), f, indent=4)

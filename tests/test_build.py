@@ -11,9 +11,7 @@ from bergson import (
     GradientProcessor,
     collect_gradients,
 )
-from bergson.collection import collect_gradients
 from bergson.data import IndexConfig, load_gradients
-from bergson.gradients import GradientProcessor
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -34,9 +32,18 @@ def test_build_e2e(tmp_path: Path):
             "--truncation",
         ],
         cwd=tmp_path,
+        capture_output=True,  # Add this
+        text=True,  # Add this to get strings instead of bytes
     )
 
-    assert result.returncode == 0
+    # Print the output to see what's failing
+    if result.returncode != 0:
+        print(f"STDOUT:\n{result.stdout}")
+        print(f"STDERR:\n{result.stderr}")
+
+    assert result.returncode == 0, (
+        f"Command failed with:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
