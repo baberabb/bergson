@@ -12,11 +12,13 @@ license = {text = "MIT License"}
 dependencies = [
     "accelerate", # For device_map in from_pretrained
     "datasets",
+    "matplotlib>=3.10.7",
     "natsort",
     "peft>=0.17.0",
     "simple-parsing",
     "torch",
     "transformers",
+    "wandb>=0.22.3",
 ]
 version = "0.1.1"
 [project.optional-dependencies]
