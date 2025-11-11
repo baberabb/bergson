@@ -2,6 +2,7 @@ import math
 import os
 from functools import wraps
 from itertools import chain
+from pathlib import Path
 from typing import Sized
 
 import numpy as np
@@ -28,7 +29,7 @@ class GradientCollectorCallback(TrainerCallback):
 
     def __init__(
         self,
-        path: str,
+        path: Path,
         attention_cfgs: dict[str, AttentionConfig] = {},
         projection_dim: int = 16,
         include_bias: bool = False,
@@ -153,7 +154,7 @@ class GradientCollectorCallback(TrainerCallback):
             raise ValueError("Dataset must be sized for gradient collection")
 
         self.train_grad_buffer = create_index(
-            os.path.join(self.path, "train" + epoch_suffix),
+            self.path / ("train" + epoch_suffix),
             num_grads=len(ds),
             grad_sizes=self.grad_sizes,
             dtype=self.dtype,
@@ -170,7 +171,7 @@ class GradientCollectorCallback(TrainerCallback):
 
         for dataset_name, dataloader in eval_datasets.items():
             self.eval_grad_buffers[dataset_name] = create_index(
-                os.path.join(self.path, dataset_name + epoch_suffix),
+                self.path / (dataset_name + epoch_suffix),
                 num_grads=len(dataloader),
                 grad_sizes=self.grad_sizes,
                 dtype=self.dtype,
@@ -191,7 +192,7 @@ class GradientCollectorCallback(TrainerCallback):
         if rank == 0:
             epoch = int(state.epoch or 0) - 1
             epoch_suffix = "" if self.accumulate_grads else f"/epoch_{epoch}"
-            path = os.path.join(self.path, "train" + epoch_suffix)
+            path = self.path / ("train" + epoch_suffix)
 
             assert self.collector is not None
             self.collector.processor.save(path)
@@ -238,6 +239,7 @@ class GradientCollectorCallback(TrainerCallback):
         **kwargs,
     ):
         self.on_substep_end(args, state, control)
+        print("Step end")
 
         # Record training order if enabled
         if self.order is not None:

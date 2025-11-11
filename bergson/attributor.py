@@ -39,7 +39,7 @@ class TraceResult:
 class Attributor:
     def __init__(
         self,
-        index_path: str,
+        index_path: Path,
         device: str = "cpu",
         dtype: torch.dtype = torch.float32,
         unit_norm: bool = False,
@@ -59,7 +59,7 @@ class Attributor:
                 f"faiss_{faiss_cfg.index_factory.replace(',', '_')}"
                 f"{'_cosine' if unit_norm else ''}"
             )
-            faiss_path = Path(index_path) / faiss_index_name
+            faiss_path = index_path / faiss_index_name
 
             if not (faiss_path / "config.json").exists():
                 FaissIndex.create_index(

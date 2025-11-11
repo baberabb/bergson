@@ -1,6 +1,7 @@
 import os
 import socket
 from datetime import timedelta
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -22,6 +23,7 @@ from bergson.huggingface import (
     GradientCollectorCallback,
     prepare_for_gradient_collection,
 )
+from bergson.utils import assert_type
 
 
 def worker(
@@ -56,7 +58,7 @@ def worker(
     )
 
     callback = GradientCollectorCallback(
-        f"{run_name}/gradients",
+        Path(run_name) / "gradients",
         accumulate_grads=True,
     )
 
@@ -127,6 +129,7 @@ def main(args: IndexConfig):
         batched=True,
         fn_kwargs=dict(args=data_config, tokenizer=tokenizer),
     )
+    dataset = assert_type(Dataset, dataset)
 
     train, eval = dataset.train_test_split(
         test_size=0.05,

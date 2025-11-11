@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -7,6 +8,8 @@ from transformers import AutoModelForCausalLM
 
 from bergson import (
     AttentionConfig,
+    GradientProcessor,
+    collect_gradients,
 )
 from bergson.collection import collect_gradients
 from bergson.data import IndexConfig, load_gradients
@@ -82,9 +85,9 @@ def test_split_attention_build(tmp_path: Path, model, dataset):
     }
     collect_gradients(**kwargs)
 
-    assert any(
-        Path(cfg.partial_run_path).iterdir()
-    ), "Expected artifacts in the temp run_path"
+    assert any(Path(cfg.partial_run_path).iterdir()), (
+        "Expected artifacts in the temp run_path"
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -96,7 +99,8 @@ def test_conv1d_build(tmp_path: Path, dataset):
     )
 
     cfg = IndexConfig(run_path=str(tmp_path))
-
+    # This build hangs in pytest with preconditioners enabled.
+    # It works when run directly so it may be a pytest issue.
     cfg.skip_preconditioners = True
     kwargs = {
         "model": model,
@@ -106,9 +110,9 @@ def test_conv1d_build(tmp_path: Path, dataset):
     }
     collect_gradients(**kwargs)
 
-    assert any(
-        Path(cfg.partial_run_path).iterdir()
-    ), "Expected artifacts in the run path"
+    assert any(Path(cfg.partial_run_path).iterdir()), (
+        "Expected artifacts in the run path"
+    )
 
     index = load_gradients(cfg.partial_run_path)
 

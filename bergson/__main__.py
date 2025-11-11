@@ -19,9 +19,9 @@ class Build:
 
     def execute(self):
         """Build the gradient dataset."""
-        if not self.cfg.save_index and not self.cfg.save_processor:
+        if not self.cfg.save_index and self.cfg.skip_preconditioners:
             raise ValueError(
-                "At least one of save_index or save_processor must be True"
+                "Either save_index must be True or skip_preconditioners must be False"
             )
 
         distributed_computing(cfg=self.cfg, worker_fn=collect_gradients)
@@ -37,12 +37,14 @@ class Query:
 
     def execute(self):
         """Query the gradient dataset."""
+        assert self.query_cfg.scores_path
+        assert self.query_cfg.query_path
 
         if os.path.exists(self.index_cfg.run_path) and self.index_cfg.save_index:
             raise ValueError(
                 "Index path already exists and save_index is True - "
                 "running this query will overwrite the existing gradients. "
-                "If you meant to query the existing gradients, use "
+                "If you meant to query the existing gradients use "
                 "Attributor instead."
             )
 
