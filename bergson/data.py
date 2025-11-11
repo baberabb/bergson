@@ -366,8 +366,8 @@ def create_index(
                 {
                     "num_grads": num_grads,
                     "dtype": struct_dtype,
-                    "unstructured_dtype": np.dtype(dtype).str,
-                    "grad_dimension": sum(grad_sizes.values()),
+                    "grad_sizes": grad_sizes,
+                    "base_dtype": np.dtype(dtype).str,
                 },
                 f,
                 indent=2,
@@ -433,9 +433,9 @@ def load_gradients(root_dir: Path, with_structure: bool = True) -> np.memmap:
         dtype = info["dtype"]
         shape = (num_grads,)
     else:
-        dtype = info["unstructured_dtype"]
-        grad_dimension = info["grad_dimension"]
-        shape = (num_grads, grad_dimension)
+        dtype = info["base_dtype"]
+        grad_sizes = info["grad_sizes"]
+        shape = (num_grads, sum(grad_sizes.values()))
 
     return np.memmap(
         root_dir / "gradients.bin",

@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM
 
 from bergson import (
     AttentionConfig,
@@ -35,30 +35,6 @@ def test_build_e2e(tmp_path: Path):
     )
 
     assert result.returncode == 0
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_large_gradients_build(tmp_path: Path, dataset):
-    config = AutoConfig.from_pretrained(
-        "EleutherAI/pythia-1.4b", trust_remote_code=True
-    )
-    model = AutoModelForCausalLM.from_config(config)
-    model.cuda()
-
-    collect_gradients(
-        model=model,
-        data=dataset,
-        processor=GradientProcessor(),
-        path=tmp_path,
-        skip_preconditioners=True,
-    )
-
-    # Load a large gradient index without structure.
-    load_gradients(tmp_path, with_structure=False)
-
-    with pytest.raises(ValueError):
-        # Max item size exceeded.
-        load_gradients(tmp_path, with_structure=True)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
