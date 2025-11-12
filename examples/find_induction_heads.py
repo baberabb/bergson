@@ -43,7 +43,7 @@ from bergson import (
     Attributor,
     FaissConfig,
     GradientProcessor,
-    HeadConfig,
+    AttentionConfig,
     collect_gradients,
 )
 from bergson.huggingface import (
@@ -53,10 +53,10 @@ from bergson.huggingface import (
 from bergson.utils import assert_type
 
 HEAD_CFGS = {
-    "h.0.attn.c_attn": HeadConfig(12, 192, 2),
-    "h.0.attn.c_proj": HeadConfig(12, 64, 2),
-    "h.1.attn.c_attn": HeadConfig(12, 192, 2),
-    "h.1.attn.c_proj": HeadConfig(12, 64, 2),
+    "h.0.attn.c_attn": AttentionConfig(12, 192, 2),
+    "h.0.attn.c_proj": AttentionConfig(12, 64, 2),
+    "h.1.attn.c_attn": AttentionConfig(12, 192, 2),
+    "h.1.attn.c_proj": AttentionConfig(12, 64, 2),
 }
 
 
@@ -673,8 +673,8 @@ def setup_training(
     )
 
     bergson_callback = GradientCollectorCallback(
-        path=f"{output_dir}/gradients",
-        head_cfgs=HEAD_CFGS,
+        path=Path(f"{output_dir}/gradients"),
+        attention_cfgs=HEAD_CFGS,
         projection_dim=projection_dim,
         dtype=np.float16,
         accumulate_grads=False,
@@ -719,15 +719,15 @@ def mean_query_gradients(
         model=model,
         data=induction_dataset,
         processor=processor,
-        path=f"{output_dir}/induction_gradients",
+        path=Path(output_dir)/"induction_gradients",
         skip_preconditioners=True,
-        head_cfgs=HEAD_CFGS,
+        attention_cfgs=HEAD_CFGS,
     )
 
     # Build the attributor for querying
     print("Building attributor for querying...")
     attributor = Attributor(
-        index_path=f"{output_dir}/induction_gradients",
+        index_path=Path(output_dir)/ "induction_gradients",
         device="cuda" if torch.cuda.is_available() else "cpu",
         dtype=torch.float32,
         unit_norm=unit_norm,
@@ -842,7 +842,7 @@ def main(args):
     for epoch_idx in range(num_train_epochs):
         # Read Bergson index from training
         attributor = Attributor(
-            str(Path(output_dir) / "gradients" / "train" / f"epoch_{epoch_idx}"),
+            Path(output_dir) / "gradients" / "train" / f"epoch_{epoch_idx}",
             device="cpu",
             unit_norm=unit_norm,
             dtype=torch.float16,
