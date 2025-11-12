@@ -5,7 +5,7 @@ We view attribution as a counterfactual question: **_If we "unlearned" this trai
 
 Our core features:
 - Gradient stores for easy post-hoc queries. We provide collection-time gradient compression for efficient storage and retrieval, and integrate with FAISS for fast KNN search over large gradient stores.
-- On-the-fly queries. Query uncompressed gradients without numerous writes to disk via a single pass over a dataset with a set of precomputed query gradients.
+- On-the-fly queries. Query uncompressed gradients without disk I/O overhead via a single pass over a dataset with a set of precomputed query gradients.
 - Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and other PyTorch and HuggingFace features to support large models, datasets, and clusters.
    - Optimizations like module-wise gradient processing during the backward pass lower our VRAM consumption even further.
 - Train‑time gradient collection. Capture gradients as they're produced during training with a ~17% performance overhead.
