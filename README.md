@@ -3,8 +3,9 @@ This library enables you to trace the memory of deep neural nets with gradient-b
 
 We view attribution as a counterfactual question: **_If we "unlearned" this training sample, how would the model's behavior change?_** This formulation ties attribution to some notion of what it means to "unlearn" a training sample. Here we focus on a very simple notion of unlearning: taking a gradient _ascent_ step on the loss with respect to the training sample.
 
-Our core features: 
-- Gradient stores for easy post-hoc queries. We provide collection-time gradient compression for efficient storage and retrieval, and integrate with FAISS for fast KNN search over large stores.
+## Core features
+
+- Gradient store for serial queries. We provide collection-time gradient compression for efficient storage and retrieval, and integrate with FAISS for fast KNN search over large stores.
 - On-the-fly queries. Query uncompressed gradients without disk I/O overhead via a single pass over a dataset with a set of precomputed query gradients.
 - Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and other performance optimizations to support large models, datasets, and clusters.
    - Optimizations like module-wise gradient processing during the backward pass lower our VRAM consumption further.
