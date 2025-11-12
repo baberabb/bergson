@@ -2,6 +2,7 @@ import math
 import os
 from functools import wraps
 from itertools import chain
+from pathlib import Path
 from typing import Sized
 
 import numpy as np
@@ -16,7 +17,7 @@ from transformers.trainer import Trainer
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
 
-from bergson import GradientCollector, GradientProcessor, HeadConfig
+from bergson import AttentionConfig, GradientCollector, GradientProcessor
 from bergson.data import create_index
 from bergson.gradients import AdafactorNormalizer, AdamNormalizer
 from bergson.peft import detect_peft_modules
@@ -28,21 +29,20 @@ class GradientCollectorCallback(TrainerCallback):
 
     def __init__(
         self,
-        path: str,
-        head_cfgs: dict[str, HeadConfig],
+        path: Path,
+        attention_cfgs: dict[str, AttentionConfig] = {},
         projection_dim: int = 16,
+        include_bias: bool = False,
         dtype: DTypeLike = np.float16,
         accumulate_grads: bool = False,
         use_optimizer_state: bool = True,
         track_order: bool = False,
-        shard_size: int | None = 200_000,
     ):
         """
         Args:
             path: The path to save the gradients
-            head_cfgs: Information used to split matrix-valued parameters into
-                per-head matrices before down projection.
             projection_dim: The dimension to project the gradients onto
+            include_bias: Whether to append bias gradients when present on a module
             dtype: The dtype of the on-disk gradient store
             accumulate_grads: Whether to take the sum of the gradients
                 of the same example across epochs. If `False`, the
@@ -51,8 +51,8 @@ class GradientCollectorCallback(TrainerCallback):
                 normalize the gradients. If `False`, no normalization is
                 applied.
             track_order: Whether to record the shuffled order of training data.
-            head_cfgs: Information used to split matrix-valued parameters into
-                per-head matrices before down projection.
+        attention_cfgs: Information used to split matrix-valued parameters into
+            per-head matrices before down projection.
         """
         super().__init__()
 
@@ -60,11 +60,12 @@ class GradientCollectorCallback(TrainerCallback):
         self.collector = None
         self.grad_sizes = {}
 
-        self.head_cfgs = head_cfgs
+        self.attention_cfgs = attention_cfgs
         self.accumulate_grads = accumulate_grads
         self.dtype = dtype
         self.path = path
         self.projection_dim = projection_dim
+        self.include_bias = include_bias
         self.use_optimizer_state = use_optimizer_state
         self.order: list[dict] | None = [] if track_order else None
 
@@ -98,12 +99,12 @@ class GradientCollectorCallback(TrainerCallback):
         if not hasattr(args, "__gradient_collection_enabled__"):
             raise RuntimeError(
                 "Gradient collection is not enabled. Please enable it by "
-                "calling bergson.prepare_for_gradient_collection on the trainer."
+                "calling bergson.prepare_gradient_collection on the trainer."
             )
 
         if isinstance(model, PeftModel):
             reshape_to_square = True
-            target_modules = detect_peft_modules(model)
+            target_modules = detect_peft_modules(model)  # type: ignore
         else:
             reshape_to_square = False
             target_modules = None
@@ -115,9 +116,10 @@ class GradientCollectorCallback(TrainerCallback):
                 {},
                 projection_dim=self.projection_dim or None,
                 reshape_to_square=reshape_to_square,
+                include_bias=self.include_bias,
             ),
             target_modules=target_modules,
-            head_cfgs=self.head_cfgs,
+            attention_cfgs=self.attention_cfgs,
         )
         self.grad_sizes = {
             name: math.prod(s) for name, s in self.collector.shapes().items()
@@ -136,7 +138,7 @@ class GradientCollectorCallback(TrainerCallback):
         state: TrainerState,
         control: TrainerControl,
         *,
-        eval_dataloader: DataLoader | dict[str, DataLoader] | None,
+        eval_dataloader: DataLoader | dict[str, DataLoader],
         train_dataloader: DataLoader,
         **kwargs,
     ):
@@ -152,7 +154,7 @@ class GradientCollectorCallback(TrainerCallback):
             raise ValueError("Dataset must be sized for gradient collection")
 
         self.train_grad_buffer = create_index(
-            os.path.join(self.path, "train" + epoch_suffix),
+            self.path / ("train" + epoch_suffix),
             num_grads=len(ds),
             grad_sizes=self.grad_sizes,
             dtype=self.dtype,
@@ -161,23 +163,15 @@ class GradientCollectorCallback(TrainerCallback):
 
         # Set up the gradient buffers for the evaluation datasets
         if eval_dataloader is None:
-            # HF Trainer doesn't expose the evaluation dataloaders
-            if hasattr(args, "eval_dataset"):
-                eval_dataloader = DataLoader(
-                    args.eval_dataset, batch_size=1, shuffle=False
-                )
-            else:
-                print("Warning: no evaluation dataloader found")
-                return
-
-        if isinstance(eval_dataloader, dict):
+            return
+        elif isinstance(eval_dataloader, dict):
             eval_datasets = eval_dataloader
         else:
             eval_datasets = {"eval": eval_dataloader}
 
         for dataset_name, dataloader in eval_datasets.items():
             self.eval_grad_buffers[dataset_name] = create_index(
-                os.path.join(self.path, dataset_name + epoch_suffix),
+                self.path / (dataset_name + epoch_suffix),
                 num_grads=len(dataloader),
                 grad_sizes=self.grad_sizes,
                 dtype=self.dtype,
@@ -198,7 +192,7 @@ class GradientCollectorCallback(TrainerCallback):
         if rank == 0:
             epoch = int(state.epoch or 0) - 1
             epoch_suffix = "" if self.accumulate_grads else f"/epoch_{epoch}"
-            path = os.path.join(self.path, "train" + epoch_suffix)
+            path = self.path / ("train" + epoch_suffix)
 
             assert self.collector is not None
             self.collector.processor.save(path)
@@ -245,6 +239,7 @@ class GradientCollectorCallback(TrainerCallback):
         **kwargs,
     ):
         self.on_substep_end(args, state, control)
+        print("Step end")
 
         # Record training order if enabled
         if self.order is not None:
@@ -313,11 +308,9 @@ class GradientCollectorCallback(TrainerCallback):
 
         proc.normalizers = normalizers
 
-    def on_evaluate(self, args, state, control, **kwargs):
-        print("on_evaluate")
-
     def on_prediction_step(self, args, state, control, **kwargs):
-        print("on_prediction_step")
+        dataset_name = kwargs["inputs"]["dataset_name"]
+        self.write_grads(self.eval_grad_buffers[dataset_name])
 
     def on_train_end(
         self,
@@ -362,7 +355,7 @@ def prepare_for_gradient_collection(trainer: Trainer):
     """Mutate the trainer and its datasets in-place to expose the datasets'
     indices to the gradient collector callback."""
     # Add indices to the training dataset
-    trainer.train_dataset = trainer.train_dataset.map(
+    trainer.train_dataset = trainer.train_dataset.map(  # type: ignore
         lambda ex, idx: {"_idx": idx}, with_indices=True
     )
 
@@ -370,18 +363,16 @@ def prepare_for_gradient_collection(trainer: Trainer):
     if trainer.eval_dataset is not None:
         if isinstance(trainer.eval_dataset, dict):
             for eval_name, dataset in trainer.eval_dataset.items():
-                trainer.eval_dataset[eval_name] = dataset.map(
+                trainer.eval_dataset[eval_name] = dataset.map(  # type: ignore
                     lambda ex, idx: {"_idx": idx}, with_indices=True
                 )
         else:
-            trainer.eval_dataset = trainer.eval_dataset.map(
+            trainer.eval_dataset = trainer.eval_dataset.map(  # type: ignore
                 lambda ex, idx: {"_idx": idx}, with_indices=True
             )
 
-        trainer.args.eval_dataset = trainer.eval_dataset
-
     trainer._set_signature_columns_if_needed()
-    trainer._signature_columns.append("_idx")
+    trainer._signature_columns.append("_idx")  # type: ignore
 
     if trainer.data_collator:
         original_collator = trainer.data_collator

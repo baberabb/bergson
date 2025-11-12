@@ -1,5 +1,6 @@
 from collections import defaultdict
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Generator
 
 import torch
@@ -38,7 +39,7 @@ class TraceResult:
 class Attributor:
     def __init__(
         self,
-        index_path: str,
+        index_path: Path,
         device: str = "cpu",
         dtype: torch.dtype = torch.float32,
         unit_norm: bool = False,
@@ -52,33 +53,51 @@ class Attributor:
         # Load the gradient processor
         self.processor = GradientProcessor.load(index_path, map_location=device)
 
-        # Load the gradient index
+        # Load the gradients into a FAISS index
         if faiss_cfg:
-            self.faiss_index = FaissIndex(index_path, faiss_cfg, device, unit_norm)
-            self.N = self.faiss_index.ntotal
-        else:
-            mmap = load_gradients(index_path)
+            faiss_index_name = (
+                f"faiss_{faiss_cfg.index_factory.replace(',', '_')}"
+                f"{'_cosine' if unit_norm else ''}"
+            )
+            faiss_path = index_path / faiss_index_name
 
-            # Copy gradients into device memory
-            self.grads = {
-                name: torch.tensor(mmap[name], device=device, dtype=dtype)
-                for name in mmap.dtype.names
-            }
-            self.N = mmap[mmap.dtype.names[0]].shape[0]
-
-            if unit_norm:
-                norm = torch.cat([grad for grad in self.grads.values()], dim=1).norm(
-                    dim=1, keepdim=True
+            if not (faiss_path / "config.json").exists():
+                FaissIndex.create_index(
+                    index_path, faiss_path, faiss_cfg, device, unit_norm
                 )
-                for name in self.grads:
-                    self.grads[name] /= norm
+
+            self.faiss_index = FaissIndex(
+                faiss_path, device, mmap_index=faiss_cfg.mmap_index
+            )
+            self.N = self.faiss_index.ntotal
+            self.ordered_modules = self.faiss_index.ordered_modules
+            return
+
+        # Load the gradients into memory
+        mmap = load_gradients(index_path)
+
+        # Copy gradients into device memory
+        self.grads = {
+            name: torch.tensor(mmap[name], device=device, dtype=dtype)
+            for name in mmap.dtype.names
+        }
+        self.N = mmap[mmap.dtype.names[0]].shape[0]
+
+        self.ordered_modules = mmap.dtype.names
+
+        if unit_norm:
+            norm = torch.cat(
+                [self.grads[name] for name in self.ordered_modules], dim=1
+            ).norm(dim=1, keepdim=True)
+            for name in self.grads:
+                self.grads[name] /= norm
 
     def search(
         self,
         queries: dict[str, Tensor],
         k: int | None,
-        modules: list[str] | None = None,
-    ) -> tuple[Tensor, Tensor]:
+        modules: set[str] | None = None,
+    ):
         """
         Search for the `k` nearest examples in the index based on the query or queries.
 
@@ -92,13 +111,16 @@ class Attributor:
             A namedtuple containing the top `k` indices and inner products for each
             query. Both have shape [..., k].
         """
-        q = {name: item.to(self.device, self.dtype) for name, item in queries.items()}
+        q = {
+            name: queries[name].to(self.device, self.dtype)
+            for name in self.ordered_modules
+        }
 
         if self.unit_norm:
             norm = torch.cat(list(q.values()), dim=1).norm(dim=1, keepdim=True)
 
             for name in q:
-                q[name] /= norm + 1e-8
+                q[name] /= norm + torch.finfo(norm.dtype).eps
 
         if self.faiss_index:
             if modules:
@@ -106,15 +128,21 @@ class Attributor:
                     "FAISS index does not implement module-specific search."
                 )
 
-            q = torch.cat([q[name] for name in q], dim=1).cpu().numpy()
+            q = (
+                torch.cat([q[name] for name in self.ordered_modules], dim=1)
+                .cpu()
+                .numpy()
+            )
 
             distances, indices = self.faiss_index.search(q, k)
 
-            return torch.from_numpy(distances.squeeze()), torch.from_numpy(
-                indices.squeeze()
-            )
+            return torch.from_numpy(distances), torch.from_numpy(indices)
 
-        modules = modules or list(q.keys())
+        if modules:
+            modules = set([name for name in self.ordered_modules if name in modules])
+        else:
+            modules = set(self.ordered_modules)
+
         k = min(k or self.N, self.N)
 
         scores = torch.stack(
@@ -125,7 +153,12 @@ class Attributor:
 
     @contextmanager
     def trace(
-        self, module: nn.Module, k: int, *, precondition: bool = False
+        self,
+        module: nn.Module,
+        k: int | None,
+        *,
+        precondition: bool = False,
+        modules: set[str] | None = None,
     ) -> Generator[TraceResult, None, None]:
         """
         Context manager to trace the gradients of a module and return the
@@ -135,28 +168,32 @@ class Attributor:
         result = TraceResult()
 
         def callback(name: str, g: Tensor):
+            g = g.flatten(1)
+
             # Precondition the gradient using Cholesky solve
             if precondition:
                 eigval, eigvec = self.processor.preconditioners_eigen[name]
                 eigval_inverse_sqrt = 1.0 / (eigval).sqrt()
                 P = eigvec * eigval_inverse_sqrt @ eigvec.mT
-                g = g.flatten(1).type_as(P)
+                g = g.type_as(P)
                 g = g @ P
-            else:
-                g = g.flatten(1)
 
             # Store the gradient for later use
             mod_grads[name].append(g.to(self.device, self.dtype, non_blocking=True))
 
-        with GradientCollector(module, callback, self.processor):
+        with GradientCollector(module, callback, self.processor, modules):
             yield result
 
         if not mod_grads:
             raise ValueError("No grads collected. Did you forget to call backward?")
 
-        queries = {name: torch.cat(g, dim=1) for name, g in mod_grads.items()}
+        queries = {
+            name: torch.cat(mod_grads[name], dim=1)
+            for name in self.ordered_modules
+            if name in mod_grads
+        }
 
         if any(q.isnan().any() for q in queries.values()):
             raise ValueError("NaN found in queries.")
 
-        result._scores, result._indices = self.search(queries, k)
+        result._scores, result._indices = self.search(queries, k, modules)

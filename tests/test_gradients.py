@@ -9,6 +9,7 @@ from bergson.gradients import (
     AdamNormalizer,
     GradientCollector,
     GradientProcessor,
+    LayerAdapter,
 )
 
 
@@ -43,14 +44,16 @@ def test_phi3():
         for name, collected_grad in collected_grads.items():
             layer = model.get_submodule(name)
 
-            o, i = layer.out_features, layer.in_features
+            i = getattr(layer, LayerAdapter.in_attr(layer))
+            o = getattr(layer, LayerAdapter.out_attr(layer))
+
             g = layer.weight.grad
             assert g is not None
 
             moments = g.square()
             if p is not None:
-                A = collector.projection(name, p, o, "left", g.dtype)
-                B = collector.projection(name, p, i, "right", g.dtype)
+                A = collector.projection(name, p, o, "left", g.device, g.dtype)
+                B = collector.projection(name, p, i, "right", g.device, g.dtype)
                 g = A @ g @ B.T
 
             torch.testing.assert_close(g, collected_grad.squeeze(0))
@@ -77,15 +80,15 @@ def test_phi3():
 
                 for name, collected_grad in collected_grads.items():
                     layer = model.get_submodule(name)
-
-                    o, i = layer.out_features, layer.in_features
+                    i = getattr(layer, LayerAdapter.in_attr(layer))
+                    o = getattr(layer, LayerAdapter.out_attr(layer))
                     g = layer.weight.grad
                     assert g is not None
 
                     g = normalizers[name].normalize_(g)
                     if p is not None:
-                        A = collector.projection(name, p, o, "left", g.dtype)
-                        B = collector.projection(name, p, i, "right", g.dtype)
+                        A = collector.projection(name, p, o, "left", g.device, g.dtype)
+                        B = collector.projection(name, p, i, "right", g.device, g.dtype)
                         g = A @ g @ B.T
 
                     # Compare the normalized gradient with the collected gradient. We

@@ -1,6 +1,10 @@
+import json
 import os
+import shutil
 import socket
+from dataclasses import is_dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import cast
 
 import pandas as pd
@@ -20,13 +24,18 @@ from transformers import (
 )
 
 from .collection import collect_gradients
-from .data import IndexConfig, allocate_batches, load_data_string, tokenize
+from .data import DataConfig, IndexConfig, allocate_batches, load_data_string, tokenize
 from .gradients import GradientProcessor
 from .peft import detect_peft_modules
 from .utils import assert_type, get_layer_list
 
 
-def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableDataset):
+def worker(
+    rank: int,
+    world_size: int,
+    cfg: IndexConfig,
+    ds: Dataset | IterableDataset,
+):
     torch.cuda.set_device(rank)
 
     # These should be set by the main process
@@ -127,7 +136,7 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             print(f"Loading processor from '{cfg.processor_path}'")
 
         processor = GradientProcessor.load(
-            cfg.processor_path,
+            Path(cfg.processor_path),
             map_location=f"cuda:{rank}",
         )
     else:
@@ -136,9 +145,17 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             projection_dim=cfg.projection_dim or None,
             reshape_to_square=cfg.reshape_to_square,
             projection_type=cfg.projection_type,
+            include_bias=cfg.include_bias,
         )
         if rank == 0:
-            processor.save(cfg.run_path)
+            processor.save(cfg.partial_run_path)
+
+    if cfg.split_attention_modules:
+        attention_cfgs = {
+            module: cfg.attention for module in cfg.split_attention_modules
+        }
+    else:
+        attention_cfgs = {}
 
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"][:], cfg.token_batch_size)
@@ -146,16 +163,20 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
             model,
             ds,
             processor,
-            cfg.run_path,
+            cfg.partial_run_path,
             batches=batches,
             kl_divergence=cfg.loss_fn == "kl",
             loss_reduction=cfg.loss_reduction,
             skip_preconditioners=cfg.skip_preconditioners,
             target_modules=target_modules,
-            head_cfgs=cfg.head_cfgs,
+            attention_cfgs=attention_cfgs,
+            save_index=cfg.save_index,
+            drop_columns=cfg.drop_columns,
+            token_batch_size=cfg.token_batch_size,
+            module_wise=cfg.module_wise,
         )
     else:
-        # Convert each shard to a Dataset then collect its gradients
+        # Convert each shard to a Dataset then map over its gradients
         buf, shard_id = [], 0
 
         def flush():
@@ -168,13 +189,18 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
                 model,
                 ds_shard,
                 processor,
-                os.path.join(cfg.run_path, f"shard-{shard_id:05d}"),
+                cfg.partial_run_path / f"shard-{shard_id:05d}",
                 batches=batches,
                 kl_divergence=cfg.loss_fn == "kl",
                 loss_reduction=cfg.loss_reduction,
                 skip_preconditioners=cfg.skip_preconditioners,
                 target_modules=target_modules,
-                head_cfgs=cfg.head_cfgs,
+                attention_cfgs=attention_cfgs,
+                save_index=cfg.save_index,
+                # Save a processor state checkpoint after each shard
+                drop_columns=cfg.drop_columns,
+                token_batch_size=cfg.token_batch_size,
+                module_wise=cfg.module_wise,
             )
             buf.clear()
             shard_id += 1
@@ -185,6 +211,9 @@ def worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset | IterableD
                 flush()
         flush()
 
+        if rank == 0:
+            processor.save(cfg.partial_run_path)
+
 
 def dist_worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
     try:
@@ -193,15 +222,13 @@ def dist_worker(rank: int, world_size: int, cfg: IndexConfig, ds: Dataset):
         dist.destroy_process_group()
 
 
-def estimate_advantage(ds: Dataset, cfg: IndexConfig):
+def estimate_advantage(ds: Dataset, cfg: DataConfig):
     """Group rollouts by prompt and estimate advantages."""
-    assert isinstance(ds, Dataset), "Dataset required for advantage estimation"
-
-    df = ds.select_columns([cfg.data.prompt_column, cfg.data.reward_column]).to_pandas()
+    df = ds.select_columns([cfg.prompt_column, cfg.reward_column]).to_pandas()
     df = assert_type(pd.DataFrame, df)
 
-    advantages = df[cfg.data.reward_column] - df.groupby(cfg.data.prompt_column)[
-        cfg.data.reward_column
+    advantages = df[cfg.reward_column] - df.groupby(cfg.prompt_column)[
+        cfg.reward_column
     ].transform("mean")
 
     return advantages.tolist()
@@ -224,11 +251,22 @@ def build_gradient_dataset(cfg: IndexConfig):
         remove_columns=remove_columns,
     )
     if cfg.data.reward_column:
+        assert isinstance(ds, Dataset), "Dataset required for advantage estimation"
         ds = ds.add_column(
             "advantage",
-            estimate_advantage(ds, cfg),
+            estimate_advantage(ds, cfg.data),
             new_fingerprint="advantage",  # type: ignore
         )
+
+    # Write index config to json
+    os.makedirs(cfg.partial_run_path, exist_ok=True)
+    with open(os.path.join(cfg.partial_run_path, "index_config.json"), "w") as f:
+        index_cfg_dict = cfg.__dict__
+        for key in index_cfg_dict:
+            if is_dataclass(index_cfg_dict[key]):
+                index_cfg_dict[key] = index_cfg_dict[key].__dict__
+
+        json.dump(index_cfg_dict, f)
 
     world_size = torch.cuda.device_count()
     if world_size <= 1:
@@ -259,3 +297,8 @@ def build_gradient_dataset(cfg: IndexConfig):
             logs_specs=DefaultLogsSpecs(),
         )
         ctx.wait()
+
+    try:
+        shutil.move(cfg.partial_run_path, cfg.run_path)
+    except Exception:
+        pass

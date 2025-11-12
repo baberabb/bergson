@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -10,27 +11,36 @@ from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
 from .data import create_index, pad_and_tensor
-from .gradients import GradientCollector, GradientProcessor, HeadConfig
+from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
+from .scorer import Scorer
 
 
 def collect_gradients(
     model: PreTrainedModel,
     data: Dataset,
     processor: GradientProcessor,
-    path: str,
+    path: Path,
     *,
     batches: list[list[int]] | None = None,
     kl_divergence: bool | None = None,
     loss_reduction: Literal["mean", "sum"] = "mean",
     skip_preconditioners: bool = False,
     target_modules: set[str] | None = None,
-    head_cfgs: dict[str, HeadConfig] = {},
+    attention_cfgs: dict[str, AttentionConfig] | None = None,
+    save_index: bool = True,
+    drop_columns: bool = False,
+    scorer: Scorer | None = None,
+    token_batch_size: int | None = None,
+    module_wise: bool = False,
 ):
     """
     Compute projected gradients using a subset of the dataset.
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
+
+    if attention_cfgs is None:
+        attention_cfgs = {}
 
     # Batch size of one by default
     if batches is None:
@@ -38,7 +48,7 @@ def collect_gradients(
 
     # Mutable state for the GradientCollector callback
     mod_grads = {}
-    preconditioners = {}
+    preconditioners = processor.preconditioners
 
     # TODO: Handle this more elegantly
     dtype = torch.float32 if model.dtype == torch.float32 else torch.float16
@@ -46,11 +56,16 @@ def collect_gradients(
     lo = torch.finfo(dtype).min
     hi = torch.finfo(dtype).max
 
-    def callback(name: str, g: torch.Tensor):
+    def callback(name: str, g: torch.Tensor, indices: list[int]):
         g = g.flatten(1).clamp_(lo, hi)
+        if save_index:
+            # Asynchronously move the gradient to CPU and convert to the final dtype
+            mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
+        else:
+            mod_grads[name] = g.to(dtype=dtype)
 
-        # Asynchronously move the gradient to CPU and convert to fp16
-        mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
+        if scorer and module_wise:
+            scorer(indices, mod_grads, name=name)
 
         # Compute the outer product of the flattened gradient
         if not skip_preconditioners:
@@ -66,15 +81,23 @@ def collect_gradients(
         callback,
         processor,
         target_modules=target_modules,
-        head_cfgs=head_cfgs,
+        attention_cfgs=attention_cfgs,
     )
 
     # Allocate space ahead of time for the gradients
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
-    # Allocate structured space ahead of time for the gradients
-    grad_buffer = create_index(
-        path, num_grads=len(data), grad_sizes=grad_sizes, dtype=np_dtype
+    # Allocate space ahead of time for the gradients
+    grad_buffer = (
+        create_index(
+            path,
+            num_grads=len(data),
+            grad_sizes=grad_sizes,
+            dtype=np_dtype,
+            with_structure=False,
+        )
+        if save_index
+        else None
     )
 
     per_doc_losses = torch.full(
@@ -101,6 +124,8 @@ def collect_gradients(
                 set_peft_enabled(model, True)
 
             with collector:
+                collector.indices = indices
+
                 ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
 
                 # Compute average KL across all unmasked tokens
@@ -112,6 +137,8 @@ def collect_gradients(
                 losses.sum().backward()
         else:
             with collector:
+                collector.indices = indices
+
                 logits = model(x).logits[:, :-1]
 
                 losses = F.cross_entropy(
@@ -125,15 +152,29 @@ def collect_gradients(
 
                 losses.sum().backward()
 
-        # Weirdly you need to explicitly synchronize here in order to make sure that
-        # the nonblocking copies actually finish before we call .numpy()
         model.zero_grad()
-        torch.cuda.synchronize()
 
-        # It turns out that it's very important for efficiency to write the gradients
-        # sequentially instead of first concatenating them, then writing to one vector
-        for module_name in mod_grads.keys():
-            grad_buffer[module_name][indices] = mod_grads[module_name].numpy()
+        if grad_buffer is not None:
+            # Weirdly you need to explicitly synchronize here in order to make
+            # sure that the nonblocking copies actually finish before we call
+            # .numpy()
+            torch.cuda.synchronize()
+
+            # It turns out that it's very important for efficiency to write the
+            # gradients sequentially instead of first concatenating them, then
+            # writing to one vector
+            offset = 0
+            for module_name in grad_sizes.keys():
+                grad_buffer[
+                    indices, offset : offset + mod_grads[module_name].shape[1]
+                ] = mod_grads[module_name].numpy()
+                offset += mod_grads[module_name].shape[1]
+
+        if scorer is not None:
+            if module_wise:
+                scorer.finalize_module_wise(indices)
+            else:
+                scorer(indices, mod_grads)
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
@@ -144,18 +185,22 @@ def collect_gradients(
         dist.reduce(per_doc_losses, dst=0)
 
     if rank == 0:
+        if drop_columns:
+            data = data.remove_columns(["input_ids"])
+
         data = data.add_column(
             "loss",
             per_doc_losses.cpu().numpy(),
             feature=Value("float16" if dtype == torch.float16 else "float32"),
             new_fingerprint="loss",
         )
-        data.save_to_disk(path + "/data.hf")
+        data.save_to_disk(path / "data.hf")
 
         processor.save(path)
 
     # Make sure the gradients are written to disk
-    grad_buffer.flush()
+    if grad_buffer is not None:
+        grad_buffer.flush()
 
 
 def process_preconditioners(

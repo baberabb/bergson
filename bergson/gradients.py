@@ -1,15 +1,17 @@
 import json
-import os
 from abc import ABC, abstractmethod
 from contextlib import ContextDecorator
-from dataclasses import asdict, dataclass, field
-from typing import Callable, Literal, Mapping, NamedTuple
+from dataclasses import asdict, astuple, dataclass, field
+from pathlib import Path
+from typing import Callable, Literal, Mapping
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
+from transformers.pytorch_utils import Conv1D as HFConv1D
 
+from .data import AttentionConfig
 from .math import reshape_to_nearest_square
 from .utils import assert_type, create_projection_matrix
 
@@ -175,7 +177,7 @@ class GradientProcessor:
     a normalizer, it will be skipped.
     """
 
-    preconditioners: Mapping[str, Tensor] = field(default_factory=dict)
+    preconditioners: dict[str, Tensor] = field(default_factory=dict)
     """
     Dictionary of preconditioners for each matrix-valued parameter in the model.
     These are applied after the normalization and random projection steps.
@@ -206,6 +208,9 @@ class GradientProcessor:
     uniform distribution over {-1, 1}.
     """
 
+    include_bias: bool = False
+    """Whether to include bias gradients when present on a module."""
+
     def __post_init__(self):
         self._projection_matrices: dict[
             tuple[str, Literal["left", "right"], torch.device], Tensor
@@ -214,25 +219,27 @@ class GradientProcessor:
     @classmethod
     def load(
         cls,
-        path: str,
+        path: Path,
         *,
         map_location: str | torch.device | None = None,
     ) -> "GradientProcessor":
         """
         Load the normalizers and preconditioners from a file.
         """
-        cfg_path = os.path.join(path, "processor_config.json")
-        norm_path = os.path.join(path, "normalizers.pth")
-        precond_path = os.path.join(path, "preconditioners.pth")
-        precond_eigen_path = os.path.join(path, "preconditioners_eigen.pth")
+        cfg_path = path / "processor_config.json"
+        norm_path = path / "normalizers.pth"
+        precond_path = path / "preconditioners.pth"
+        precond_eigen_path = path / "preconditioners_eigen.pth"
 
         # Load configuration
-        with open(cfg_path, "r") as f:
+        with cfg_path.open("r") as f:
             cfg = json.load(f)
 
         # Backward compatibility
         if "projection_type" not in cfg:
             cfg["projection_type"] = "normal"
+        if "include_bias" not in cfg:
+            cfg["include_bias"] = False
 
         # Load normalizers
         norm_state = torch.load(
@@ -260,23 +267,23 @@ class GradientProcessor:
             **cfg,
         )
 
-    def save(self, path: str):
+    def save(self, path: Path):
         """
         Save the normalizers and preconditioners to a file.
         """
-        os.makedirs(path, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
 
-        cfg_path = os.path.join(path, "processor_config.json")
-        norm_path = os.path.join(path, "normalizers.pth")
-        precond_path = os.path.join(path, "preconditioners.pth")
-        precond_eigen_path = os.path.join(path, "preconditioners_eigen.pth")
+        cfg_path = path / "processor_config.json"
+        norm_path = path / "normalizers.pth"
+        precond_path = path / "preconditioners.pth"
+        precond_eigen_path = path / "preconditioners_eigen.pth"
 
         # Save configuration separately
         cfg = asdict(self)
         del cfg["normalizers"]
         del cfg["preconditioners"]
         del cfg["preconditioners_eigen"]
-        with open(cfg_path, "w") as f:
+        with cfg_path.open("w") as f:
             json.dump(cfg, f, indent=2)
 
         # Save normalizers
@@ -289,13 +296,32 @@ class GradientProcessor:
         torch.save(self.preconditioners_eigen, precond_eigen_path)
 
 
-class HeadConfig(NamedTuple):
-    num_heads: int
-    """The number of heads."""
-    head_size: int
-    """The size of each head."""
-    head_dim: int
-    """The dimension along which heads are tiled."""
+class LayerAdapter:
+    supported_modules = (nn.Linear, HFConv1D, nn.Conv1d, nn.Conv2d, nn.Conv3d)
+
+    @staticmethod
+    def in_attr(layer: nn.Module) -> str:
+        match layer:
+            case nn.Linear():
+                return "in_features"
+            case HFConv1D():
+                return "nx"
+            case nn.Conv1d() | nn.Conv2d() | nn.Conv3d():
+                return "in_channels"
+            case _:
+                raise ValueError(f"Unsupported layer type: {type(layer)}")
+
+    @staticmethod
+    def out_attr(layer: nn.Module) -> str:
+        match layer:
+            case nn.Linear():
+                return "out_features"
+            case HFConv1D():
+                return "nf"
+            case nn.Conv1d() | nn.Conv2d() | nn.Conv3d():
+                return "out_channels"
+            case _:
+                raise ValueError(f"Unsupported layer type: {type(layer)}")
 
 
 @dataclass
@@ -323,31 +349,39 @@ class GradientCollector(ContextDecorator):
     target_modules: set[str] | None = None
     """
     List of parameter names to collect gradients for. Should consist only of weight
-    matrices in `nn.Linear` modules. If `None`, the gradients for all weight matrices
-    will be collected.
+    matrices in modules supported by LayerAdapter. If `None`, the gradients for all
+    weight matrices will be collected.
     """
 
-    head_cfgs: dict[str, HeadConfig] = field(default_factory=dict)
+    attention_cfgs: dict[str, AttentionConfig] = field(default_factory=dict)
     """
     Dictionary of head configurations for each module to be split into head matrices.
     """
+
+    indices: list[int] = field(default_factory=list)
+    """List of indices for the current batch."""
 
     def __post_init__(self):
         self._fwd_hooks: list[RemovableHandle] = []
         self._bwd_hooks: list[RemovableHandle] = []
 
-        self.target_info: dict[str, tuple[torch.device, torch.Size]] = {}
+        self.target_info: dict[str, tuple[torch.device, torch.Size, bool]] = {}
 
         # Before we add any hooks, we need to peek at what modules we need to track.
         for name, layer in self.model.named_modules():
-            if not isinstance(layer, nn.Linear):
+            if not isinstance(layer, LayerAdapter.supported_modules):
                 continue
 
             if self.target_modules is not None and name not in self.target_modules:
                 continue
 
             # Users of this class really like to know ahead of time what the shapes are
-            self.target_info[name] = layer.weight.device, layer.weight.shape
+            has_bias = getattr(layer, "bias", None) is not None
+            self.target_info[name] = (
+                layer.weight.device,
+                layer.weight.shape,
+                has_bias,
+            )
 
     def shapes(self) -> Mapping[str, torch.Size]:
         """Return the shapes of the gradients collected by this collector."""
@@ -358,24 +392,39 @@ class GradientCollector(ContextDecorator):
         )
 
         shapes = {}
-        for name, (_, target_shape) in self.target_info.items():
-            if name in self.head_cfgs:
-                num_heads, head_size, head_dim = self.head_cfgs[name]
-
-                if not proj_shape:
-                    head_shape = list(target_shape)
-                    # Exclude batch and sequence dimensions since we're working
-                    # with the weight shape
-                    head_shape[head_dim - 2] = head_size
-                    shape = torch.Size(head_shape)
+        for name, (_, target_shape, has_bias) in self.target_info.items():
+            include_bias = has_bias and self.processor.include_bias
+            if name in self.attention_cfgs:
+                attention_cfg = self.attention_cfgs[name]
+                if proj_shape:
+                    head_shape = proj_shape
                 else:
-                    shape = proj_shape
+                    # Mutate the attention module's shape to get the attention
+                    # head shape
+                    attention_shape = list(target_shape)
+                    # - 2 because we're excluding the batch and sequence activation
+                    # dimensions
+                    attention_shape[attention_cfg.head_dim - 2] = (
+                        attention_cfg.head_size
+                    )
+                    if include_bias:
+                        attention_shape[-1] += 1
+                    head_shape = torch.Size(attention_shape)
 
                 shapes.update(
-                    {self.get_head_name(name, h): shape for h in range(num_heads)}
+                    {
+                        self.get_head_name(name, h): head_shape
+                        for h in range(attention_cfg.num_heads)
+                    }
                 )
             else:
-                shapes[name] = proj_shape or target_shape
+                if proj_shape:
+                    shapes[name] = proj_shape
+                else:
+                    grad_shape = list(target_shape)
+                    if include_bias:
+                        grad_shape[-1] += 1
+                    shapes[name] = torch.Size(grad_shape)
 
         return shapes
 
@@ -401,7 +450,8 @@ class GradientCollector(ContextDecorator):
         self.processor._projection_matrices[key] = A
         return A
 
-    def get_head_name(self, name: str, head_idx: int) -> str:
+    @staticmethod
+    def get_head_name(name: str, head_idx: int) -> str:
         """Get the name of an attention head with index `head_idx` in a
         module with name `name`."""
         return f"{name}.head_{head_idx}"
@@ -438,36 +488,46 @@ class GradientCollector(ContextDecorator):
 
             x = x * b.type_as(x)  # [N, S, I] * [I] → [N, S, I]
 
-        # If we're not using AdamNormalizer, we can randomly project the input here
-        # to save memory, rather than waiting until the backward pass.
+        include_bias = (
+            self.processor.include_bias and getattr(module, "bias", None) is not None
+        )
+
+        # If we're not using AdamNormalizer and are not including bias gradients,
+        # we can randomly project the input here to save memory,
+        # rather than waiting until the backward pass.
         p = self.processor.projection_dim
-        if p is not None and not isinstance(norm, AdamNormalizer):
-            i = module.in_features
-            x = x @ self.projection(name, p, i, "right", x.device, x.dtype).T
+        if p is not None and not isinstance(norm, AdamNormalizer) and not include_bias:
+            i = getattr(module, LayerAdapter.in_attr(module))
+            x = x @ self.projection(name, p, i, "right", x.device, x.dtype).T  # type: ignore
 
         module._inputs = x
 
     def _process_grad(self, module: nn.Module, _, grad_out):
         """Process the incoming gradient wrt the output of the module."""
         # Sanity checks
-        assert isinstance(module, nn.Linear), "Expected a Linear module"
+        assert isinstance(module, LayerAdapter.supported_modules), (
+            f"Expected a module of type {LayerAdapter.supported_modules}, "
+            f"got {type(module)}"
+        )
         G = grad_out[0]  # [N, S, O]
         I = module._inputs  # [N, S, I/q]
 
         name = assert_type(str, module._name)
+        module_has_bias = getattr(module, "bias", None) is not None
+        include_bias = module_has_bias and self.processor.include_bias
 
-        if name in self.head_cfgs:
-            num_heads, head_size, head_dim = self.head_cfgs[name]
-
+        if name in self.attention_cfgs:
             # Recurse into heads with module mutation and restoration
+            num_heads, head_size, head_dim = astuple(self.attention_cfgs[name])
+
             module_name, module_inputs, module_out_features = (
                 module._name,
                 module._inputs,
-                module.out_features,
+                getattr(module, LayerAdapter.out_attr(module)),
             )
-            module.out_features = head_size
+            setattr(module, LayerAdapter.out_attr(module), head_size)
             for h in range(num_heads):
-                module._name = self.get_head_name(name, h)
+                module._name = GradientCollector.get_head_name(name, h)  # type: ignore
                 module._inputs = module_inputs
 
                 try:
@@ -475,23 +535,21 @@ class GradientCollector(ContextDecorator):
                 except Exception as e:
                     print(
                         f"Error processing gradient of shape {G.shape} for head {h}"
-                        f"in module {name}. Provided head config may be incorrect. "
+                        f" in module {name}. Provided head config may be incorrect. "
                         f"Head config: head dim {head_dim}, head size {head_size},"
                         f" num heads {num_heads}."
                     )
                     raise e
 
                 self._process_grad(module, None, (head_G,))
-            module._name, module._inputs, module.out_features = (
-                module_name,
-                module_inputs,
-                module_out_features,
-            )
+            module._name, module._inputs = (module_name, module_inputs)
+            setattr(module, LayerAdapter.out_attr(module), module_out_features)
 
             return
 
         p = self.processor.projection_dim
-        o, i = module.out_features, module.in_features
+        i = getattr(module, LayerAdapter.in_attr(module))
+        o = getattr(module, LayerAdapter.out_attr(module))
 
         # Pre-scale G by the Adafactor row statistics
         norm = self.processor.normalizers.get(name)
@@ -502,12 +560,28 @@ class GradientCollector(ContextDecorator):
 
             G = G * a.type_as(G)  # [N, S, O] * [O] → [N, S, O]
 
-        # For Adam, we need to materialize the full gradient and then project
-        if isinstance(norm, AdamNormalizer):
-            P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
+        # If we are using AdamNormalizer, or including bias gradients
+        # we need to materialize the full gradient and then project
+        if isinstance(norm, AdamNormalizer) or include_bias:
 
-            # Normalize the gradients using the second moment matrix
-            P /= norm.avg_sq.sqrt().add_(1e-8)
+            P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
+            if include_bias:
+                # Append the bias gradient to the input
+                P = torch.cat(
+                    [
+                        P,
+                        G.sum(dim=(0, 1))
+                        .unsqueeze(0)
+                        .unsqueeze(2)
+                        .expand(P.shape[0], -1, 1),
+                    ],
+                    dim=2,
+                )
+                i += 1
+
+            if isinstance(norm, AdamNormalizer):
+                # Normalize the gradients using the second moment matrix
+                P /= norm.avg_sq.sqrt().add_(1e-8)
 
             if self.processor.reshape_to_square:
                 P = reshape_to_nearest_square(P)
@@ -527,7 +601,10 @@ class GradientCollector(ContextDecorator):
 
             P = G.mT @ I  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
 
-        self.closure(name, P)
+        if self.indices:
+            self.closure(name, P, self.indices)
+        else:
+            self.closure(name, P)
 
         # Save memory ASAP
         del module._inputs
@@ -545,5 +622,7 @@ class GradientCollector(ContextDecorator):
             h.remove()
         for h in self._bwd_hooks:
             h.remove()
+        self._fwd_hooks.clear()
+        self._bwd_hooks.clear()
 
         return False

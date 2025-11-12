@@ -1,9 +1,12 @@
+__version__ = "0.1.1"
+
 from .attributor import Attributor
 from .collection import collect_gradients
-from .data import DataConfig, IndexConfig, load_gradients
+from .data import AttentionConfig, DataConfig, IndexConfig, load_gradients
 from .faiss_index import FaissConfig
 from .gradcheck import FiniteDiff
-from .gradients import GradientCollector, GradientProcessor, HeadConfig
+from .gradients import GradientCollector, GradientProcessor
+from .score_writer import MemmapScoreWriter
 
 __all__ = [
     "collect_gradients",
@@ -15,5 +18,6 @@ __all__ = [
     "GradientProcessor",
     "IndexConfig",
     "DataConfig",
-    "HeadConfig",
+    "AttentionConfig",
+    "MemmapScoreWriter",
 ]
