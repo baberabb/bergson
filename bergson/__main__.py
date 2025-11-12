@@ -4,11 +4,8 @@ from typing import Optional, Union
 
 from simple_parsing import ArgumentParser, ConflictResolution
 
-from bergson.collection import collect_gradients
-
-from .build import distributed_computing
 from .data import IndexConfig, QueryConfig
-from .query import query_gradient_dataset
+from .launch import build, query
 
 
 @dataclass
@@ -24,7 +21,7 @@ class Build:
                 "Either save_index must be True or skip_preconditioners must be False"
             )
 
-        distributed_computing(cfg=self.cfg, worker_fn=collect_gradients)
+        build(self.cfg)
 
 
 @dataclass
@@ -48,7 +45,7 @@ class Query:
                 "Attributor instead."
             )
 
-        query_gradient_dataset(self.query_cfg, self.index_cfg)
+        query(self.index_cfg, self.query_cfg)
 
 
 @dataclass

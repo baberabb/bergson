@@ -36,6 +36,9 @@ class DataConfig:
     subset: str | None = None
     """Subset of the dataset to use for building the index."""
 
+    streaming: bool = False
+    """Whether to use streaming mode for the dataset."""
+
     prompt_column: str = "text"
     """Column in the dataset that contains the prompts."""
 
@@ -166,9 +169,6 @@ class IndexConfig:
     # TODO consider renaming this
     module_wise: bool = False
     """Whether to process the module gradients individually."""
-
-    streaming: bool = False
-    """Whether to use streaming mode for the dataset."""
 
     stream_shard_size: int = 400_000
     """Shard size for streaming the dataset into Dataset objects."""
