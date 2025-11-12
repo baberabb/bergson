@@ -7,11 +7,11 @@ We view attribution as a counterfactual question: **_If we "unlearned" this trai
 
 - Gradient store for serial queries. We provide collection-time gradient compression for efficient storage and retrieval, and integrate with FAISS for fast KNN search over large stores.
 - On-the-fly queries. Query uncompressed gradients without disk I/O overhead via a single pass over a dataset with a set of precomputed query gradients.
+- Train‑time gradient collection. Capture gradients produced during training with a ~17% performance overhead.
 - Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and other performance optimizations to support large models, datasets, and clusters.
    - Optimizations like module-wise gradient processing during the backward pass lower our VRAM consumption further.
-- Train‑time gradient collection. Capture gradients produced during training with a ~17% performance overhead.
-- Structured gradient views and per-attention head gradient collection. Bergson enables mechanistic interpretability via easy access to per‑module or per-attention head gradients.
 - Integrated with HuggingFace Transformers and Datasets. We also support on-disk datasets in a variety of formats.
+- Structured gradient views and per-attention head gradient collection. Bergson enables mechanistic interpretability via easy access to per‑module or per-attention head gradients.
 
 # Announcements
 
