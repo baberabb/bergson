@@ -1,26 +1,35 @@
 from pathlib import Path
 
+import pandas as pd
 import torch
+from datasets import (
+    Dataset,
+    DatasetDict,
+    IterableDataset,
+    IterableDatasetDict,
+    load_dataset,
+)
 from peft import PeftConfig, PeftModel, get_peft_model_state_dict
 from torch.distributed.fsdp import fully_shard
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-from bergson.data import IndexConfig
+from bergson.data import DataConfig, IndexConfig, tokenize
 from bergson.gradients import GradientProcessor
-from bergson.utils import get_layer_list
+from bergson.utils import assert_type, get_layer_list
 
 
-def create_gradient_processor(
+def create_processor(
     cfg: IndexConfig,
     rank: int,
 ) -> GradientProcessor:
     """Handle processor creation and normalizer fitting"""
-    if Path(cfg.processor_path).exists():
+    processor_path = Path(cfg.processor_path)
+    if (processor_path / "processor_config.json").exists():
         if rank == 0:
             print(f"Loading processor from '{cfg.processor_path}'")
 
         processor = GradientProcessor.load(
-            Path(cfg.processor_path),
+            processor_path,
             map_location=f"cuda:{rank}",
         )
     else:
@@ -83,6 +92,7 @@ def setup_model_and_peft(
             device_map=device_map,
             quantization_config=quantization_config,
             dtype=dtype,
+            revision=cfg.revision,
         )
         target_modules = None
 
@@ -93,6 +103,7 @@ def setup_model_and_peft(
             device_map=device_map,
             quantization_config=quantization_config,
             dtype=dtype,
+            revision=cfg.revision,
         )
 
         model = PeftModel.from_pretrained(
@@ -128,3 +139,68 @@ def setup_model_and_peft(
         fully_shard(model)
 
     return model, target_modules  # type: ignore
+
+
+def estimate_advantage(ds: Dataset, cfg: DataConfig):
+    """Group rollouts by prompt and estimate advantages."""
+    df = ds.select_columns([cfg.prompt_column, cfg.reward_column]).to_pandas()
+    df = assert_type(pd.DataFrame, df)
+
+    advantages = df[cfg.reward_column] - df.groupby(cfg.prompt_column)[
+        cfg.reward_column
+    ].transform("mean")
+
+    return advantages.tolist()
+
+
+def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
+    """Handle data loading and preprocessing"""
+
+    data_str = cfg.data.dataset
+    if data_str.endswith(".csv"):
+        ds = assert_type(Dataset, Dataset.from_csv(data_str))
+    elif data_str.endswith(".json") or data_str.endswith(".jsonl"):
+        ds = assert_type(Dataset, Dataset.from_json(data_str))
+    else:
+        try:
+            ds = load_dataset(
+                data_str,
+                cfg.data.subset,
+                split=cfg.data.split,
+                streaming=cfg.data.streaming,
+            )
+
+            if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
+                raise NotImplementedError(
+                    "DatasetDicts and IterableDatasetDicts are not supported."
+                )
+        except ValueError as e:
+            # Automatically use load_from_disk if appropriate
+            if "load_from_disk" in str(e):
+                ds = Dataset.load_from_disk(data_str, keep_in_memory=False)
+            else:
+                raise e
+
+    # In many cases the token_batch_size may be smaller than the max length allowed by
+    # the model. If cfg.data.truncation is True, we use the tokenizer to truncate
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model, revision=cfg.revision)
+    tokenizer.model_max_length = min(tokenizer.model_max_length, cfg.token_batch_size)
+
+    remove_columns = ds.column_names if cfg.drop_columns else None
+
+    ds = ds.map(
+        tokenize,
+        batched=True,
+        fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
+        remove_columns=remove_columns,
+    )
+
+    if cfg.data.reward_column:
+        assert isinstance(ds, Dataset), "Dataset required for advantage estimation"
+        ds = ds.add_column(
+            "advantage",
+            estimate_advantage(ds, cfg.data),
+            new_fingerprint="advantage",  # type: ignore
+        )
+
+    return ds

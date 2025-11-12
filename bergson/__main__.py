@@ -4,8 +4,9 @@ from typing import Optional, Union
 
 from simple_parsing import ArgumentParser, ConflictResolution
 
+from .build import build
 from .data import IndexConfig, QueryConfig
-from .launch import build, query
+from .query import query
 
 
 @dataclass

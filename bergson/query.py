@@ -1,12 +1,24 @@
 import json
+import os
+import shutil
+from dataclasses import asdict
+from datetime import timedelta
 from pathlib import Path
 from typing import Literal
 
 import torch
-from datasets import Dataset
+import torch.distributed as dist
+from datasets import Dataset, IterableDataset
+from tqdm.auto import tqdm
 
-from .data import QueryConfig, load_gradient_dataset
+from .collection import collect_gradients
+from .data import IndexConfig, QueryConfig, allocate_batches, load_gradient_dataset
 from .gradients import GradientProcessor
+from .launch import launch_distributed_run
+from .score_writer import MemmapScoreWriter
+from .scorer import get_scorer
+from .utils import assert_type
+from .worker_utils import create_processor, setup_data_pipeline, setup_model_and_peft
 
 
 def preprocess_grads(
@@ -95,7 +107,7 @@ def preprocess_grads(
     return grads
 
 
-def get_query_grads(query_cfg: QueryConfig, device: torch.device, dtype: torch.dtype):
+def load_query_ds(query_cfg: QueryConfig, device: str):
     """
     Load and preprocess the query dataset to get the query gradients. Preconditioners
     may be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
@@ -129,12 +141,12 @@ def get_query_grads(query_cfg: QueryConfig, device: torch.device, dtype: torch.d
             assert query_cfg.query_preconditioner_path is not None
             q = GradientProcessor.load(
                 Path(query_cfg.query_preconditioner_path),
-                map_location="cuda",
+                map_location=device,
             ).preconditioners
         if use_i:
             assert query_cfg.index_preconditioner_path is not None
             i = GradientProcessor.load(
-                Path(query_cfg.index_preconditioner_path), map_location="cuda"
+                Path(query_cfg.index_preconditioner_path), map_location=device
             ).preconditioners
 
         mixed_preconditioner = (
@@ -146,11 +158,15 @@ def get_query_grads(query_cfg: QueryConfig, device: torch.device, dtype: torch.d
             if (q and i)
             else (q or i)
         )
-        mixed_preconditioner = {k: v.cuda() for k, v in mixed_preconditioner.items()}
+        mixed_preconditioner = {
+            k: v.to(device) for k, v in mixed_preconditioner.items()
+        }
 
         def precondition(batch):
             for name in target_modules:
-                batch[name] = (batch[name].cuda() @ mixed_preconditioner[name]).cpu()
+                batch[name] = (
+                    batch[name].to(device) @ mixed_preconditioner[name]
+                ).cpu()
 
             return batch
 
@@ -158,17 +174,136 @@ def get_query_grads(query_cfg: QueryConfig, device: torch.device, dtype: torch.d
             precondition, batched=True, batch_size=query_cfg.batch_size
         )
 
-    query_ds.set_format("torch", columns=query_cfg.modules)
+    return query_ds.with_format("torch", columns=query_cfg.modules)
 
+
+def query_worker(
+    rank: int,
+    world_size: int,
+    index_cfg: IndexConfig,
+    query_cfg: QueryConfig,
+    ds: Dataset | IterableDataset,
+):
+    torch.cuda.set_device(rank)
+
+    # These should be set by the main process
+    if world_size > 1:
+        addr = os.environ.get("MASTER_ADDR", "localhost")
+        port = os.environ.get("MASTER_PORT", "29500")
+
+        dist.init_process_group(
+            "nccl",
+            init_method=f"tcp://{addr}:{port}",
+            device_id=torch.device(f"cuda:{rank}"),
+            rank=rank,
+            timeout=timedelta(hours=1),
+            world_size=world_size,
+        )
+
+    model, target_modules = setup_model_and_peft(index_cfg, rank)
+    processor = create_processor(index_cfg, rank)
+
+    attention_cfgs = {
+        module: index_cfg.attention for module in index_cfg.split_attention_modules
+    }
+
+    query_ds = load_query_ds(query_cfg, f"cuda:{rank}")
     query_grads = preprocess_grads(
         query_ds,
         query_cfg.modules,
         query_cfg.unit_normalize,
         query_cfg.batch_size,
-        device,
-        dtype,
+        torch.device(f"cuda:{rank}"),
+        torch.float32,
         accumulate_grads="mean" if query_cfg.score == "mean" else "none",
         normalize_accumulated_grad=query_cfg.score == "mean",
     )
 
-    return query_grads
+    num_scores = len(query_grads[query_cfg.modules[0]])
+
+    kwargs = {
+        "model": model,
+        "data": ds,
+        "processor": processor,
+        "cfg": index_cfg,
+        "target_modules": target_modules,
+        "attention_cfgs": attention_cfgs,
+    }
+
+    if isinstance(ds, Dataset):
+        batches = allocate_batches(ds["length"], index_cfg.token_batch_size)
+        kwargs["batches"] = batches
+
+        score_writer = MemmapScoreWriter(
+            Path(query_cfg.scores_path),
+            len(ds),
+            num_scores,
+            rank=rank,
+        )
+        scorer = get_scorer(
+            query_grads,
+            query_cfg,
+            score_writer,
+            index_cfg.module_wise,
+            torch.device(f"cuda:{rank}"),
+            torch.float32,
+        )
+        kwargs["scorer"] = scorer
+
+        collect_gradients(**kwargs)
+    else:
+        # Convert each shard to a Dataset then map over its gradients
+        buf, shard_id = [], 0
+
+        def flush(kwargs):
+            nonlocal buf, shard_id
+            if not buf:
+                return
+            ds_shard = assert_type(Dataset, Dataset.from_list(buf))
+            batches = allocate_batches(
+                ds_shard["length"][:], index_cfg.token_batch_size
+            )
+            kwargs["ds"] = ds_shard
+            kwargs["batches"] = batches
+
+            score_writer = MemmapScoreWriter(
+                Path(query_cfg.scores_path) / f"shard-{shard_id:05d}",
+                len(ds_shard),
+                num_scores,
+                rank=rank,
+            )
+            scorer = get_scorer(
+                query_grads,
+                query_cfg,
+                score_writer,
+                index_cfg.module_wise,
+                torch.device(f"cuda:{rank}"),
+                torch.float32,
+            )
+            kwargs["scorer"] = scorer
+
+            collect_gradients(**kwargs)
+
+            buf.clear()
+            shard_id += 1
+
+        for ex in tqdm(ds, desc="Collecting gradients"):
+            buf.append(ex)
+            if len(buf) == index_cfg.stream_shard_size:
+                flush(kwargs=kwargs)
+
+        flush(kwargs=kwargs)  # Final flush
+        if rank == 0:
+            processor.save(index_cfg.partial_run_path)
+
+
+def query(cfg: IndexConfig, query_cfg: QueryConfig):
+    cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
+    with (cfg.partial_run_path / "index_config.json").open("w") as f:
+        json.dump(asdict(cfg), f, indent=2)
+
+    ds = setup_data_pipeline(cfg)
+
+    launch_distributed_run("query", query_worker, [cfg, query_cfg, ds])
+
+    shutil.move(cfg.partial_run_path, cfg.run_path)

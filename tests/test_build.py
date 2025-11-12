@@ -48,26 +48,25 @@ def test_build_e2e(tmp_path: Path):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_build_consistency(tmp_path: Path, model, dataset):
-    cfg = IndexConfig(run_path=str(tmp_path))
-    cfg.skip_preconditioners = True
-    print(str(tmp_path))
-    kwargs = {
-        "model": model,
-        "data": dataset,
-        "processor": GradientProcessor(),
-        "cfg": cfg,
-    }
-
-    collect_gradients(**kwargs)
+    cfg = IndexConfig(
+        run_path=str(tmp_path),
+        skip_preconditioners=True,
+    )
+    collect_gradients(
+        model=model,
+        data=dataset,
+        processor=GradientProcessor(),
+        cfg=cfg,
+    )
 
     index = load_gradients(cfg.partial_run_path)
 
-    # Regenerate cache
     cache_path = Path("runs/test_build_cache.npy")
     if not cache_path.exists():
+        # Regenerate cache
         np.save(cache_path, index[index.dtype.names[0]][0])
-    cached_item_grad = np.load(cache_path)
 
+    cached_item_grad = np.load(cache_path)
     first_module_grad = index[index.dtype.names[0]][0]
 
     assert np.allclose(first_module_grad, cached_item_grad, atol=1e-6)
@@ -83,14 +82,13 @@ def test_split_attention_build(tmp_path: Path, model, dataset):
 
     cfg = IndexConfig(run_path=str(tmp_path))
 
-    kwargs = {
-        "model": model,
-        "data": dataset,
-        "processor": GradientProcessor(projection_dim=16),
-        "cfg": cfg,
-        "attention_cfgs": attention_cfgs,
-    }
-    collect_gradients(**kwargs)
+    collect_gradients(
+        model=model,
+        data=dataset,
+        processor=GradientProcessor(projection_dim=16),
+        cfg=cfg,
+        attention_cfgs=attention_cfgs,
+    )
 
     assert any(
         Path(cfg.partial_run_path).iterdir()
@@ -105,17 +103,19 @@ def test_conv1d_build(tmp_path: Path, dataset):
         model_name, trust_remote_code=True, use_safetensors=True
     )
 
-    cfg = IndexConfig(run_path=str(tmp_path))
-    # This build hangs in pytest with preconditioners enabled.
-    # It works when run directly so it may be a pytest issue.
-    cfg.skip_preconditioners = True
-    kwargs = {
-        "model": model,
-        "data": dataset,
-        "processor": GradientProcessor(projection_dim=16),
-        "cfg": cfg,
-    }
-    collect_gradients(**kwargs)
+    cfg = IndexConfig(
+        run_path=str(tmp_path),
+        # This build hangs in pytest with preconditioners enabled.
+        # It works when run directly so it may be a pytest issue.
+        skip_preconditioners=True,
+    )
+
+    collect_gradients(
+        model=model,
+        data=dataset,
+        processor=GradientProcessor(projection_dim=16),
+        cfg=cfg,
+    )
 
     assert any(
         Path(cfg.partial_run_path).iterdir()
