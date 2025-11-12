@@ -1,7 +1,15 @@
 # Bergson
-This library enables you to trace the memory of deep neural nets with gradient-based data attribution techniques. We currently focus on TrackStar, as described in [Scalable Influence and Fact Tracing for Large Language Model Pretraining](https://arxiv.org/abs/2410.17413v3) by Chang et al. (2024), although we plan to add support for other methods inspired by influence functions in the near future.
+This library enables you to trace the memory of deep neural nets with gradient-based data attribution techniques. We currently focus on TrackStar, as described in [Scalable Influence and Fact Tracing for Large Language Model Pretraining](https://arxiv.org/abs/2410.17413v3) by Chang et al. (2024), and also include support for several alternative influence functions.
 
-We view attribution as a counterfactual question: **_If we "unlearned" this training sample, how would the model's behavior change?_** This formulation ties attribution to some notion of what it means to "unlearn" a training sample. Here we focus on a very simple notion of unlearning: taking a gradient _ascent_ step on the loss with respect to the training sample. To mimic the behavior of popular optimizers, we precondition the gradient using Adam or Adafactor-style estimates of the second moments of the gradient.
+We view attribution as a counterfactual question: **_If we "unlearned" this training sample, how would the model's behavior change?_** This formulation ties attribution to some notion of what it means to "unlearn" a training sample. Here we focus on a very simple notion of unlearning: taking a gradient _ascent_ step on the loss with respect to the training sample.
+
+Our core features:
+- Gradient stores for easy post-hoc queries. We provide collection-time gradient compression for efficient storage and retrieval, and integrate with FAISS for fast KNN search over large gradient stores.
+- On-the-fly queries. Query uncompressed gradients without numerous writes to disk via a single pass over a dataset with a set of precomputed query gradients.
+- Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and other PyTorch and HuggingFace features to support large models, datasets, and clusters.
+   - Optimizations like module-wise gradient processing during the backward pass lower our VRAM consumption even further.
+- Train‑time gradient collection. Capture gradients as they're produced during training with a ~17% performance overhead.
+- Structured gradient views and per-attention head gradient collection. Bergson enables mechanistic interpretability via easy access to per‑module or per-attention head gradients.
 
 # Announcements
 
