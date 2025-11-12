@@ -13,13 +13,12 @@ def test_attributor(tmp_path: Path, model, dataset):
     cfg = IndexConfig(run_path=str(tmp_path))
     cfg.skip_preconditioners = True
 
-    kwargs = {
-        "model": model,
-        "data": dataset,
-        "processor": GradientProcessor(),
-        "cfg": cfg,
-    }
-    collect_gradients(**kwargs)
+    collect_gradients(
+        model=model,
+        data=dataset,
+        processor=GradientProcessor(),
+        cfg=cfg,
+    )
 
     attr = Attributor(tmp_path, device="cpu", unit_norm=True)
 
@@ -42,13 +41,12 @@ def test_faiss(tmp_path: Path, model, dataset):
 
     cfg = IndexConfig(run_path=str(tmp_path))
 
-    kwargs = {
-        "model": model,
-        "data": dataset,
-        "processor": GradientProcessor(projection_dim=16),
-        "cfg": cfg,
-    }
-    collect_gradients(**kwargs)
+    collect_gradients(
+        model=model,
+        data=dataset,
+        processor=GradientProcessor(projection_dim=16),
+        cfg=cfg,
+    )
 
     attr = Attributor(
         tmp_path,

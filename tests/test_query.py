@@ -46,15 +46,13 @@ def test_query(tmp_path: Path, model, dataset):
         module_wise=False,
     )
 
-    kwargs = {
-        "model": model,
-        "data": dataset,
-        "processor": processor,
-        "cfg": cfg,
-        "scorer": scorer,
-    }
-
-    collect_gradients(**kwargs)
+    collect_gradients(
+        model=model,
+        data=dataset,
+        processor=processor,
+        cfg=cfg,
+        scorer=scorer,
+    )
 
     assert any(tmp_path.iterdir()), "Expected artifacts in the temp run_path"
     assert any(Path(tmp_path).glob("scores.bin")), "Expected scores file"
@@ -94,15 +92,13 @@ def test_module_wise_query(tmp_path: Path, model, dataset):
         dtype=torch.float32,
     )
 
-    kwargs = {
-        "model": model,
-        "data": dataset,
-        "processor": processor,
-        "cfg": cfg,
-        "scorer": scorer,
-    }
-
-    collect_gradients(**kwargs)
+    collect_gradients(
+        model=model,
+        data=dataset,
+        processor=processor,
+        cfg=cfg,
+        scorer=scorer,
+    )
 
     assert any(tmp_path.iterdir()), "Expected artifacts in the temp run_path"
     assert any(tmp_path.glob("scores.bin")), "Expected scores file"
