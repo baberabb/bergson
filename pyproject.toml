@@ -12,6 +12,7 @@ license = {text = "MIT License"}
 dependencies = [
     "accelerate", # For device_map in from_pretrained
     "datasets",
+    "hf-transfer>=0.1.9",
     "matplotlib>=3.10.7",
     "natsort",
     "peft>=0.17.0",

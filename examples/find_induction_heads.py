@@ -12,6 +12,8 @@ This script:
 
 import math
 import os
+
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 import random
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -359,10 +361,19 @@ def create_transformer(special_pos_embed):
 
 
 def load_data(
-    tokenizer, N: int | None = None, name="EleutherAI/SmolLM2-135M-10B", max_length=512
+    tokenizer,
+    N: int | float | None = None,
+    name="EleutherAI/SmolLM2-135M-10B",
+    max_length=512,
 ):
     """Load and preprocess dataset."""
-    split = f"train[:{N}]" if N is not None else "train"
+    split = (
+        f"train[:{N}]"
+        if N is not None and N.is_integer()
+        else f"train[:{(int(N * 100))}%]"
+        if N is not None
+        else "train"
+    )
     dataset = load_dataset(name, split=split)
     dataset = assert_type(Dataset, dataset)
 
@@ -388,6 +399,7 @@ def load_data(
         batched=True,
         remove_columns=dataset.column_names,
         desc="Tokenizing dataset",
+        num_proc=16,
     )
 
     # Split into train/eval
@@ -656,7 +668,7 @@ def setup_training(
         report_to="wandb" if wandb else None,
         run_name="2-layer-transformer-SmolLM2-corpus",
         seed=42,
-        fp16=False,
+        fp16=True,
         dataloader_drop_last=False,
     )
 
@@ -664,7 +676,7 @@ def setup_training(
         path=f"{output_dir}/gradients",
         head_cfgs=HEAD_CFGS,
         projection_dim=projection_dim,
-        dtype=np.float32,
+        dtype=np.float16,
         accumulate_grads=False,
         track_order=True,
     )
@@ -781,7 +793,7 @@ def main(args):
 
     if train:
         if args.small:
-            train_dataset, _ = load_data(tokenizer, name=dataset_name, N=20_000)
+            train_dataset, _ = load_data(tokenizer, name=dataset_name, N=0.4)
         else:
             train_dataset, _ = load_data(tokenizer, name=dataset_name)
 
@@ -833,7 +845,7 @@ def main(args):
             str(Path(output_dir) / "gradients" / "train" / f"epoch_{epoch_idx}"),
             device="cpu",
             unit_norm=unit_norm,
-            dtype=torch.float32,
+            dtype=torch.float16,
             faiss_cfg=FaissConfig(
                 mmap_index=True, index_factory="IVF1,SQfp16", num_shards=10
             ),
@@ -883,7 +895,7 @@ def main(args):
         f"({'Normalized' if unit_norm else 'Unnormalized'})"
     )
     plt.grid(True, alpha=0.3)
-    fig_name = f"figures/scores_{tag}" f'{"_norm" if unit_norm else ""}.pdf'
+    fig_name = f"figures/scores_{tag}{'_norm' if unit_norm else ''}.pdf"
     plt.savefig(
         fig_name,
         format="pdf",
@@ -968,7 +980,7 @@ def main(args):
         plt.legend()
         plt.grid(True, alpha=0.3)
         fig_name = (
-            f"figures/module_scores_{tag}" f'{"_norm" if unit_norm else ""}_{name}.pdf'
+            f"figures/module_scores_{tag}{'_norm' if unit_norm else ''}_{name}.pdf"
         )
         plt.savefig(
             fig_name,
@@ -994,8 +1006,8 @@ def main(args):
         plt.legend()
         plt.grid(True, alpha=0.3)
         fig_name = (
-            f'figures/sum{"_" + tag if tag else ""}'
-            f'{"_norm" if unit_norm else ""}_{name}.pdf'
+            f"figures/sum{'_' + tag if tag else ''}"
+            f"{'_norm' if unit_norm else ''}_{name}.pdf"
         )
         plt.savefig(
             fig_name,
