@@ -3,20 +3,21 @@ This library enables you to trace the memory of deep neural nets with gradient-b
 
 We view attribution as a counterfactual question: **_If we "unlearned" this training sample, how would the model's behavior change?_** This formulation ties attribution to some notion of what it means to "unlearn" a training sample. Here we focus on a very simple notion of unlearning: taking a gradient _ascent_ step on the loss with respect to the training sample.
 
-Our core features:
-- Gradient stores for easy post-hoc queries. We provide collection-time gradient compression for efficient storage and retrieval, and integrate with FAISS for fast KNN search over large gradient stores.
+Our core features: 
+- Gradient stores for easy post-hoc queries. We provide collection-time gradient compression for efficient storage and retrieval, and integrate with FAISS for fast KNN search over large stores.
 - On-the-fly queries. Query uncompressed gradients without disk I/O overhead via a single pass over a dataset with a set of precomputed query gradients.
-- Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and performance optimizations to support large models, datasets, and clusters.
-   - Optimizations like module-wise gradient processing during the backward pass lower our VRAM consumption even further.
-- Train‑time gradient collection. Capture gradients as they're produced during training with a ~17% performance overhead.
+- Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and other performance optimizations to support large models, datasets, and clusters.
+   - Optimizations like module-wise gradient processing during the backward pass lower our VRAM consumption further.
+- Train‑time gradient collection. Capture gradients produced during training with a ~17% performance overhead.
 - Structured gradient views and per-attention head gradient collection. Bergson enables mechanistic interpretability via easy access to per‑module or per-attention head gradients.
+- Integrated with HuggingFace Transformers and Datasets. We also support on-disk datasets in a variety of formats.
 
 # Announcements
 
 **October 2025**
-- Support including bias parameter gradients in linear modules: https://github.com/EleutherAI/bergson/pull/54
+- Support bias parameter gradients in linear modules: https://github.com/EleutherAI/bergson/pull/54
 - Support convolution modules: https://github.com/EleutherAI/bergson/pull/50
-- Query datasets on-the-fly, without saving gradients to disk: https://github.com/EleutherAI/bergson/pull/47
+- Query datasets on-the-fly: https://github.com/EleutherAI/bergson/pull/47
 
 **September 2025**
 - Save per-head attention gradients: https://github.com/EleutherAI/bergson/pull/40
