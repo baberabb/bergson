@@ -39,11 +39,12 @@ pip install bergson
 # Quickstart
 
 ```
-python -m bergson build runs/test --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
+python -m bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
 ```
 
 # Usage
-The first step is to build an index of gradients for each training sample. You can do this from the command line, using `bergson` as a CLI tool:
+
+You can build an index of gradients for each training sample from the command line, using `bergson` as a CLI tool:
 
 ```bash
 python -m bergson build <output_path> --model <model_name> --dataset <dataset_name>
@@ -53,7 +54,7 @@ This will create a directory at `<output_path>` containing the gradients for eac
 
 You can also use the library programmatically to build the index. The `collect_gradients` function is just a bit lower level the CLI tool, and allows you to specify the model and dataset directly as arguments. The result is a HuggingFace dataset which contains a handful of new columns, including `gradients`, which contains the gradients for each training sample. You can then use this dataset to compute attributions.
 
-At the lowest level of abstraction, the `GradientCollector` context manager allows you to efficiently collect gradients for _each individual example_ in a batch during a backward pass, simultaneously randomly projecting the gradients to a lower-dimensional space to save memory. If you use Adafactor normalization, which is the default, we will do this in a very compute-efficient way which avoids computing the full gradient for each example before projecting it to the lower dimension. There are two main ways you can use `GradientCollector`:
+At the lowest level of abstraction, the `GradientCollector` context manager allows you to efficiently collect gradients for _each individual example_ in a batch during a backward pass, simultaneously randomly projecting the gradients to a lower-dimensional space to save memory. If you use Adafactor normalization we will do this in a very compute-efficient way which avoids computing the full gradient for each example before projecting it to the lower dimension. There are two main ways you can use `GradientCollector`:
 
 1. Using a `closure` argument, which enables you to make use of the per-example gradients immediately after they are computed, during the backward pass. If you're computing summary statistics or other per-example metrics, this is the most efficient way to do it.
 2. Without a `closure` argument, in which case the gradients are collected and returned as a dictionary mapping module names to batches of gradients. This is the simplest and most flexible approach but is a bit more memory-intensive.
@@ -82,7 +83,7 @@ trainer.train()
 
 ## Attention Head Gradients
 
-By default Bergson collects gradients for named parameter matrices, but gradients for individual attention heads within an attention module can be collected too. To collect per-head gradients configure an AttentionConfig for each module of interest.
+By default Bergson collects gradients for named parameter matrices, but per-attention head gradients may be collected by configuring an AttentionConfig for each module of interest.
 
 ```python
 from bergson import AttentionConfig, IndexConfig, DataConfig
