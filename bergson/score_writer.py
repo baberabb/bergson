@@ -117,7 +117,6 @@ class MemmapScoreWriter(ScoreWriter):
             mode="r+",
             shape=(num_items,),
         )
-        print(f"Loaded {len(self.scores)} scores from {scores_file_path}")
 
     def __call__(self, indices: list[int], scores: torch.Tensor):
         # scores: [num_indices, num_scores]
