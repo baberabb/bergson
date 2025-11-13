@@ -9,12 +9,16 @@ from bergson import (
     MemmapScoreWriter,
     collect_gradients,
 )
-from bergson.data import QueryConfig
+from bergson.data import IndexConfig, QueryConfig
 from bergson.scorer import get_scorer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_query(tmp_path: Path, model, dataset):
+    cfg = IndexConfig(run_path=str(tmp_path))
+
+    cfg.skip_preconditioners = True
+
     processor = GradientProcessor(projection_dim=16)
     shapes = GradientCollector(model.base_model, lambda x: x, processor).shapes()
 
@@ -46,7 +50,7 @@ def test_query(tmp_path: Path, model, dataset):
         model=model,
         data=dataset,
         processor=processor,
-        path=tmp_path,
+        cfg=cfg,
         scorer=scorer,
     )
 
@@ -56,6 +60,11 @@ def test_query(tmp_path: Path, model, dataset):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_module_wise_query(tmp_path: Path, model, dataset):
+    cfg = IndexConfig(run_path=str(tmp_path))
+
+    cfg.skip_preconditioners = True
+    cfg.module_wise = True
+
     processor = GradientProcessor(projection_dim=16)
     shapes = GradientCollector(model.base_model, lambda x: x, processor).shapes()
 
@@ -87,9 +96,8 @@ def test_module_wise_query(tmp_path: Path, model, dataset):
         model=model,
         data=dataset,
         processor=processor,
-        path=tmp_path,
+        cfg=cfg,
         scorer=scorer,
-        module_wise=True,
     )
 
     assert any(tmp_path.iterdir()), "Expected artifacts in the temp run_path"
