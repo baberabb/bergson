@@ -183,7 +183,7 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
 
     # In many cases the token_batch_size may be smaller than the max length allowed by
     # the model. If cfg.data.truncation is True, we use the tokenizer to truncate
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model, revision=cfg.revision)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model)
     tokenizer.model_max_length = min(tokenizer.model_max_length, cfg.token_batch_size)
 
     remove_columns = ds.column_names if cfg.drop_columns else None
