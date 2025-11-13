@@ -10,7 +10,6 @@ We view attribution as a counterfactual question: **_If we "unlearned" this trai
   - Experiment with multiple query strategies based on [LESS](https://arxiv.org/pdf/2402.04333).
 - Train‑time gradient collection. Capture gradients produced during training with a ~17% performance overhead.
 - Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and other performance optimizations to support large models, datasets, and clusters.
-   - Optimizations like module-wise gradient processing during the backward pass lower our VRAM consumption further.
 - Integrated with HuggingFace Transformers and Datasets. We also support on-disk datasets in a variety of formats.
 - Structured gradient views and per-attention head gradient collection. Bergson enables mechanistic interpretability via easy access to per‑module or per-attention head gradients.
 

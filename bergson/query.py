@@ -20,10 +20,10 @@ from .data import (
     load_gradient_dataset,
     load_gradients,
 )
+from .distributed import launch_distributed_run
 from .gradients import GradientProcessor
-from .launch import launch_distributed_run
 from .score_writer import MemmapScoreWriter
-from .scorer import get_scorer
+from .scorer import Scorer
 from .utils import assert_type
 from .worker_utils import create_processor, setup_data_pipeline, setup_model_and_peft
 
@@ -271,13 +271,12 @@ def query_worker(
             num_scores,
             rank=rank,
         )
-        scorer = get_scorer(
+        scorer = Scorer(
             query_grads,
             query_cfg,
-            score_writer,
-            index_cfg.module_wise,
-            torch.device(f"cuda:{rank}"),
-            model.dtype if model.dtype != "auto" else torch.float32,
+            writer=score_writer,
+            device=torch.device(f"cuda:{rank}"),
+            dtype=model.dtype if model.dtype != "auto" else torch.float32,
         )
         kwargs["scorer"] = scorer
 
@@ -303,13 +302,12 @@ def query_worker(
                 num_scores,
                 rank=rank,
             )
-            scorer = get_scorer(
+            scorer = Scorer(
                 query_grads,
                 query_cfg,
                 score_writer,
-                index_cfg.module_wise,
                 torch.device(f"cuda:{rank}"),
-                torch.float32,
+                model.dtype if model.dtype != "auto" else torch.float32,
             )
             kwargs["scorer"] = scorer
 

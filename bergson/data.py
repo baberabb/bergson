@@ -26,7 +26,7 @@ from .utils import assert_type
 
 @dataclass
 class DataConfig:
-    dataset: str = "EleutherAI/SmolLM2-135M-10B"
+    dataset: str = "NeelNanda/pile-10k"
     """Dataset identifier to build the index from."""
 
     split: str = "train"
@@ -123,7 +123,7 @@ class IndexConfig:
     data: DataConfig = field(default_factory=DataConfig)
     """Specification of the data on which to build the index."""
 
-    model: str = "HuggingFaceTB/SmolLM2-135M"
+    model: str = "EleutherAI/pythia-160m"
     """Name of the model to load."""
 
     fsdp: bool = False
@@ -164,10 +164,6 @@ class IndexConfig:
 
     loss_reduction: Literal["mean", "sum"] = "mean"
     """Reduction method for the loss function."""
-
-    # TODO consider renaming this
-    module_wise: bool = False
-    """Whether to process the module gradients individually."""
 
     stream_shard_size: int = 400_000
     """Shard size for streaming the dataset into Dataset objects."""
@@ -454,7 +450,7 @@ def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
         mmap = load_gradients(dir, structured=structured)
         if structured:
             for field_name in mmap.dtype.names:
-                flat = pa.array(mmap[field_name].reshape(-1)).copy()
+                flat = pa.array(mmap[field_name].reshape(-1).copy())
                 col = pa.FixedSizeListArray.from_arrays(flat, mmap[field_name].shape[1])
                 ds = ds.add_column(field_name, col, new_fingerprint=field_name)
         else:
