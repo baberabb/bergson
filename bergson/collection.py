@@ -37,6 +37,8 @@ def collect_gradients(
         attention_cfgs=attention_cfgs or {},
     )
 
+    validate_batch_size(model, cfg.token_batch_size, collector)
+
     computer = CollectorComputer(
         model=model,  # type: ignore
         data=data,
