@@ -26,7 +26,7 @@ from .utils import assert_type
 
 @dataclass
 class DataConfig:
-    dataset: str = "EleutherAI/SmolLM2-135M-10B"
+    dataset: str = "NeelNanda/pile-10k"
     """Dataset identifier to build the index from."""
 
     split: str = "train"
@@ -123,7 +123,7 @@ class IndexConfig:
     data: DataConfig = field(default_factory=DataConfig)
     """Specification of the data on which to build the index."""
 
-    model: str = "HuggingFaceTB/SmolLM2-135M"
+    model: str = "EleutherAI/pythia-160m"
     """Name of the model to load."""
 
     fsdp: bool = False
