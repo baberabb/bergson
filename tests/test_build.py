@@ -29,6 +29,8 @@ def test_build_e2e(tmp_path: Path):
             "--truncation",
             "--projection_dim",
             "4",
+            "--token_batch_size",
+            "1024",
         ],
         cwd=tmp_path,
         capture_output=True,  # Add this
@@ -51,6 +53,7 @@ def test_build_consistency(tmp_path: Path, model, dataset):
     cfg = IndexConfig(
         run_path=str(tmp_path),
         skip_preconditioners=True,
+        token_batch_size=1024,
     )
     collect_gradients(
         model=model,
@@ -80,7 +83,7 @@ def test_split_attention_build(tmp_path: Path, model, dataset):
         ),
     }
 
-    cfg = IndexConfig(run_path=str(tmp_path))
+    cfg = IndexConfig(run_path=str(tmp_path), token_batch_size=1024)
 
     collect_gradients(
         model=model,
@@ -108,6 +111,8 @@ def test_conv1d_build(tmp_path: Path, dataset):
         # This build hangs in pytest with preconditioners enabled.
         # It works when run directly so it may be a pytest issue.
         skip_preconditioners=True,
+        # GPT-2 max_position_embeddings is 1024
+        token_batch_size=1024,
     )
 
     collect_gradients(
@@ -134,6 +139,7 @@ def test_tokenizer_build(tmp_path: Path, model, dataset):
         run_path=str(tmp_path),
         # Use a different tokenizer than the model
         tokenizer="openai-community/gpt2",
+        token_batch_size=1024,
     )
 
     collect_gradients(

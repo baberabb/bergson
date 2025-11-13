@@ -28,6 +28,8 @@ def test_reduce_e2e(tmp_path: Path):
             "mean",
             "--unit_normalize",
             "--skip_preconditioners",
+            "--token_batch_size",
+            "1024",
         ],
         cwd=tmp_path,
         capture_output=True,

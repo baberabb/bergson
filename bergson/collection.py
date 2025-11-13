@@ -58,10 +58,24 @@ def validate_batch_size(
     if token_batch_size is None:
         return
 
+    # Check that token_batch_size doesn't exceed model's max sequence length
+    max_seq_len = getattr(model.config, "max_position_embeddings", None)
+    if max_seq_len is not None and token_batch_size > max_seq_len:
+        raise ValueError(
+            f"Token batch size {token_batch_size} exceeds model's max sequence length "
+            f"({max_seq_len}). Use --token_batch_size {max_seq_len} or smaller."
+        )
+
     random_tokens = torch.randint(
         0, 10, (1, token_batch_size), device=model.device, dtype=torch.long
     )
-    with collector:
-        loss = model(random_tokens).logits[0, 0, 0].float()
-        loss.backward()
-        model.zero_grad()
+    try:
+        with collector:
+            loss = model(random_tokens).logits[0, 0, 0].float()
+            loss.backward()
+            model.zero_grad()
+    except Exception as e:
+        raise ValueError(
+            f"Token batch size {token_batch_size} is too large for the device. "
+            f"Try reducing the batch size or use --fsdp to shard the model."
+        ) from e
