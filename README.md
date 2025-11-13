@@ -5,7 +5,7 @@ We view attribution as a counterfactual question: **_If we "unlearned" this trai
 
 ## Core features
 
-- Gradient store for serial queries. We provide collection-time gradient compression for efficient storage and retrieval, and integrate with FAISS for fast KNN search over large stores.
+- Gradient store for serial queries. We provide collection-time gradient compression for efficient storage, and integrate with FAISS for fast KNN search over large stores.
 - On-the-fly queries. Query uncompressed gradients without disk I/O overhead via a single pass over a dataset with a set of precomputed query gradients.
 - Train‑time gradient collection. Capture gradients produced during training with a ~17% performance overhead.
 - Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and other performance optimizations to support large models, datasets, and clusters.
