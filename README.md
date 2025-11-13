@@ -7,6 +7,7 @@ We view attribution as a counterfactual question: **_If we "unlearned" this trai
 
 - Gradient store for serial queries. We provide collection-time gradient compression for efficient storage, and integrate with FAISS for fast KNN search over large stores.
 - On-the-fly queries. Query uncompressed gradients without disk I/O overhead via a single pass over a dataset with a set of precomputed query gradients.
+  - Experiment with multiple query strategies based on [LESS](https://arxiv.org/pdf/2402.04333).
 - Train‑time gradient collection. Capture gradients produced during training with a ~17% performance overhead.
 - Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and other performance optimizations to support large models, datasets, and clusters.
    - Optimizations like module-wise gradient processing during the backward pass lower our VRAM consumption further.
