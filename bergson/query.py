@@ -309,7 +309,7 @@ def query_worker(
                 score_writer,
                 index_cfg.module_wise,
                 torch.device(f"cuda:{rank}"),
-                torch.float32,
+                model.dtype if model.dtype != "auto" else torch.float32,
             )
             kwargs["scorer"] = scorer
 

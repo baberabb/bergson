@@ -454,7 +454,7 @@ def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
         mmap = load_gradients(dir, structured=structured)
         if structured:
             for field_name in mmap.dtype.names:
-                flat = pa.array(mmap[field_name].reshape(-1)).copy()
+                flat = pa.array(mmap[field_name].reshape(-1).copy())
                 col = pa.FixedSizeListArray.from_arrays(flat, mmap[field_name].shape[1])
                 ds = ds.add_column(field_name, col, new_fingerprint=field_name)
         else:

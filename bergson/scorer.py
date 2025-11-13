@@ -86,6 +86,7 @@ def build_scorer_callback(
             dim=1,
         )
     else:
+        query_grads = {name: grad.to(dtype) for name, grad in query_grads.items()}
         query_tensor = None
 
     @torch.inference_mode()
