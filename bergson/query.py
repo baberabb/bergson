@@ -4,15 +4,22 @@ import shutil
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 import torch.distributed as dist
 from datasets import Dataset, IterableDataset
 from tqdm.auto import tqdm
+from transformers import PreTrainedModel
 
 from .collection import collect_gradients
-from .data import IndexConfig, QueryConfig, allocate_batches, load_gradient_dataset
+from .data import (
+    IndexConfig,
+    QueryConfig,
+    allocate_batches,
+    load_gradient_dataset,
+    load_gradients,
+)
 from .gradients import GradientProcessor
 from .launch import launch_distributed_run
 from .score_writer import MemmapScoreWriter
@@ -27,7 +34,6 @@ def preprocess_grads(
     unit_normalize: bool,
     batch_size: int,
     device: torch.device,
-    dtype: torch.dtype,
     accumulate_grads: Literal["mean", "sum", "none"] = "none",
     normalize_accumulated_grad: bool = False,
 ) -> dict[str, torch.Tensor]:
@@ -39,7 +45,7 @@ def preprocess_grads(
     # Short-circuit if possible
     if accumulate_grads == "none" and not unit_normalize:
         return {
-            column_name: grad_ds[:][column_name].to(device=device, dtype=dtype)
+            column_name: grad_ds[:][column_name].to(device=device)
             for column_name in grad_column_names
         }
 
@@ -78,19 +84,17 @@ def preprocess_grads(
     # Process the gradient dataset
     if accumulate_grads == "mean":
         grads = {
-            column_name: (acc[column_name] / ss_acc / len(grad_ds))
-            .unsqueeze(0)
-            .to(dtype)
+            column_name: (acc[column_name] / ss_acc / len(grad_ds)).unsqueeze(0)
             for column_name in grad_column_names
         }
     elif accumulate_grads == "sum":
         grads = {
-            column_name: (acc[column_name] / ss_acc).unsqueeze(0).to(dtype)
+            column_name: (acc[column_name] / ss_acc).unsqueeze(0)
             for column_name in grad_column_names
         }
     elif accumulate_grads == "none":
         grads = {
-            column_name: grad_ds[:][column_name].to(device=device, dtype=dtype) / ss_acc
+            column_name: grad_ds[:][column_name].to(device=device) / ss_acc
             for column_name in grad_column_names
         }
     else:
@@ -107,7 +111,7 @@ def preprocess_grads(
     return grads
 
 
-def load_query_ds(query_cfg: QueryConfig, device: str):
+def get_query_ds(query_cfg: QueryConfig, device: str, rank: int | None = None):
     """
     Load and preprocess the query dataset to get the query gradients. Preconditioners
     may be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
@@ -127,9 +131,36 @@ def load_query_ds(query_cfg: QueryConfig, device: str):
     if not query_cfg.modules:
         query_cfg.modules = target_modules
 
-    query_ds = load_gradient_dataset(
-        Path(query_cfg.query_path), concatenate_gradients=False
-    )
+    try:
+        query_ds = load_gradient_dataset(Path(query_cfg.query_path), structured=True)
+    except ValueError as e:
+        if "integer won't fit into a C int" not in str(e):
+            raise e
+
+        if rank == 0 or rank is None:
+            print(
+                "Query gradients are too large to load with structure. "
+                "Attempting to load without structure..."
+            )
+
+        mmap = load_gradients(Path(query_cfg.query_path), structured=False)
+
+        # Convert unstructured gradients to a dictionary of module-wise tensors
+        with open(query_path / "info.json", "r") as f:
+            metadata = json.load(f)
+            grad_sizes = metadata["grad_sizes"]
+
+        sizes = torch.tensor(list(grad_sizes.values()))
+        module_offsets = torch.tensor([0] + torch.cumsum(sizes, dim=0).tolist())
+
+        query_ds = Dataset.from_dict(
+            {
+                name: mmap[:, module_offsets[i] : module_offsets[i + 1]].copy()
+                for i, name in enumerate(grad_sizes.keys())
+                if name in target_modules
+            }
+        )
+
     query_ds = query_ds.with_format("torch", columns=target_modules)
 
     use_q = query_cfg.query_preconditioner_path is not None
@@ -201,20 +232,20 @@ def query_worker(
         )
 
     model, target_modules = setup_model_and_peft(index_cfg, rank)
+    model = cast(PreTrainedModel, model)
     processor = create_processor(index_cfg, rank)
 
     attention_cfgs = {
         module: index_cfg.attention for module in index_cfg.split_attention_modules
     }
 
-    query_ds = load_query_ds(query_cfg, f"cuda:{rank}")
+    query_ds = get_query_ds(query_cfg, f"cuda:{rank}", rank)
     query_grads = preprocess_grads(
         query_ds,
         query_cfg.modules,
         query_cfg.unit_normalize,
         query_cfg.batch_size,
         torch.device(f"cuda:{rank}"),
-        torch.float32,
         accumulate_grads="mean" if query_cfg.score == "mean" else "none",
         normalize_accumulated_grad=query_cfg.score == "mean",
     )
@@ -246,7 +277,7 @@ def query_worker(
             score_writer,
             index_cfg.module_wise,
             torch.device(f"cuda:{rank}"),
-            torch.float32,
+            model.dtype if model.dtype != "auto" else torch.float32,
         )
         kwargs["scorer"] = scorer
 
