@@ -48,7 +48,7 @@ def collect_gradients(
     lo = torch.finfo(dtype).min
     hi = torch.finfo(dtype).max
 
-    def callback(name: str, g: torch.Tensor, indices: list[int]):
+    def callback(name: str, g: torch.Tensor):
         g = g.flatten(1).clamp_(lo, hi)
         if cfg.save_index:
             # Asynchronously move the gradient to CPU and convert to the final dtype
@@ -56,11 +56,7 @@ def collect_gradients(
         else:
             mod_grads[name] = g.to(dtype=dtype)
 
-        if scorer and cfg.module_wise:
-            scorer(indices, mod_grads, name=name)
-
         # Compute the outer product of the flattened gradient
-
         if not cfg.skip_preconditioners:
             g = g.float()
             preconditioner = preconditioners.get(name, None)
@@ -81,7 +77,6 @@ def collect_gradients(
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
     # Allocate space ahead of time for the gradients
-
     grad_buffer = (
         create_index(
             cfg.partial_run_path,
@@ -118,8 +113,6 @@ def collect_gradients(
                 set_peft_enabled(model, True)
 
             with collector:
-                collector.indices = indices
-
                 ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
 
                 # Compute average KL across all unmasked tokens
@@ -131,8 +124,6 @@ def collect_gradients(
                 losses.mean().backward()
         else:
             with collector:
-                collector.indices = indices
-
                 logits = model(x).logits[:, :-1]
 
                 losses = F.cross_entropy(
@@ -165,10 +156,12 @@ def collect_gradients(
                 offset += mod_grads[module_name].shape[1]
 
         if scorer is not None:
-            if cfg.module_wise:
-                scorer.finalize_module_wise(indices)
-            else:
-                scorer(indices, mod_grads)
+            if grad_buffer is not None:
+                mod_grads = {
+                    name: grad.to(scorer.device) for name, grad in mod_grads.items()
+                }
+
+            scorer(indices, mod_grads)
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)

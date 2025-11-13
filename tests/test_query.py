@@ -73,7 +73,7 @@ def test_large_gradients_query(tmp_path: Path, dataset):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_query(tmp_path: Path, model, dataset):
-    cfg = IndexConfig(run_path=str(tmp_path), module_wise=False)
+    cfg = IndexConfig(run_path=str(tmp_path))
 
     processor = GradientProcessor(projection_dim=16)
     shapes = GradientCollector(model.base_model, lambda x: x, processor).shapes()
@@ -101,7 +101,6 @@ def test_query(tmp_path: Path, model, dataset):
         writer=score_writer,
         device=torch.device("cpu"),
         dtype=dtype,
-        module_wise=cfg.module_wise,
     )
 
     collect_gradients(
@@ -114,48 +113,3 @@ def test_query(tmp_path: Path, model, dataset):
 
     assert any(tmp_path.iterdir()), "Expected artifacts in the temp run_path"
     assert any(Path(tmp_path).glob("scores.bin")), "Expected scores file"
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_module_wise_query(tmp_path: Path, model, dataset):
-    index_cfg = IndexConfig(run_path=str(tmp_path), module_wise=True)
-
-    processor = GradientProcessor(projection_dim=16)
-    shapes = GradientCollector(model.base_model, lambda x: x, processor).shapes()
-
-    query_grads = {
-        module: torch.randn(1, shape.numel()) for module, shape in shapes.items()
-    }
-
-    dtype = model.dtype if model.dtype != "auto" else torch.float32
-
-    score_writer = MemmapScoreWriter(
-        tmp_path,
-        len(dataset),
-        1,
-        rank=0,
-    )
-
-    scorer = get_scorer(
-        query_grads,
-        QueryConfig(
-            query_path=str(tmp_path / "query_gradient_ds"),
-            modules=list(shapes.keys()),
-            score="mean",
-        ),
-        writer=score_writer,
-        module_wise=index_cfg.module_wise,
-        device=torch.device("cpu"),
-        dtype=dtype,
-    )
-
-    collect_gradients(
-        model=model,
-        data=dataset,
-        processor=processor,
-        cfg=index_cfg,
-        scorer=scorer,
-    )
-
-    assert any(tmp_path.iterdir()), "Expected artifacts in the temp run_path"
-    assert any(tmp_path.glob("scores.bin")), "Expected scores file"

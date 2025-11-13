@@ -275,7 +275,6 @@ def query_worker(
             query_grads,
             query_cfg,
             score_writer,
-            index_cfg.module_wise,
             torch.device(f"cuda:{rank}"),
             model.dtype if model.dtype != "auto" else torch.float32,
         )
@@ -307,7 +306,6 @@ def query_worker(
                 query_grads,
                 query_cfg,
                 score_writer,
-                index_cfg.module_wise,
                 torch.device(f"cuda:{rank}"),
                 model.dtype if model.dtype != "auto" else torch.float32,
             )
