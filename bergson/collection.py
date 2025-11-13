@@ -48,9 +48,30 @@ def collect_gradients(
     lo = torch.finfo(dtype).min
     hi = torch.finfo(dtype).max
 
+    def callback(name: str, g: torch.Tensor, indices: list[int]):
+        g = g.flatten(1).clamp_(lo, hi)
+        if cfg.save_index:
+            # Asynchronously move the gradient to CPU and convert to the final dtype
+            mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
+        else:
+            mod_grads[name] = g.to(dtype=dtype)
+
+        if scorer and cfg.module_wise:
+            scorer(indices, mod_grads, name=name)
+
+        # Compute the outer product of the flattened gradient
+
+        if not cfg.skip_preconditioners:
+            g = g.float()
+            preconditioner = preconditioners.get(name, None)
+            if preconditioner is None:
+                preconditioners[name] = g.mT @ g
+            else:
+                preconditioner.addmm_(g.mT, g)
+
     collector = GradientCollector(
         model.base_model,
-        (lambda _: _),
+        callback,
         processor,
         target_modules=target_modules,
         attention_cfgs=attention_cfgs,
@@ -60,6 +81,7 @@ def collect_gradients(
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
     # Allocate space ahead of time for the gradients
+
     grad_buffer = (
         create_index(
             cfg.partial_run_path,
@@ -78,44 +100,6 @@ def collect_gradients(
         dtype=dtype,
         fill_value=0.0,
     )
-
-    module_offsets = torch.tensor(
-        [0] + torch.cumsum(torch.tensor(list(grad_sizes.values())), dim=0).tolist()
-    )
-    module_offsets = {
-        name: (module_offsets[i], module_offsets[i + 1])
-        for i, name in enumerate(collector.shapes().keys())
-    }
-
-    def callback(name: str, g: torch.Tensor, indices: list[int]):
-        g = g.flatten(1).clamp_(lo, hi)
-
-        if cfg.module_wise:
-            if grad_buffer is not None:
-                start, end = module_offsets[name]
-                grad_buffer[indices, start:end] = g.cpu().numpy()
-
-            if scorer:
-                scorer(indices, {name: g}, name=name)
-        else:
-            if grad_buffer is not None:
-                # Asynchronously move the gradient to CPU and convert to the final dtype
-                mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
-
-            if scorer:
-                # Keep the gradient on-device if possible
-                mod_grads[name] = g.to(dtype=dtype)
-
-        # Compute the outer product of the flattened gradient
-        if not cfg.skip_preconditioners:
-            g = g.float()
-            preconditioner = preconditioners.get(name, None)
-            if preconditioner is None:
-                preconditioners[name] = g.mT @ g
-            else:
-                preconditioner.addmm_(g.mT, g)
-
-    collector.closure = callback
 
     for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
         batch = data[indices]
@@ -164,27 +148,26 @@ def collect_gradients(
 
         model.zero_grad()
 
-        if cfg.module_wise:
-            if scorer is not None:
+        if grad_buffer is not None:
+            # Weirdly you need to explicitly synchronize here in order to make
+            # sure that the nonblocking copies actually finish before we call
+            # .numpy()
+            torch.cuda.synchronize()
+
+            # It turns out that it's very important for efficiency to write the
+            # gradients sequentially instead of first concatenating them, then
+            # writing to one vector
+            offset = 0
+            for module_name in grad_sizes.keys():
+                grad_buffer[
+                    indices, offset : offset + mod_grads[module_name].shape[1]
+                ] = mod_grads[module_name].numpy()
+                offset += mod_grads[module_name].shape[1]
+
+        if scorer is not None:
+            if cfg.module_wise:
                 scorer.finalize_module_wise(indices)
-        else:
-            if grad_buffer is not None:
-                # Weirdly you need to explicitly synchronize here in order to make
-                # sure that the nonblocking copies actually finish before we call
-                # .numpy()
-                torch.cuda.synchronize()
-
-                # It turns out that it's very important for efficiency to write the
-                # gradients sequentially instead of first concatenating them, then
-                # writing to one vector
-                offset = 0
-                for module_name in grad_sizes.keys():
-                    grad_buffer[
-                        indices, offset : offset + mod_grads[module_name].shape[1]
-                    ] = mod_grads[module_name].numpy()
-                    offset += mod_grads[module_name].shape[1]
-
-            if scorer is not None:
+            else:
                 scorer(indices, mod_grads)
 
         mod_grads.clear()
