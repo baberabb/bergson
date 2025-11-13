@@ -14,7 +14,7 @@ from bergson import (
     collect_gradients,
 )
 from bergson.data import IndexConfig, QueryConfig, create_index
-from bergson.scorer import get_scorer
+from bergson.scorer import Scorer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -91,7 +91,7 @@ def test_query(tmp_path: Path, model, dataset):
         rank=0,
     )
 
-    scorer = get_scorer(
+    scorer = Scorer(
         query_grads,
         QueryConfig(
             query_path=str(tmp_path / "query_gradient_ds"),
