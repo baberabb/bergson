@@ -25,6 +25,8 @@ dev = [
     "pytest",
     "pyright",
     "trl",
+    "sphinx",
+    "sphinx-autodoc-typehints",
 ]
 example = [
     "trl",
