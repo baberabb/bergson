@@ -26,6 +26,7 @@ dev = [
     "pytest",
     "pytest-xdist",
     "pyright",
+    "setuptools",
     "trl",
     "wandb"
 ]

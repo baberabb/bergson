@@ -1,5 +1,6 @@
 name: Unit Tests
-
+env:
+  UV_SYSTEM_PYTHON: 1
 on:
   push:
     branches:
@@ -26,6 +27,8 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Pre-Commit
         uses: pre-commit/action@v3.0.1
+      - name: Type Checking
+        uses: jakebailey/pyright-action@v1
 
   testcpu:
     name: CPU Tests
@@ -45,10 +48,10 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --locked --dev
+        run: uv sync --extra dev
 
       - name: Run tests
-        run: uv run pytest --showlocals -s -vv -n=auto tests
+        run: uv run pytest tests --showlocals -s -vv -n=auto
 
       - name: Cleanup
         run: uv cache prune --ci
