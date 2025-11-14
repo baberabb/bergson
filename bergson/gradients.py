@@ -334,8 +334,8 @@ class GradientCollector(ContextDecorator):
     of the parameters, which are expected to be precomputed and passed in.
 
     We assume that the input to `model` is of shape `[N, S, I]`, where `N` is the
-    batch size, `S` is the sequence length, and `I` is the input dimension. We take the
-    mean over the sequence length to obtain a single gradient per sequence.
+    batch size, `S` is the sequence length, and `I` is the input dimension. We
+    sum over the sequence dimension to obtain a single gradient per sequence.
     """
 
     model: nn.Module
@@ -564,23 +564,18 @@ class GradientCollector(ContextDecorator):
         # we need to materialize the full gradient and then project
         if isinstance(norm, AdamNormalizer) or include_bias:
             P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
-            if include_bias:
-                # Append the bias gradient to the input
-                P = torch.cat(
-                    [
-                        P,
-                        G.sum(dim=(0, 1))
-                        .unsqueeze(0)
-                        .unsqueeze(2)
-                        .expand(P.shape[0], -1, 1),
-                    ],
-                    dim=2,
-                )
-                i += 1
-
             if isinstance(norm, AdamNormalizer):
                 # Normalize the gradients using the second moment matrix
                 P /= norm.avg_sq.sqrt().add_(1e-8)
+
+            if include_bias:
+                # TODO: should we normalize the bias gradients?
+                # Append the raw bias gradient to the input
+                P = torch.cat(
+                    [P, G.sum(dim=1).unsqueeze(2)],  # [N, S, O] -> [N, O]  # [N, O, 1]
+                    dim=2,
+                )
+                i += 1
 
             if self.processor.reshape_to_square:
                 P = reshape_to_nearest_square(P)
