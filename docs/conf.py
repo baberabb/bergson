@@ -4,6 +4,7 @@ project = "Bergson"
 copyright = "2025, EleutherAI"
 html_title = "Bergson"
 html_logo = "_static/bergson_logo.png"
+html_favicon = "_static/favicon.ico"
 
 author = (
     "Lucia Quirke" " Nora Belrose," " Louis Jaburi," " William Li," " Stella Biderman,"
