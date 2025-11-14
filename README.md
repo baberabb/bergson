@@ -1,13 +1,24 @@
 # Bergson
-This library enables you to trace the memory of deep neural nets with gradient-based data attribution techniques. We currently focus on TrackStar, as described in [Scalable Influence and Fact Tracing for Large Language Model Pretraining](https://arxiv.org/abs/2410.17413v3) by Chang et al. (2024), although we plan to add support for other methods inspired by influence functions in the near future.
+This library enables you to trace the memory of deep neural nets with gradient-based data attribution techniques. We currently focus on TrackStar, as described in [Scalable Influence and Fact Tracing for Large Language Model Pretraining](https://arxiv.org/abs/2410.17413v3) by Chang et al. (2024), and also include support for several alternative influence functions.
 
-We view attribution as a counterfactual question: **_If we "unlearned" this training sample, how would the model's behavior change?_** This formulation ties attribution to some notion of what it means to "unlearn" a training sample. Here we focus on a very simple notion of unlearning: taking a gradient _ascent_ step on the loss with respect to the training sample. To mimic the behavior of popular optimizers, we precondition the gradient using Adam or Adafactor-style estimates of the second moments of the gradient.
+We view attribution as a counterfactual question: **_If we "unlearned" this training sample, how would the model's behavior change?_** This formulation ties attribution to some notion of what it means to "unlearn" a training sample. Here we focus on a very simple notion of unlearning: taking a gradient _ascent_ step on the loss with respect to the training sample.
+
+## Core features
+
+- Gradient store for serial queries. We provide collection-time gradient compression for efficient storage, and integrate with FAISS for fast KNN search over large stores.
+- On-the-fly queries. Query uncompressed gradients without disk I/O overhead via a single pass over a dataset with a set of precomputed query gradients.
+  - Experiment with multiple query strategies based on [LESS](https://arxiv.org/pdf/2402.04333).
+- Train‑time gradient collection. Capture gradients produced during training with a ~17% performance overhead.
+- Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and other performance optimizations to support large models, datasets, and clusters.
+- Integrated with HuggingFace Transformers and Datasets. We also support on-disk datasets in a variety of formats.
+- Structured gradient views and per-attention head gradient collection. Bergson enables mechanistic interpretability via easy access to per‑module or per-attention head gradients.
 
 # Announcements
 
 **October 2025**
+- Support bias parameter gradients in linear modules: https://github.com/EleutherAI/bergson/pull/54
 - Support convolution modules: https://github.com/EleutherAI/bergson/pull/50
-- Query datasets on-the-fly, without saving gradients to disk: https://github.com/EleutherAI/bergson/pull/47
+- Query datasets on-the-fly: https://github.com/EleutherAI/bergson/pull/47
 
 **September 2025**
 - Save per-head attention gradients: https://github.com/EleutherAI/bergson/pull/40
@@ -28,11 +39,12 @@ pip install bergson
 # Quickstart
 
 ```
-python -m bergson build runs/test --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
+python -m bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
 ```
 
 # Usage
-The first step is to build an index of gradients for each training sample. You can do this from the command line, using `bergson` as a CLI tool:
+
+You can build an index of gradients for each training sample from the command line, using `bergson` as a CLI tool:
 
 ```bash
 python -m bergson build <output_path> --model <model_name> --dataset <dataset_name>
@@ -40,66 +52,22 @@ python -m bergson build <output_path> --model <model_name> --dataset <dataset_na
 
 This will create a directory at `<output_path>` containing the gradients for each training sample in the specified dataset. The `--model` and `--dataset` arguments should be compatible with the Hugging Face `transformers` library. By default it assumes that the dataset has a `text` column, but you can specify other columns using `--prompt_column` and optionally `--completion_column`. The `--help` flag will show you all available options.
 
-You can also use the library programmatically to build the index. The `collect_gradients` function is just a bit lower level the CLI tool, and allows you to specify the model and dataset directly as arguments. The result is a HuggingFace dataset which contains a handful of new columns, including `gradients`, which contains the gradients for each training sample. You can then use this dataset to compute attributions.
+You can also use the library programmatically to build an index. The `collect_gradients` function is just a bit lower level the CLI tool, and allows you to specify the model and dataset directly as arguments. The result is a HuggingFace dataset which contains a handful of new columns, including `gradients`, which contains the gradients for each training sample. You can then use this dataset to compute attributions.
 
-At the lowest level of abstraction, the `GradientCollector` context manager allows you to efficiently collect gradients for _each individual example_ in a batch during a backward pass, simultaneously randomly projecting the gradients to a lower-dimensional space to save memory. If you use Adafactor normalization, which is the default, we will do this in a very compute-efficient way which avoids computing the full gradient for each example before projecting it to the lower dimension. There are two main ways you can use `GradientCollector`:
+At the lowest level of abstraction, the `GradientCollector` context manager allows you to efficiently collect gradients for _each individual example_ in a batch during a backward pass, simultaneously randomly projecting the gradients to a lower-dimensional space to save memory. If you use Adafactor normalization we will do this in a very compute-efficient way which avoids computing the full gradient for each example before projecting it to the lower dimension. There are two main ways you can use `GradientCollector`:
 
 1. Using a `closure` argument, which enables you to make use of the per-example gradients immediately after they are computed, during the backward pass. If you're computing summary statistics or other per-example metrics, this is the most efficient way to do it.
 2. Without a `closure` argument, in which case the gradients are collected and returned as a dictionary mapping module names to batches of gradients. This is the simplest and most flexible approach but is a bit more memory-intensive.
 
-## Training Gradients
+## On-the-fly Query
 
-Gradient collection during training is supported via an integration with HuggingFace's Trainer and SFTTrainer classes. Training gradients are saved in the original order corresponding to their dataset items, and when the `track_order` flag is set the training steps associated with each training item are separately saved.
-
-```python
-from bergson import GradientCollectorCallback, prepare_for_gradient_collection
-
-callback = GradientCollectorCallback(
-    path="runs/example",
-    track_order=True,
-)
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=dataset,
-    eval_dataset=dataset,
-    callbacks=[callback],
-)
-trainer = prepare_for_gradient_collection(trainer)
-trainer.train()
-```
-
-## Attention Head Gradients
-
-By default Bergson collects gradients for named parameter matrices, but gradients for individual attention heads within an attention module can be collected too. To collect per-head gradients configure an AttentionConfig for each module of interest.
-
-```python
-from bergson import AttentionConfig, IndexConfig, DataConfig
-from transformers import AutoModelForCausalLM
-
-model = AutoModelForCausalLM.from_pretrained("RonenEldan/TinyStories-1M", trust_remote_code=True, use_safetensors=True)
-
-collect_gradients(
-    model=model,
-    data=data,
-    processor=processor,
-    path="runs/split_attention",
-    attention_cfgs={
-        # Head configuration for the TinyStories-1M transformer
-        "h.0.attn.attention.out_proj": AttentionConfig(num_heads=16, head_size=4, head_dim=2),
-    },
-)
-```
-
-## GRPO
-
-Where a reward signal is available we compute gradients using a weighted advantage estimate based on Dr. GRPO:
+You can query a large dataset without first building an index, by specifying a previously built index to query against:
 
 ```bash
-python -m bergson build <output_path> --model <model_name> --dataset <dataset_name> --reward_column <reward_column_name>
+python -m bergson query <output_path> --model <model_name> --dataset <dataset_name> --query_path <existing_index_path> --scores_path <output_path> --score mean --save_index False
 ```
 
-## Queries
+## Index Query
 
 We provide a query Attributor which supports unit normalized gradients and KNN search out of the box.
 
@@ -125,6 +93,58 @@ attr = Attributor(args.index, device="cuda", faiss_cfg=FaissConfig("IVF1,SQfp16"
 with attr.trace(model.base_model, 5) as result:
     model(query_tokens, labels=query_tokens).loss.backward()
     model.zero_grad()
+```
+
+## Training Gradients
+
+Gradient collection during training is supported via an integration with HuggingFace's Trainer and SFTTrainer classes. Training gradients are saved in the original order corresponding to their dataset items, and when the `track_order` flag is set the training steps associated with each training item are separately saved.
+
+```python
+from bergson import GradientCollectorCallback, prepare_for_gradient_collection
+
+callback = GradientCollectorCallback(
+    path="runs/example",
+    track_order=True,
+)
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=dataset,
+    eval_dataset=dataset,
+    callbacks=[callback],
+)
+trainer = prepare_for_gradient_collection(trainer)
+trainer.train()
+```
+
+## Attention Head Gradients
+
+By default Bergson collects gradients for named parameter matrices, but per-attention head gradients may be collected by configuring an AttentionConfig for each module of interest.
+
+```python
+from bergson import AttentionConfig, IndexConfig, DataConfig
+from transformers import AutoModelForCausalLM
+
+model = AutoModelForCausalLM.from_pretrained("RonenEldan/TinyStories-1M", trust_remote_code=True, use_safetensors=True)
+
+collect_gradients(
+    model=model,
+    data=data,
+    processor=processor,
+    path="runs/split_attention",
+    attention_cfgs={
+        # Head configuration for the TinyStories-1M transformer
+        "h.0.attn.attention.out_proj": AttentionConfig(num_heads=16, head_size=4, head_dim=2),
+    },
+)
+```
+
+## GRPO
+
+Where a reward signal is available we compute gradients using a weighted advantage estimate based on Dr. GRPO:
+
+```bash
+python -m bergson build <output_path> --model <model_name> --dataset <dataset_name> --reward_column <reward_column_name>
 ```
 
 # Development

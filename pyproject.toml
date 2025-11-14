@@ -20,7 +20,7 @@ dependencies = [
     "transformers",
     "wandb>=0.22.3",
 ]
-version = "0.1.1"
+version = "0.2.0"
 [project.optional-dependencies]
 dev = [
     "pre-commit",

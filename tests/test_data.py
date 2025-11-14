@@ -29,8 +29,8 @@ def test_large_gradients_build(tmp_path: Path, dataset):
     )
 
     # Load a large gradient index without structure.
-    load_gradients(tmp_path, with_structure=False)
+    load_gradients(tmp_path, structured=False)
 
     with pytest.raises(ValueError):
         # Max item size exceeded.
-        load_gradients(tmp_path, with_structure=True)
+        load_gradients(tmp_path, structured=True)

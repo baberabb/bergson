@@ -1,41 +1,31 @@
 import json
 import os
 import shutil
-import socket
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from typing import Literal, cast
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from datasets import Dataset, IterableDataset
-from peft import PeftConfig, PeftModel
-from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
-from torch.distributed.fsdp import fully_shard
 from tqdm.auto import tqdm
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    PreTrainedModel,
-)
+from transformers import PreTrainedModel
 
-from .build import estimate_advantage
 from .collection import collect_gradients
 from .data import (
     IndexConfig,
     QueryConfig,
     allocate_batches,
-    load_data_string,
     load_gradient_dataset,
-    tokenize,
+    load_gradients,
 )
+from .distributed import launch_distributed_run
 from .gradients import GradientProcessor
-from .peft import detect_peft_modules
 from .score_writer import MemmapScoreWriter
-from .scorer import get_scorer
-from .utils import assert_type, get_layer_list
+from .scorer import Scorer
+from .utils import assert_type
+from .worker_utils import create_processor, setup_data_pipeline, setup_model_and_peft
 
 
 def preprocess_grads(
@@ -44,7 +34,6 @@ def preprocess_grads(
     unit_normalize: bool,
     batch_size: int,
     device: torch.device,
-    dtype: torch.dtype,
     accumulate_grads: Literal["mean", "sum", "none"] = "none",
     normalize_accumulated_grad: bool = False,
 ) -> dict[str, torch.Tensor]:
@@ -56,7 +45,7 @@ def preprocess_grads(
     # Short-circuit if possible
     if accumulate_grads == "none" and not unit_normalize:
         return {
-            column_name: grad_ds[:][column_name].to(device=device, dtype=dtype)
+            column_name: grad_ds[:][column_name].to(device=device)
             for column_name in grad_column_names
         }
 
@@ -95,19 +84,17 @@ def preprocess_grads(
     # Process the gradient dataset
     if accumulate_grads == "mean":
         grads = {
-            column_name: (acc[column_name] / ss_acc / len(grad_ds))
-            .unsqueeze(0)
-            .to(dtype)
+            column_name: (acc[column_name] / ss_acc / len(grad_ds)).unsqueeze(0)
             for column_name in grad_column_names
         }
     elif accumulate_grads == "sum":
         grads = {
-            column_name: (acc[column_name] / ss_acc).unsqueeze(0).to(dtype)
+            column_name: (acc[column_name] / ss_acc).unsqueeze(0)
             for column_name in grad_column_names
         }
     elif accumulate_grads == "none":
         grads = {
-            column_name: grad_ds[:][column_name].to(device=device, dtype=dtype) / ss_acc
+            column_name: grad_ds[:][column_name].to(device=device) / ss_acc
             for column_name in grad_column_names
         }
     else:
@@ -124,9 +111,9 @@ def preprocess_grads(
     return grads
 
 
-def get_query_ds(query_cfg: QueryConfig):
+def get_query_ds(query_cfg: QueryConfig, device: str, rank: int | None = None):
     """
-    Load and optionally precondition the query dataset. Preconditioners
+    Load and preprocess the query dataset to get the query gradients. Preconditioners
     may be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
     """
     # Collect the query gradients if they don't exist
@@ -144,9 +131,36 @@ def get_query_ds(query_cfg: QueryConfig):
     if not query_cfg.modules:
         query_cfg.modules = target_modules
 
-    query_ds = load_gradient_dataset(
-        Path(query_cfg.query_path), concatenate_gradients=False
-    )
+    try:
+        query_ds = load_gradient_dataset(Path(query_cfg.query_path), structured=True)
+    except ValueError as e:
+        if "integer won't fit into a C int" not in str(e):
+            raise e
+
+        if rank == 0 or rank is None:
+            print(
+                "Query gradients are too large to load with structure. "
+                "Attempting to load without structure..."
+            )
+
+        mmap = load_gradients(Path(query_cfg.query_path), structured=False)
+
+        # Convert unstructured gradients to a dictionary of module-wise tensors
+        with open(query_path / "info.json", "r") as f:
+            metadata = json.load(f)
+            grad_sizes = metadata["grad_sizes"]
+
+        sizes = torch.tensor(list(grad_sizes.values()))
+        module_offsets = torch.tensor([0] + torch.cumsum(sizes, dim=0).tolist())
+
+        query_ds = Dataset.from_dict(
+            {
+                name: mmap[:, module_offsets[i] : module_offsets[i + 1]].copy()
+                for i, name in enumerate(grad_sizes.keys())
+                if name in target_modules
+            }
+        )
+
     query_ds = query_ds.with_format("torch", columns=target_modules)
 
     use_q = query_cfg.query_preconditioner_path is not None
@@ -158,12 +172,12 @@ def get_query_ds(query_cfg: QueryConfig):
             assert query_cfg.query_preconditioner_path is not None
             q = GradientProcessor.load(
                 Path(query_cfg.query_preconditioner_path),
-                map_location="cuda",
+                map_location=device,
             ).preconditioners
         if use_i:
             assert query_cfg.index_preconditioner_path is not None
             i = GradientProcessor.load(
-                Path(query_cfg.index_preconditioner_path), map_location="cuda"
+                Path(query_cfg.index_preconditioner_path), map_location=device
             ).preconditioners
 
         mixed_preconditioner = (
@@ -175,11 +189,15 @@ def get_query_ds(query_cfg: QueryConfig):
             if (q and i)
             else (q or i)
         )
-        mixed_preconditioner = {k: v.cuda() for k, v in mixed_preconditioner.items()}
+        mixed_preconditioner = {
+            k: v.to(device) for k, v in mixed_preconditioner.items()
+        }
 
         def precondition(batch):
             for name in target_modules:
-                batch[name] = (batch[name].cuda() @ mixed_preconditioner[name]).cpu()
+                batch[name] = (
+                    batch[name].to(device) @ mixed_preconditioner[name]
+                ).cpu()
 
             return batch
 
@@ -190,7 +208,7 @@ def get_query_ds(query_cfg: QueryConfig):
     return query_ds.with_format("torch", columns=query_cfg.modules)
 
 
-def worker(
+def query_worker(
     rank: int,
     world_size: int,
     index_cfg: IndexConfig,
@@ -213,167 +231,61 @@ def worker(
             world_size=world_size,
         )
 
-    match index_cfg.precision:
-        case "bf16":
-            dtype = torch.bfloat16
-        case "fp16":
-            dtype = torch.float16
-        case "fp32":
-            dtype = torch.float32
-        case "int4" | "int8":
-            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        case "auto":
-            dtype = "auto"
-        case other:
-            raise ValueError(f"Unsupported precision: {other}")
+    model, target_modules = setup_model_and_peft(index_cfg, rank)
+    model = cast(PreTrainedModel, model)
+    processor = create_processor(index_cfg, rank)
 
-    device_map = {"": f"cuda:{rank}"} if not index_cfg.fsdp else "cpu"
-    quantization_config = None
-    if index_cfg.precision in ("int4", "int8"):
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=index_cfg.precision == "int4",
-            load_in_8bit=index_cfg.precision == "int8",
-            bnb_4bit_compute_dtype=dtype,
-            bnb_4bit_quant_storage=dtype,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-        )
+    attention_cfgs = {
+        module: index_cfg.attention for module in index_cfg.split_attention_modules
+    }
 
-    # Try to detect PEFT model
-    try:
-        peft_config = PeftConfig.from_pretrained(index_cfg.model)
-    except ValueError:
-        peft_config = None
-
-    if peft_config is None:
-        # Load regular model
-        model = AutoModelForCausalLM.from_pretrained(
-            index_cfg.model,
-            device_map=device_map,
-            quantization_config=quantization_config,
-            dtype=dtype,
-            revision=index_cfg.revision,
-        )
-        target_modules = None
-
-    else:
-        # Load PEFT model
-        base_model = AutoModelForCausalLM.from_pretrained(
-            peft_config.base_model_name_or_path,  # type: ignore
-            device_map=device_map,
-            quantization_config=quantization_config,
-            dtype=dtype,
-            revision=index_cfg.revision,
-        )
-
-        model = PeftModel.from_pretrained(  # type: ignore
-            base_model,
-            index_cfg.model,
-            device_map=device_map,
-            autocast_adapter_dtype=False,
-        )
-        target_modules = detect_peft_modules(model)
-
-        # Hack for type checking
-        model = cast(PreTrainedModel, model)
-
-    if rank == 0:
-        print(f"Model loaded with dtype: {model.dtype}")
-
-    embed = model.get_input_embeddings()
-    model.requires_grad_(False)  # Freeze the model
-    embed.requires_grad_(True)  # Make sure backward hooks are called though
-
-    if index_cfg.fsdp:
-        # Shard each individual transformer layer
-        for layer in get_layer_list(model):
-            fully_shard(layer)
-
-        # Shard the entire model
-        fully_shard(model)
-
-    processor_dir = Path(index_cfg.processor_path or index_cfg.run_path)
-    processor_cfg_path = processor_dir / "processor_config.json"
-
-    if os.path.exists(processor_cfg_path):
-        if rank == 0:
-            print(f"Loading processor from '{processor_dir}'")
-
-        processor = GradientProcessor.load(
-            processor_dir,
-            map_location=f"cuda:{rank}",
-        )
-    else:
-        processor = GradientProcessor(
-            {},
-            projection_dim=index_cfg.projection_dim or None,
-            reshape_to_square=index_cfg.reshape_to_square,
-            projection_type=index_cfg.projection_type,
-            include_bias=index_cfg.include_bias,
-        )
-        if rank == 0:
-            processor.save(index_cfg.partial_run_path)
-
-    if index_cfg.split_attention_modules:
-        attention_cfgs = {
-            module: index_cfg.attention for module in index_cfg.split_attention_modules
-        }
-    else:
-        attention_cfgs = {}
-
-    # score_writer_dtype = dtype if dtype != "auto" else torch.float32
-    score_writer_dtype = torch.float32
-
-    query_ds = get_query_ds(query_cfg)
+    query_ds = get_query_ds(query_cfg, f"cuda:{rank}", rank)
     query_grads = preprocess_grads(
         query_ds,
         query_cfg.modules,
         query_cfg.unit_normalize,
         query_cfg.batch_size,
         torch.device(f"cuda:{rank}"),
-        score_writer_dtype,
         accumulate_grads="mean" if query_cfg.score == "mean" else "none",
         normalize_accumulated_grad=query_cfg.score == "mean",
     )
+
     num_scores = len(query_grads[query_cfg.modules[0]])
 
+    kwargs = {
+        "model": model,
+        "data": ds,
+        "processor": processor,
+        "cfg": index_cfg,
+        "target_modules": target_modules,
+        "attention_cfgs": attention_cfgs,
+    }
+
     if isinstance(ds, Dataset):
-        batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
+        batches = allocate_batches(ds["length"], index_cfg.token_batch_size)
+        kwargs["batches"] = batches
+
         score_writer = MemmapScoreWriter(
             Path(query_cfg.scores_path),
             len(ds),
             num_scores,
             rank=rank,
         )
-        scorer = get_scorer(
+        scorer = Scorer(
             query_grads,
             query_cfg,
-            score_writer,
-            index_cfg.module_wise,
-            torch.device(f"cuda:{rank}"),
-            score_writer_dtype,
+            writer=score_writer,
+            device=torch.device(f"cuda:{rank}"),
+            dtype=model.dtype if model.dtype != "auto" else torch.float32,
         )
-        collect_gradients(
-            model,
-            ds,
-            processor,
-            index_cfg.partial_run_path,
-            batches=batches,
-            kl_divergence=index_cfg.loss_fn == "kl",
-            loss_reduction=index_cfg.loss_reduction,
-            skip_preconditioners=index_cfg.skip_preconditioners,
-            target_modules=target_modules,
-            attention_cfgs=attention_cfgs,
-            drop_columns=index_cfg.drop_columns,
-            scorer=scorer,
-            save_index=index_cfg.save_index,
-            module_wise=index_cfg.module_wise,
-        )
+        kwargs["scorer"] = scorer
+
+        collect_gradients(**kwargs)
     else:
-        # Convert each shard to a Dataset then collect its gradients
+        # Convert each shard to a Dataset then map over its gradients
         buf, shard_id = [], 0
 
-        def flush():
+        def flush(kwargs):
             nonlocal buf, shard_id
             if not buf:
                 return
@@ -381,6 +293,8 @@ def worker(
             batches = allocate_batches(
                 ds_shard["length"][:], index_cfg.token_batch_size
             )
+            kwargs["ds"] = ds_shard
+            kwargs["batches"] = batches
 
             score_writer = MemmapScoreWriter(
                 Path(query_cfg.scores_path) / f"shard-{shard_id:05d}",
@@ -388,118 +302,37 @@ def worker(
                 num_scores,
                 rank=rank,
             )
-            scorer = get_scorer(
+            scorer = Scorer(
                 query_grads,
                 query_cfg,
                 score_writer,
-                index_cfg.module_wise,
                 torch.device(f"cuda:{rank}"),
-                score_writer_dtype,
+                model.dtype if model.dtype != "auto" else torch.float32,
             )
-            collect_gradients(
-                model,
-                ds_shard,
-                processor,
-                index_cfg.partial_run_path / f"shard-{shard_id:05d}",
-                batches=batches,
-                kl_divergence=index_cfg.loss_fn == "kl",
-                loss_reduction=index_cfg.loss_reduction,
-                skip_preconditioners=index_cfg.skip_preconditioners,
-                target_modules=target_modules,
-                attention_cfgs=attention_cfgs,
-                drop_columns=index_cfg.drop_columns,
-                scorer=scorer,
-                save_index=index_cfg.save_index,
-            )
+            kwargs["scorer"] = scorer
+
+            collect_gradients(**kwargs)
+
             buf.clear()
             shard_id += 1
 
-        for ex in tqdm(ds, desc="Querying gradients on the fly", disable=rank != 0):
+        for ex in tqdm(ds, desc="Collecting gradients"):
             buf.append(ex)
             if len(buf) == index_cfg.stream_shard_size:
-                flush()
-        flush()
+                flush(kwargs=kwargs)
 
+        flush(kwargs=kwargs)  # Final flush
         if rank == 0:
             processor.save(index_cfg.partial_run_path)
 
 
-def dist_worker(
-    rank: int,
-    world_size: int,
-    index_cfg: IndexConfig,
-    query_cfg: QueryConfig,
-    ds: Dataset,
-):
-    try:
-        worker(rank, world_size, index_cfg, query_cfg, ds)
-    finally:
-        dist.destroy_process_group()
+def query(cfg: IndexConfig, query_cfg: QueryConfig):
+    cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
+    with (cfg.partial_run_path / "index_config.json").open("w") as f:
+        json.dump(asdict(cfg), f, indent=2)
 
+    ds = setup_data_pipeline(cfg)
 
-def query_gradient_dataset(query_cfg: QueryConfig, index_cfg: IndexConfig):
-    # In many cases the token_batch_size may be smaller than the max length allowed by
-    # the model. If cfg.data.truncation is True, we use the tokenizer to truncate
-    tokenizer = AutoTokenizer.from_pretrained(
-        index_cfg.model, revision=index_cfg.revision
-    )
-    tokenizer.model_max_length = min(
-        tokenizer.model_max_length, index_cfg.token_batch_size
-    )
+    launch_distributed_run("query", query_worker, [cfg, query_cfg, ds])
 
-    # Do all the data loading and preprocessing on the main process
-    ds = load_data_string(
-        index_cfg.data.dataset, index_cfg.data.split, streaming=index_cfg.streaming
-    )
-
-    remove_columns = ds.column_names if index_cfg.drop_columns else None
-    ds = ds.map(
-        tokenize,
-        batched=True,
-        fn_kwargs=dict(args=index_cfg.data, tokenizer=tokenizer),
-        remove_columns=remove_columns,
-    )
-    if index_cfg.data.reward_column:
-        assert isinstance(ds, Dataset), "Dataset required for advantage estimation"
-        ds = ds.add_column(
-            "advantage",
-            estimate_advantage(ds, index_cfg.data),
-            new_fingerprint="advantage",  # type: ignore
-        )
-
-    world_size = torch.cuda.device_count()
-    if world_size <= 1:
-        # Run the worker directly if no distributed training is needed. This is great
-        # for debugging purposes.
-        worker(0, 1, index_cfg, query_cfg, ds)
-    else:
-        # Set up multiprocessing and distributed training
-        mp.set_sharing_strategy("file_system")
-
-        # Find an available port for distributed training
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            _, port = s.getsockname()
-
-        ctx = start_processes(
-            "query",
-            dist_worker,
-            args={
-                i: (i, world_size, index_cfg, query_cfg, ds) for i in range(world_size)
-            },
-            envs={
-                i: {
-                    "LOCAL_RANK": str(i),
-                    "MASTER_ADDR": "localhost",
-                    "MASTER_PORT": str(port),
-                }
-                for i in range(world_size)
-            },
-            logs_specs=DefaultLogsSpecs(),
-        )
-        ctx.wait()
-
-    try:
-        shutil.move(index_cfg.partial_run_path, index_cfg.run_path)
-    except Exception:
-        pass
+    shutil.move(cfg.partial_run_path, cfg.run_path)

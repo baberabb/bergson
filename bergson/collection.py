@@ -1,6 +1,4 @@
 import math
-from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import torch
@@ -10,29 +8,23 @@ from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from .data import create_index, pad_and_tensor
+from bergson.scorer import Scorer
+
+from .data import IndexConfig, create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
-from .scorer import Scorer
 
 
 def collect_gradients(
     model: PreTrainedModel,
     data: Dataset,
     processor: GradientProcessor,
-    path: Path,
+    cfg: IndexConfig,
     *,
     batches: list[list[int]] | None = None,
-    kl_divergence: bool | None = None,
-    loss_reduction: Literal["mean", "sum"] = "mean",
-    skip_preconditioners: bool = False,
     target_modules: set[str] | None = None,
     attention_cfgs: dict[str, AttentionConfig] | None = None,
-    save_index: bool = True,
-    drop_columns: bool = False,
     scorer: Scorer | None = None,
-    token_batch_size: int | None = None,
-    module_wise: bool = False,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -56,19 +48,16 @@ def collect_gradients(
     lo = torch.finfo(dtype).min
     hi = torch.finfo(dtype).max
 
-    def callback(name: str, g: torch.Tensor, indices: list[int]):
+    def callback(name: str, g: torch.Tensor):
         g = g.flatten(1).clamp_(lo, hi)
-        if save_index:
+        if cfg.save_index:
             # Asynchronously move the gradient to CPU and convert to the final dtype
             mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
         else:
             mod_grads[name] = g.to(dtype=dtype)
 
-        if scorer and module_wise:
-            scorer(indices, mod_grads, name=name)
-
         # Compute the outer product of the flattened gradient
-        if not skip_preconditioners:
+        if not cfg.skip_preconditioners:
             g = g.float()
             preconditioner = preconditioners.get(name, None)
             if preconditioner is None:
@@ -90,13 +79,13 @@ def collect_gradients(
     # Allocate space ahead of time for the gradients
     grad_buffer = (
         create_index(
-            path,
+            cfg.partial_run_path,
             num_grads=len(data),
             grad_sizes=grad_sizes,
             dtype=np_dtype,
             with_structure=False,
         )
-        if save_index
+        if cfg.save_index
         else None
     )
 
@@ -115,17 +104,15 @@ def collect_gradients(
             device=model.device,
         )
         masks = y[:, 1:] != -100
-        denoms = masks.sum(dim=1, dtype=dtype) if loss_reduction == "mean" else 1.0
+        denoms = masks.sum(dim=1, dtype=dtype) if cfg.loss_reduction == "mean" else 1.0
 
-        if kl_divergence:
+        if cfg.loss_fn == "kl":
             with torch.inference_mode():
                 set_peft_enabled(model, False)
                 ref_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
                 set_peft_enabled(model, True)
 
             with collector:
-                collector.indices = indices
-
                 ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
 
                 # Compute average KL across all unmasked tokens
@@ -137,8 +124,6 @@ def collect_gradients(
                 losses.mean().backward()
         else:
             with collector:
-                collector.indices = indices
-
                 logits = model(x).logits[:, :-1]
 
                 losses = F.cross_entropy(
@@ -171,10 +156,12 @@ def collect_gradients(
                 offset += mod_grads[module_name].shape[1]
 
         if scorer is not None:
-            if module_wise:
-                scorer.finalize_module_wise(indices)
-            else:
-                scorer(indices, mod_grads)
+            if grad_buffer is not None:
+                mod_grads = {
+                    name: grad.to(scorer.device) for name, grad in mod_grads.items()
+                }
+
+            scorer(indices, mod_grads)
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
@@ -185,7 +172,7 @@ def collect_gradients(
         dist.reduce(per_doc_losses, dst=0)
 
     if rank == 0:
-        if drop_columns:
+        if cfg.drop_columns:
             data = data.remove_columns(["input_ids"])
 
         data = data.add_column(
@@ -194,9 +181,10 @@ def collect_gradients(
             feature=Value("float16" if dtype == torch.float16 else "float32"),
             new_fingerprint="loss",
         )
-        data.save_to_disk(path / "data.hf")
 
-        processor.save(path)
+        data.save_to_disk(cfg.partial_run_path / "data.hf")
+
+        processor.save(cfg.partial_run_path)
 
     # Make sure the gradients are written to disk
     if grad_buffer is not None:

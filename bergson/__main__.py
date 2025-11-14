@@ -4,9 +4,9 @@ from typing import Optional, Union
 
 from simple_parsing import ArgumentParser, ConflictResolution
 
-from .build import build_gradient_dataset
+from .build import build
 from .data import IndexConfig, QueryConfig
-from .query import query_gradient_dataset
+from .query import query
 
 
 @dataclass
@@ -22,7 +22,7 @@ class Build:
                 "Either save_index must be True or skip_preconditioners must be False"
             )
 
-        build_gradient_dataset(self.cfg)
+        build(self.cfg)
 
 
 @dataclass
@@ -46,7 +46,7 @@ class Query:
                 "Attributor instead."
             )
 
-        query_gradient_dataset(self.query_cfg, self.index_cfg)
+        query(self.index_cfg, self.query_cfg)
 
 
 @dataclass
