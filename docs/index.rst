@@ -25,9 +25,7 @@ Build an index of gradients:
 
    python -m bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
 
-Indices and tables
+Content Index
 ==================
 
 * :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`

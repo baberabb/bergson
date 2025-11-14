@@ -5,6 +5,7 @@ API Reference
    :members:
    :undoc-members:
    :show-inheritance:
+   :exclude-members: GradientCollector, collect_gradients, Attributor
 
 Gradient Collection
 -------------------
