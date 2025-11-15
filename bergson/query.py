@@ -253,7 +253,6 @@ def query_worker(
         kwargs["scorer"] = Scorer(
             Path(query_cfg.scores_path),
             len(ds),
-            rank,
             query_grads,
             query_cfg,
             device=torch.device(f"cuda:{rank}"),
@@ -279,7 +278,6 @@ def query_worker(
             kwargs["scorer"] = Scorer(
                 Path(query_cfg.scores_path) / f"shard-{shard_id:05d}",
                 len(ds_shard),
-                rank,
                 query_grads,
                 query_cfg,
                 torch.device(f"cuda:{rank}"),

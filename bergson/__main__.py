@@ -27,14 +27,14 @@ class Build:
 
 @dataclass
 class Query:
-    """Query the gradient dataset."""
+    """Query a dataset against an existing index on the fly."""
 
     query_cfg: QueryConfig
 
     index_cfg: IndexConfig
 
     def execute(self):
-        """Query the gradient dataset."""
+        """Query a dataset against an existing index on the fly."""
         assert self.query_cfg.scores_path
         assert self.query_cfg.query_path
 

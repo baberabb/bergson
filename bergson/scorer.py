@@ -20,7 +20,6 @@ class Scorer:
         self,
         scores_path: Path,
         num_items: int,
-        rank: int,
         query_grads: dict[str, torch.Tensor],
         query_cfg: QueryConfig,
         device: torch.device,
@@ -29,7 +28,6 @@ class Scorer:
         self.device = device
         self.dtype = dtype
         self.num_items = num_items
-        self.rank = rank
 
         self.callback = self.build_scorer_callback(
             query_grads,
@@ -42,7 +40,6 @@ class Scorer:
             scores_path,
             num_items,
             num_scores,
-            rank=rank,
         )
 
     def __call__(

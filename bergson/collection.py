@@ -31,9 +31,6 @@ def collect_gradients(
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
 
-    if attention_cfgs is None:
-        attention_cfgs = {}
-
     # Batch size of one by default
     if batches is None:
         batches = [[idx] for idx in range(len(data))]
@@ -70,7 +67,7 @@ def collect_gradients(
         callback,
         processor,
         target_modules=target_modules,
-        attention_cfgs=attention_cfgs,
+        attention_cfgs=attention_cfgs or {},
     )
 
     # Allocate space ahead of time for the gradients

@@ -86,7 +86,6 @@ def test_query(tmp_path: Path, model, dataset):
     scorer = Scorer(
         tmp_path,
         len(dataset),
-        0,
         query_grads,
         QueryConfig(
             query_path=str(tmp_path / "query_gradient_ds"),

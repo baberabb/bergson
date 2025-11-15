@@ -13,11 +13,6 @@ Usage
 Commands
 --------
 
-Build
-~~~~~
-
-Build a gradient dataset.
-
 .. code-block:: bash
 
    bergson build [OPTIONS]
@@ -26,13 +21,6 @@ Build a gradient dataset.
    :members:
    :undoc-members:
    :show-inheritance:
-
-Configuration
-^^^^^^^^^^^^^
-
-.. autoclass:: bergson.data.IndexConfig
-   :members:
-   :undoc-members:
 
 **Example:**
 
@@ -43,11 +31,6 @@ Configuration
        --cfg.dataset NeelNanda/pile-10k \
        --cfg.save_index true
 
-Query
-~~~~~
-
-Query the gradient dataset.
-
 .. code-block:: bash
 
    bergson query [OPTIONS]
@@ -56,6 +39,15 @@ Query the gradient dataset.
    :members:
    :undoc-members:
    :show-inheritance:
+
+**Example:**
+
+.. code-block:: bash
+
+   bergson query \
+       --query_cfg.query_path /path/to/query \
+       --query_cfg.scores_path /path/to/scores \
+       --index_cfg.run_path /path/to/index
 
 Configuration
 ^^^^^^^^^^^^^
@@ -83,12 +75,3 @@ Attention Configuration:
 .. autoclass:: bergson.data.AttentionConfig
    :members:
    :undoc-members:
-
-**Example:**
-
-.. code-block:: bash
-
-   bergson query \
-       --query_cfg.query_path /path/to/query \
-       --query_cfg.scores_path /path/to/scores \
-       --index_cfg.run_path /path/to/index

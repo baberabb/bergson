@@ -42,13 +42,11 @@ class MemmapScoreWriter(ScoreWriter):
         num_items: int,
         num_scores: int,
         *,
-        rank: int,
         dtype: torch.dtype = torch.float32,
         flush_interval: int = 64,
     ):
         self.scores_path = scores_path
         self.num_scores = num_scores
-        self.rank = rank
         self.dtype = dtype
         self.flush_interval = flush_interval
 
@@ -81,6 +79,7 @@ class MemmapScoreWriter(ScoreWriter):
             "itemsize": itemsize,
         }
 
+        rank = dist.get_rank() if dist.is_initialized() else 0
         if rank == 0 and not scores_file_path.exists():
             print(f"Creating new scores file: {scores_file_path}")
 
