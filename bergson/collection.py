@@ -8,7 +8,7 @@ from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from bergson.scorer import Scorer
+from bergson.score.scorer import Scorer
 
 from .data import IndexConfig, create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor

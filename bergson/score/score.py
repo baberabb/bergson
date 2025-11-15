@@ -12,19 +12,23 @@ from datasets import Dataset, IterableDataset
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from .collection import collect_gradients
-from .data import (
+from bergson.collection import collect_gradients
+from bergson.data import (
     IndexConfig,
-    QueryConfig,
+    ScoreConfig,
     allocate_batches,
     load_gradient_dataset,
     load_gradients,
 )
-from .distributed import launch_distributed_run
-from .gradients import GradientProcessor
-from .scorer import Scorer
-from .utils import assert_type
-from .worker_utils import create_processor, setup_data_pipeline, setup_model_and_peft
+from bergson.distributed import launch_distributed_run
+from bergson.gradients import GradientProcessor
+from bergson.score.scorer import Scorer
+from bergson.utils import assert_type
+from bergson.worker_utils import (
+    create_processor,
+    setup_data_pipeline,
+    setup_model_and_peft,
+)
 
 
 def preprocess_grads(
@@ -110,7 +114,7 @@ def preprocess_grads(
     return grads
 
 
-def get_query_ds(query_cfg: QueryConfig, device: str, rank: int | None = None):
+def get_query_ds(query_cfg: ScoreConfig, device: str, rank: int | None = None):
     """
     Load and preprocess the query dataset to get the query gradients. Preconditioners
     may be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
@@ -211,7 +215,7 @@ def query_worker(
     rank: int,
     world_size: int,
     index_cfg: IndexConfig,
-    query_cfg: QueryConfig,
+    query_cfg: ScoreConfig,
     ds: Dataset | IterableDataset,
     query_grads: dict[str, torch.Tensor],
 ):
@@ -299,7 +303,7 @@ def query_worker(
             processor.save(index_cfg.partial_run_path)
 
 
-def query(cfg: IndexConfig, query_cfg: QueryConfig):
+def score_dataset(cfg: IndexConfig, query_cfg: ScoreConfig):
     cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
     with (cfg.partial_run_path / "index_config.json").open("w") as f:
         json.dump(asdict(cfg), f, indent=2)

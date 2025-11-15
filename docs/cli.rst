@@ -8,7 +8,7 @@ Usage
 
 .. code-block:: bash
 
-   bergson {build,query} [OPTIONS]
+   bergson {build,query,score} [OPTIONS]
 
 Commands
 --------
@@ -26,10 +26,9 @@ Commands
 
 .. code-block:: bash
 
-   bergson build runs/my-run \
-       --cfg.model EleutherAI/pythia-14m \
-       --cfg.dataset NeelNanda/pile-10k \
-       --cfg.save_index true
+   bergson build runs/my-index \
+       --model EleutherAI/pythia-14m \
+       --dataset NeelNanda/pile-10k \
 
 .. code-block:: bash
 
@@ -45,18 +44,30 @@ Commands
 .. code-block:: bash
 
    bergson query \
-       --query_cfg.query_path /path/to/query \
-       --query_cfg.scores_path /path/to/scores \
-       --index_cfg.run_path /path/to/index
+       --index runs/my-index
+
+.. code-block:: bash
+
+   bergson score [OPTIONS]
+
+.. autoclass:: bergson.__main__.Score
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+**Example:**
+
+.. code-block:: bash
+
+   bergson score \
+        runs/my-index-metadata \
+        --query_path /runs/my-index \
+        --scores_path /runs/scores \
+        --dataset EleutherAI/SmolLM2-135M-10B
+
 
 Configuration
 ^^^^^^^^^^^^^
-
-Query Configuration:
-
-.. autoclass:: bergson.data.QueryConfig
-   :members:
-   :undoc-members:
 
 Index Configuration:
 
@@ -73,5 +84,17 @@ Data Configuration:
 Attention Configuration:
 
 .. autoclass:: bergson.data.AttentionConfig
+   :members:
+   :undoc-members:
+
+Query Configuration:
+
+.. autoclass:: bergson.data.QueryConfig
+   :members:
+   :undoc-members:
+
+Score Configuration:
+
+.. autoclass:: bergson.data.ScoreConfig
    :members:
    :undoc-members:

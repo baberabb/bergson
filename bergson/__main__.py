@@ -5,18 +5,19 @@ from typing import Optional, Union
 from simple_parsing import ArgumentParser, ConflictResolution
 
 from .build import build
-from .data import IndexConfig, QueryConfig
-from .query import query
+from .data import IndexConfig, ScoreConfig
+from .query.query_index import QueryConfig, query
+from .score.score import score_dataset
 
 
 @dataclass
 class Build:
-    """Build the gradient dataset."""
+    """Build a gradient index."""
 
     cfg: IndexConfig
 
     def execute(self):
-        """Build the gradient dataset."""
+        """Build the gradient index."""
         if not self.cfg.save_index and self.cfg.skip_preconditioners:
             raise ValueError(
                 "Either save_index must be True or skip_preconditioners must be False"
@@ -26,34 +27,45 @@ class Build:
 
 
 @dataclass
-class Query:
-    """Query a dataset against an existing index on the fly."""
+class Score:
+    """Score a dataset against an existing gradient index."""
 
-    query_cfg: QueryConfig
+    score_cfg: ScoreConfig
 
     index_cfg: IndexConfig
 
     def execute(self):
-        """Query a dataset against an existing index on the fly."""
-        assert self.query_cfg.scores_path
-        assert self.query_cfg.query_path
+        """Score a dataset against an existing gradient index."""
+        assert self.score_cfg.scores_path
+        assert self.score_cfg.query_path
 
         if os.path.exists(self.index_cfg.run_path) and self.index_cfg.save_index:
             raise ValueError(
                 "Index path already exists and save_index is True - "
-                "running this query will overwrite the existing gradients. "
-                "If you meant to query the existing gradients use "
+                "running this will overwrite the existing gradients. "
+                "If you meant to query an existing gradient dataset use "
                 "Attributor instead."
             )
 
-        query(self.index_cfg, self.query_cfg)
+        score_dataset(self.index_cfg, self.score_cfg)
+
+
+@dataclass
+class Query:
+    """Query an existing gradient index."""
+
+    cfg: QueryConfig
+
+    def execute(self):
+        """Query an existing gradient index."""
+        query(self.cfg)
 
 
 @dataclass
 class Main:
     """Routes to the subcommands."""
 
-    command: Union[Build, Query]
+    command: Union[Build, Query, Score]
 
     def execute(self):
         """Run the script."""

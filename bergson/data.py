@@ -71,7 +71,7 @@ class AttentionConfig:
 
 
 @dataclass
-class QueryConfig:
+class ScoreConfig:
     """Config for querying an index on the fly."""
 
     query_path: str = ""

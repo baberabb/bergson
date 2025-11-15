@@ -3,8 +3,8 @@ from typing import Callable
 
 import torch
 
-from .data import QueryConfig
-from .score_writer import MemmapScoreWriter, ScoreWriter
+from bergson.data import ScoreConfig
+from bergson.score.score_writer import MemmapScoreWriter, ScoreWriter
 
 
 class Scorer:
@@ -21,7 +21,7 @@ class Scorer:
         scores_path: Path,
         num_items: int,
         query_grads: dict[str, torch.Tensor],
-        query_cfg: QueryConfig,
+        query_cfg: ScoreConfig,
         device: torch.device,
         dtype: torch.dtype,
     ):
@@ -53,7 +53,7 @@ class Scorer:
     def build_scorer_callback(
         self,
         query_grads: dict[str, torch.Tensor],
-        query_cfg: QueryConfig,
+        query_cfg: ScoreConfig,
     ) -> Callable:
         """Unified scorer builder for all scorer types."""
         query_tensor = torch.cat(
