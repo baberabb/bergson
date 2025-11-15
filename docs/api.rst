@@ -2,4 +2,4 @@
    :members:
    :undoc-members:
    :show-inheritance:
-   .. :exclude-members: GradientCollector
+   :exclude-members: AttentionConfig, DataConfig, IndexConfig, QueryConfig

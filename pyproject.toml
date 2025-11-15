@@ -32,7 +32,6 @@ dev = [
     "sphinx-autodoc-typehints",
     "sphinx-rtd-theme",
     "nbsphinx",
-    "sphinxcontrib-autoprogram",
 ]
 example = [
     "trl",

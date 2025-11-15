@@ -4,8 +4,13 @@ Bergson Documentation
 Bergson is a library for tracing the memory of deep neural nets with gradient-based data attribution techniques.
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 4
    :caption: API Reference:
+
+   cli
+
+.. toctree::
+   :maxdepth: 1
 
    api
 
