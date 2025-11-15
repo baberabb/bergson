@@ -1,9 +1,10 @@
+from pathlib import Path
 from typing import Callable
 
 import torch
 
 from .data import QueryConfig
-from .score_writer import ScoreWriter
+from .score_writer import MemmapScoreWriter, ScoreWriter
 
 
 class Scorer:
@@ -17,20 +18,31 @@ class Scorer:
 
     def __init__(
         self,
+        scores_path: Path,
+        num_items: int,
+        rank: int,
         query_grads: dict[str, torch.Tensor],
         query_cfg: QueryConfig,
-        writer: ScoreWriter,
         device: torch.device,
         dtype: torch.dtype,
     ):
-        self.num_scores = len(query_grads[query_cfg.modules[0]])
-        self.writer = writer
         self.device = device
         self.dtype = dtype
+        self.num_items = num_items
+        self.rank = rank
 
         self.callback = self.build_scorer_callback(
             query_grads,
             query_cfg,
+        )
+
+        num_scores = len(query_grads[query_cfg.modules[0]])
+
+        self.writer = MemmapScoreWriter(
+            scores_path,
+            num_items,
+            num_scores,
+            rank=rank,
         )
 
     def __call__(

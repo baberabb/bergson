@@ -1,6 +1,3 @@
-API Reference
-=============
-
 .. automodule:: bergson
    :members:
    :undoc-members:

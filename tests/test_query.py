@@ -10,7 +10,6 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from bergson import (
     GradientCollector,
     GradientProcessor,
-    MemmapScoreWriter,
     collect_gradients,
 )
 from bergson.data import IndexConfig, QueryConfig, create_index
@@ -84,21 +83,16 @@ def test_query(tmp_path: Path, model, dataset):
 
     dtype = model.dtype if model.dtype != "auto" else torch.float32
 
-    score_writer = MemmapScoreWriter(
+    scorer = Scorer(
         tmp_path,
         len(dataset),
-        1,
-        rank=0,
-    )
-
-    scorer = Scorer(
+        0,
         query_grads,
         QueryConfig(
             query_path=str(tmp_path / "query_gradient_ds"),
             modules=list(shapes.keys()),
             score="mean",
         ),
-        writer=score_writer,
         device=torch.device("cpu"),
         dtype=dtype,
     )
