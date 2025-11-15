@@ -47,6 +47,10 @@ class Scorer:
         indices: list[int],
         mod_grads: dict[str, torch.Tensor],
     ):
+        first_grad = next(iter(mod_grads.values()))
+        if first_grad.dtype != self.dtype:
+            mod_grads = {name: grad.to(self.device) for name, grad in mod_grads.items()}
+
         scores = self.callback(mod_grads)
         self.writer(indices, scores)
 

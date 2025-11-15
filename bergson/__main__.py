@@ -5,8 +5,9 @@ from typing import Optional, Union
 from simple_parsing import ArgumentParser, ConflictResolution
 
 from .build import build
-from .data import IndexConfig, ScoreConfig
+from .data import IndexConfig, ReduceConfig, ScoreConfig
 from .query.query_index import QueryConfig, query
+from .reduce import reduce
 from .score.score import score_dataset
 
 
@@ -24,6 +25,19 @@ class Build:
             )
 
         build(self.cfg)
+
+
+@dataclass
+class Reduce:
+    """Reduce a gradient index."""
+
+    reduce_cfg: ReduceConfig
+
+    index_cfg: IndexConfig
+
+    def execute(self):
+        """Reduce a gradient index."""
+        reduce(self.index_cfg, self.reduce_cfg)
 
 
 @dataclass
