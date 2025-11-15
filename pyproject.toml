@@ -25,12 +25,14 @@ dev = [
     "pytest",
     "pyright",
     "trl",
+    # Generate documentation
     "furo",
     "myst-parser",
     "sphinx",
     "sphinx-autodoc-typehints",
     "sphinx-rtd-theme",
     "nbsphinx",
+    "sphinxcontrib-autoprogram",
 ]
 example = [
     "trl",

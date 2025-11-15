@@ -60,9 +60,15 @@ class Main:
         self.command.execute()
 
 
-def main(args: Optional[list[str]] = None):
+def get_parser():
+    """Get the argument parser. Used for documentation generation."""
     parser = ArgumentParser(conflict_resolution=ConflictResolution.EXPLICIT)
     parser.add_arguments(Main, dest="prog")
+    return parser
+
+
+def main(args: Optional[list[str]] = None):
+    parser = get_parser()
     prog: Main = parser.parse_args(args=args).prog
     prog.execute()
 
