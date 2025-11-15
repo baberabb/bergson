@@ -10,11 +10,10 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from bergson import (
     GradientCollector,
     GradientProcessor,
-    MemmapScoreWriter,
     collect_gradients,
 )
-from bergson.data import IndexConfig, QueryConfig, create_index
-from bergson.scorer import Scorer
+from bergson.data import IndexConfig, ScoreConfig, create_index
+from bergson.score.scorer import Scorer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -41,8 +40,8 @@ def test_large_gradients_query(tmp_path: Path, dataset):
             "python",
             "-m",
             "bergson",
-            "query",
-            "test_query_e2e",
+            "score",
+            "test_score_e2e",
             "--projection_dim",
             "0",
             "--query_path",
@@ -72,7 +71,7 @@ def test_large_gradients_query(tmp_path: Path, dataset):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_query(tmp_path: Path, model, dataset):
+def test_score(tmp_path: Path, model, dataset):
     cfg = IndexConfig(run_path=str(tmp_path))
 
     processor = GradientProcessor(projection_dim=16)
@@ -84,21 +83,15 @@ def test_query(tmp_path: Path, model, dataset):
 
     dtype = model.dtype if model.dtype != "auto" else torch.float32
 
-    score_writer = MemmapScoreWriter(
+    scorer = Scorer(
         tmp_path,
         len(dataset),
-        1,
-        rank=0,
-    )
-
-    scorer = Scorer(
         query_grads,
-        QueryConfig(
+        ScoreConfig(
             query_path=str(tmp_path / "query_gradient_ds"),
             modules=list(shapes.keys()),
             score="mean",
         ),
-        writer=score_writer,
         device=torch.device("cpu"),
         dtype=dtype,
     )

@@ -8,7 +8,7 @@ from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from bergson.scorer import Scorer
+from bergson.score.scorer import Scorer
 
 from .data import IndexConfig, create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
@@ -30,9 +30,6 @@ def collect_gradients(
     Compute projected gradients using a subset of the dataset.
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
-
-    if attention_cfgs is None:
-        attention_cfgs = {}
 
     # Batch size of one by default
     if batches is None:
@@ -70,7 +67,7 @@ def collect_gradients(
         callback,
         processor,
         target_modules=target_modules,
-        attention_cfgs=attention_cfgs,
+        attention_cfgs=attention_cfgs or {},
     )
 
     # Allocate space ahead of time for the gradients

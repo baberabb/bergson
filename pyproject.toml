@@ -25,6 +25,7 @@ dev = [
     "pytest",
     "pyright",
     "trl",
+    # Generate documentation
     "furo",
     "myst-parser",
     "sphinx",

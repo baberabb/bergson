@@ -12,20 +12,23 @@ from datasets import Dataset, IterableDataset
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from .collection import collect_gradients
-from .data import (
+from bergson.collection import collect_gradients
+from bergson.data import (
     IndexConfig,
-    QueryConfig,
+    ScoreConfig,
     allocate_batches,
     load_gradient_dataset,
     load_gradients,
 )
-from .distributed import launch_distributed_run
-from .gradients import GradientProcessor
-from .score_writer import MemmapScoreWriter
-from .scorer import Scorer
-from .utils import assert_type
-from .worker_utils import create_processor, setup_data_pipeline, setup_model_and_peft
+from bergson.distributed import launch_distributed_run
+from bergson.gradients import GradientProcessor
+from bergson.score.scorer import Scorer
+from bergson.utils import assert_type
+from bergson.worker_utils import (
+    create_processor,
+    setup_data_pipeline,
+    setup_model_and_peft,
+)
 
 
 def preprocess_grads(
@@ -111,7 +114,7 @@ def preprocess_grads(
     return grads
 
 
-def get_query_ds(query_cfg: QueryConfig, device: str, rank: int | None = None):
+def get_query_ds(query_cfg: ScoreConfig, device: str, rank: int | None = None):
     """
     Load and preprocess the query dataset to get the query gradients. Preconditioners
     may be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
@@ -212,8 +215,9 @@ def query_worker(
     rank: int,
     world_size: int,
     index_cfg: IndexConfig,
-    query_cfg: QueryConfig,
+    query_cfg: ScoreConfig,
     ds: Dataset | IterableDataset,
+    query_grads: dict[str, torch.Tensor],
 ):
     torch.cuda.set_device(rank)
 
@@ -239,19 +243,6 @@ def query_worker(
         module: index_cfg.attention for module in index_cfg.split_attention_modules
     }
 
-    query_ds = get_query_ds(query_cfg, f"cuda:{rank}", rank)
-    query_grads = preprocess_grads(
-        query_ds,
-        query_cfg.modules,
-        query_cfg.unit_normalize,
-        query_cfg.batch_size,
-        torch.device(f"cuda:{rank}"),
-        accumulate_grads="mean" if query_cfg.score == "mean" else "none",
-        normalize_accumulated_grad=query_cfg.score == "mean",
-    )
-
-    num_scores = len(query_grads[query_cfg.modules[0]])
-
     kwargs = {
         "model": model,
         "data": ds,
@@ -262,23 +253,15 @@ def query_worker(
     }
 
     if isinstance(ds, Dataset):
-        batches = allocate_batches(ds["length"], index_cfg.token_batch_size)
-        kwargs["batches"] = batches
-
-        score_writer = MemmapScoreWriter(
+        kwargs["batches"] = allocate_batches(ds["length"], index_cfg.token_batch_size)
+        kwargs["scorer"] = Scorer(
             Path(query_cfg.scores_path),
             len(ds),
-            num_scores,
-            rank=rank,
-        )
-        scorer = Scorer(
             query_grads,
             query_cfg,
-            writer=score_writer,
             device=torch.device(f"cuda:{rank}"),
             dtype=model.dtype if model.dtype != "auto" else torch.float32,
         )
-        kwargs["scorer"] = scorer
 
         collect_gradients(**kwargs)
     else:
@@ -296,20 +279,14 @@ def query_worker(
             kwargs["ds"] = ds_shard
             kwargs["batches"] = batches
 
-            score_writer = MemmapScoreWriter(
+            kwargs["scorer"] = Scorer(
                 Path(query_cfg.scores_path) / f"shard-{shard_id:05d}",
                 len(ds_shard),
-                num_scores,
-                rank=rank,
-            )
-            scorer = Scorer(
                 query_grads,
                 query_cfg,
-                score_writer,
                 torch.device(f"cuda:{rank}"),
                 model.dtype if model.dtype != "auto" else torch.float32,
             )
-            kwargs["scorer"] = scorer
 
             collect_gradients(**kwargs)
 
@@ -326,13 +303,23 @@ def query_worker(
             processor.save(index_cfg.partial_run_path)
 
 
-def query(cfg: IndexConfig, query_cfg: QueryConfig):
+def score_dataset(cfg: IndexConfig, query_cfg: ScoreConfig):
     cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
     with (cfg.partial_run_path / "index_config.json").open("w") as f:
         json.dump(asdict(cfg), f, indent=2)
 
     ds = setup_data_pipeline(cfg)
+    query_ds = get_query_ds(query_cfg, f"cuda:{0}", 0)
+    query_grads = preprocess_grads(
+        query_ds,
+        query_cfg.modules,
+        query_cfg.unit_normalize,
+        query_cfg.batch_size,
+        torch.device("cuda:0"),
+        accumulate_grads="mean" if query_cfg.score == "mean" else "none",
+        normalize_accumulated_grad=query_cfg.score == "mean",
+    )
 
-    launch_distributed_run("query", query_worker, [cfg, query_cfg, ds])
+    launch_distributed_run("query", query_worker, [cfg, query_cfg, ds, query_grads])
 
     shutil.move(cfg.partial_run_path, cfg.run_path)
