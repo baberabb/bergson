@@ -6,7 +6,7 @@ from .data import AttentionConfig, DataConfig, IndexConfig, load_gradients
 from .faiss_index import FaissConfig
 from .gradcheck import FiniteDiff
 from .gradients import GradientCollector, GradientProcessor
-from .score_writer import MemmapScoreWriter
+from .scorer import Scorer
 
 __all__ = [
     "collect_gradients",
@@ -19,5 +19,5 @@ __all__ = [
     "IndexConfig",
     "DataConfig",
     "AttentionConfig",
-    "MemmapScoreWriter",
+    "Scorer",
 ]
