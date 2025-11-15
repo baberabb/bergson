@@ -8,7 +8,7 @@ from bergson.score.score_writer import MemmapScoreWriter, ScoreWriter
 
 
 class Scorer:
-    callback: Callable
+    scorer_callback: Callable
 
     num_scores: int
 
@@ -29,7 +29,7 @@ class Scorer:
         self.dtype = dtype
         self.num_items = num_items
 
-        self.callback = self.build_scorer_callback(
+        self.scorer_callback = self.build_scorer_callback(
             query_grads,
             query_cfg,
         )
@@ -51,7 +51,7 @@ class Scorer:
         if first_grad.dtype != self.dtype:
             mod_grads = {name: grad.to(self.device) for name, grad in mod_grads.items()}
 
-        scores = self.callback(mod_grads)
+        scores = self.scorer_callback(mod_grads)
         self.writer(indices, scores)
 
     def build_scorer_callback(

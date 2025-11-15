@@ -48,6 +48,25 @@ Commands
 
 .. code-block:: bash
 
+   bergson reduce [OPTIONS]
+
+.. autoclass:: bergson.__main__.Reduce
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+**Example:**
+
+.. code-block:: bash
+
+   bergson reduce runs/my-index \
+       --model EleutherAI/pythia-14m \
+       --dataset NeelNanda/pile-10k \
+       --method mean \
+       --unit_normalize
+
+.. code-block:: bash
+
    bergson score [OPTIONS]
 
 .. autoclass:: bergson.__main__.Score
