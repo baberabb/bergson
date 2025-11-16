@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -10,9 +11,98 @@ from transformers import PreTrainedModel
 
 from bergson.score.scorer import Scorer
 
-from .data import IndexConfig, create_index, pad_and_tensor
+from .data import IndexConfig, ReduceConfig, create_index, pad_and_tensor
 from .gradients import AttentionConfig, GradientCollector, GradientProcessor
 from .peft import set_peft_enabled
+
+
+class Builder:
+    num_items: int
+    grad_buffer: np.memmap
+    reduce_cfg: ReduceConfig | None
+
+    def __init__(
+        self,
+        path: Path,
+        data: Dataset,
+        grad_sizes: dict[str, int],
+        dtype: torch.dtype,
+        reduce_cfg: ReduceConfig | None = None,
+    ):
+        self.grad_sizes = grad_sizes
+        self.num_items = len(data)
+        self.reduce_cfg = reduce_cfg
+
+        num_grads = self.num_items if self.reduce_cfg is None else 1
+
+        self.in_memory_grad_buffer = (
+            np.zeros((1, sum(self.grad_sizes.values())), dtype=np.float32)
+            if self.reduce_cfg is None
+            else None
+        )
+
+        # TODO: Handle this more elegantly
+        np_dtype = np.float32 if dtype == torch.float32 else np.float16
+
+        self.grad_buffer = create_index(
+            path,
+            num_grads=num_grads,
+            grad_sizes=self.grad_sizes,
+            dtype=np_dtype,
+            with_structure=False,
+        )
+
+    def acc_grads(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
+        assert self.reduce_cfg is not None and self.in_memory_grad_buffer is not None
+
+        if self.reduce_cfg.unit_normalize:
+            ssqs = torch.zeros(len(indices))
+            for module_name in self.grad_sizes.keys():
+                ssqs += mod_grads[module_name].pow(2).sum(dim=0)
+            norms = ssqs.sqrt()
+        else:
+            norms = torch.ones(len(indices))
+
+        offset = 0
+        for module_name in self.grad_sizes.keys():
+            mod_grads[module_name] /= norms
+            self.in_memory_grad_buffer[
+                0, offset : offset + mod_grads[module_name].shape[1]
+            ] += (mod_grads[module_name].sum(dim=0).numpy().astype(np.float32)) / norms
+            offset += mod_grads[module_name].shape[1]
+
+    def __call__(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
+        torch.cuda.synchronize()
+
+        if self.reduce_cfg is not None:
+            self.acc_grads(indices, mod_grads)
+
+        # It turns out that it's very important for efficiency to write the
+        # gradients sequentially instead of first concatenating them, then
+        # writing to one vector
+        offset = 0
+        for module_name in self.grad_sizes.keys():
+            self.grad_buffer[
+                indices, offset : offset + mod_grads[module_name].shape[1]
+            ] = mod_grads[module_name].numpy()
+            offset += mod_grads[module_name].shape[1]
+
+    def flush(self):
+        self.grad_buffer.flush()
+
+    def all_reduce(self):
+        if self.reduce_cfg is None:
+            return
+
+        assert self.in_memory_grad_buffer is not None
+
+        dist.all_reduce(self.in_memory_grad_buffer, op=dist.ReduceOp.SUM)
+
+        if self.reduce_cfg.method == "mean":
+            self.in_memory_grad_buffer /= self.num_items
+
+        self.grad_buffer[:] = self.in_memory_grad_buffer.copy()
+        self.flush()
 
 
 def collect_gradients(
@@ -25,6 +115,7 @@ def collect_gradients(
     target_modules: set[str] | None = None,
     attention_cfgs: dict[str, AttentionConfig] | None = None,
     scorer: Scorer | None = None,
+    reduce_cfg: ReduceConfig | None = None,
 ):
     """
     Compute projected gradients using a subset of the dataset.
@@ -41,7 +132,6 @@ def collect_gradients(
 
     # TODO: Handle this more elegantly
     dtype = torch.float32 if model.dtype == torch.float32 else torch.float16
-    np_dtype = np.float32 if dtype == torch.float32 else np.float16
     lo = torch.finfo(dtype).min
     hi = torch.finfo(dtype).max
 
@@ -72,16 +162,8 @@ def collect_gradients(
 
     # Allocate space ahead of time for the gradients
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
-
-    # Allocate space ahead of time for the gradients
-    grad_buffer = (
-        create_index(
-            cfg.partial_run_path,
-            num_grads=len(data),
-            grad_sizes=grad_sizes,
-            dtype=np_dtype,
-            with_structure=False,
-        )
+    builder = (
+        Builder(cfg.partial_run_path, data, grad_sizes, dtype, reduce_cfg)
         if cfg.save_index
         else None
     )
@@ -136,28 +218,10 @@ def collect_gradients(
 
         model.zero_grad()
 
-        if grad_buffer is not None:
-            # Weirdly you need to explicitly synchronize here in order to make
-            # sure that the nonblocking copies actually finish before we call
-            # .numpy()
-            torch.cuda.synchronize()
-
-            # It turns out that it's very important for efficiency to write the
-            # gradients sequentially instead of first concatenating them, then
-            # writing to one vector
-            offset = 0
-            for module_name in grad_sizes.keys():
-                grad_buffer[
-                    indices, offset : offset + mod_grads[module_name].shape[1]
-                ] = mod_grads[module_name].numpy()
-                offset += mod_grads[module_name].shape[1]
+        if builder is not None:
+            builder(indices, mod_grads)
 
         if scorer is not None:
-            if grad_buffer is not None:
-                mod_grads = {
-                    name: grad.to(scorer.device) for name, grad in mod_grads.items()
-                }
-
             scorer(indices, mod_grads)
 
         mod_grads.clear()
@@ -184,8 +248,9 @@ def collect_gradients(
         processor.save(cfg.partial_run_path)
 
     # Make sure the gradients are written to disk
-    if grad_buffer is not None:
-        grad_buffer.flush()
+    if builder is not None:
+        builder.flush()
+        builder.all_reduce()
 
 
 def process_preconditioners(

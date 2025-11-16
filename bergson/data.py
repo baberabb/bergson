@@ -110,6 +110,16 @@ class ScoreConfig:
     """Batch size for processing the query dataset."""
 
 
+class ReduceConfig:
+    """Config for reducing the gradients."""
+
+    method: Literal["mean", "sum"] = "mean"
+    """Method for reducing the gradients."""
+
+    unit_normalize: bool = False
+    """Whether to unit normalize the gradients before reducing them."""
+
+
 @dataclass
 class IndexConfig:
     """Config for building the index and running the model/dataset pipeline."""
