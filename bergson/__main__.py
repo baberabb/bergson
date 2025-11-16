@@ -31,9 +31,9 @@ class Build:
 class Reduce:
     """Reduce a gradient index."""
 
-    reduce_cfg: ReduceConfig
-
     index_cfg: IndexConfig
+
+    reduce_cfg: ReduceConfig
 
     def execute(self):
         """Reduce a gradient index."""
@@ -79,7 +79,7 @@ class Query:
 class Main:
     """Routes to the subcommands."""
 
-    command: Union[Build, Query, Score]
+    command: Union[Build, Query, Reduce, Score]
 
     def execute(self):
         """Run the script."""

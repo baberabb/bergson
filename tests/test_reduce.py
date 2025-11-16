@@ -31,4 +31,6 @@ def test_reduce_e2e(tmp_path: Path):
         text=True,
     )
 
-    assert "Error" not in result.stderr, f"Error found in stderr:\n{result.stderr}"
+    assert (
+        "error" not in result.stderr.lower()
+    ), f"Error found in stderr: {result.stderr}"

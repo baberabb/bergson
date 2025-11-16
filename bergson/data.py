@@ -110,6 +110,7 @@ class ScoreConfig:
     """Batch size for processing the query dataset."""
 
 
+@dataclass
 class ReduceConfig:
     """Config for reducing the gradients."""
 

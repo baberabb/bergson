@@ -30,12 +30,6 @@ Build an index of gradients:
 
    python -m bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
 
-Command Line Interface
-----------------------
-
-.. autoprogram:: bergson.cli:get_parser()
-   :prog: bergson
-
 Content Index
 ------------------
 

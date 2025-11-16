@@ -18,7 +18,9 @@ from .peft import set_peft_enabled
 
 class Builder:
     num_items: int
+
     grad_buffer: np.memmap
+
     reduce_cfg: ReduceConfig | None
 
     def __init__(
@@ -33,16 +35,17 @@ class Builder:
         self.num_items = len(data)
         self.reduce_cfg = reduce_cfg
 
-        num_grads = self.num_items if self.reduce_cfg is None else 1
-
-        self.in_memory_grad_buffer = (
-            np.zeros((1, sum(self.grad_sizes.values())), dtype=np.float32)
-            if self.reduce_cfg is None
-            else None
-        )
-
-        # TODO: Handle this more elegantly
-        np_dtype = np.float32 if dtype == torch.float32 else np.float16
+        if reduce_cfg is not None:
+            num_grads = 1
+            self.in_memory_grad_buffer = torch.zeros(
+                (num_grads, sum(self.grad_sizes.values())), dtype=torch.float32
+            )
+            np_dtype = np.float32
+        else:
+            num_grads = self.num_items
+            self.in_memory_grad_buffer = None
+            # TODO: Handle this more elegantly
+            np_dtype = np.float32 if dtype == torch.float32 else np.float16
 
         self.grad_buffer = create_index(
             path,
@@ -52,40 +55,42 @@ class Builder:
             with_structure=False,
         )
 
-    def acc_grads(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
+    def reduce(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
         assert self.reduce_cfg is not None and self.in_memory_grad_buffer is not None
 
         if self.reduce_cfg.unit_normalize:
             ssqs = torch.zeros(len(indices))
-            for module_name in self.grad_sizes.keys():
-                ssqs += mod_grads[module_name].pow(2).sum(dim=0)
+            for mod_grad in mod_grads.values():
+                ssqs += mod_grad.pow(2).sum(dim=-1)
             norms = ssqs.sqrt()
         else:
             norms = torch.ones(len(indices))
 
         offset = 0
         for module_name in self.grad_sizes.keys():
-            mod_grads[module_name] /= norms
+            mod_grads[module_name] /= norms.unsqueeze(1)
+
+            grads = mod_grads[module_name].sum(dim=0).to(torch.float32)
             self.in_memory_grad_buffer[
                 0, offset : offset + mod_grads[module_name].shape[1]
-            ] += (mod_grads[module_name].sum(dim=0).numpy().astype(np.float32)) / norms
+            ] += grads
             offset += mod_grads[module_name].shape[1]
 
     def __call__(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
         torch.cuda.synchronize()
 
         if self.reduce_cfg is not None:
-            self.acc_grads(indices, mod_grads)
-
-        # It turns out that it's very important for efficiency to write the
-        # gradients sequentially instead of first concatenating them, then
-        # writing to one vector
-        offset = 0
-        for module_name in self.grad_sizes.keys():
-            self.grad_buffer[
-                indices, offset : offset + mod_grads[module_name].shape[1]
-            ] = mod_grads[module_name].numpy()
-            offset += mod_grads[module_name].shape[1]
+            self.reduce(indices, mod_grads)
+        else:
+            # It turns out that it's very important for efficiency to write the
+            # gradients sequentially instead of first concatenating them, then
+            # writing to one vector
+            offset = 0
+            for module_name in self.grad_sizes.keys():
+                self.grad_buffer[
+                    indices, offset : offset + mod_grads[module_name].shape[1]
+                ] = mod_grads[module_name].numpy()
+                offset += mod_grads[module_name].shape[1]
 
     def flush(self):
         self.grad_buffer.flush()
@@ -96,12 +101,16 @@ class Builder:
 
         assert self.in_memory_grad_buffer is not None
 
+        self.in_memory_grad_buffer = self.in_memory_grad_buffer.cuda()
+
         dist.all_reduce(self.in_memory_grad_buffer, op=dist.ReduceOp.SUM)
 
         if self.reduce_cfg.method == "mean":
             self.in_memory_grad_buffer /= self.num_items
 
-        self.grad_buffer[:] = self.in_memory_grad_buffer.copy()
+        self.grad_buffer[:] = (
+            self.in_memory_grad_buffer.cpu().numpy().astype(self.grad_buffer.dtype)
+        )
         self.flush()
 
 
