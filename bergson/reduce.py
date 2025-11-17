@@ -26,6 +26,22 @@ def reduce_worker(
     reduce_cfg: ReduceConfig,
     ds: Dataset | IterableDataset,
 ):
+    """
+    Distributed worker that aggregates per-document gradients into a single vector.
+
+    Parameters
+    ----------
+    rank : int
+        Distributed rank / GPU ID for this worker.
+    world_size : int
+        Total number of workers participating in the run.
+    index_cfg : IndexConfig
+        Specifies the model, tokenizer, PEFT adapters, and other settings.
+    reduce_cfg : ReduceConfig
+        Specifies aggregation strategy (mean/sum, unit normalization).
+    ds : Dataset | IterableDataset
+        The entire dataset to be indexed. A subset is assigned to each worker.
+    """
     torch.cuda.set_device(rank)
 
     # These should be set by the main process
@@ -93,6 +109,17 @@ def reduce_worker(
 
 
 def reduce(index_cfg: IndexConfig, reduce_cfg: ReduceConfig):
+    """
+    Reduce a dataset to a single aggregated gradient vector.
+
+    Parameters
+    ----------
+    index_cfg : IndexConfig
+        Specifies the run path, dataset, model, tokenizer, PEFT adapters,
+        and many other gradient collection settings.
+    reduce_cfg : ReduceConfig
+        Specifies aggregation strategy (mean/sum, unit normalization).
+    """
     index_cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
     with (index_cfg.partial_run_path / "index_config.json").open("w") as f:
         json.dump(asdict(index_cfg), f, indent=2)

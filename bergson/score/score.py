@@ -214,6 +214,25 @@ def score_worker(
     ds: Dataset | IterableDataset,
     query_grads: dict[str, torch.Tensor],
 ):
+    """
+    Score worker executed per rank to produce and score gradients against a query.
+
+    Parameters
+    ----------
+    rank : int
+        Distributed rank / GPU ID for this worker.
+    world_size : int
+        Total number of workers participating in the run.
+    index_cfg : IndexConfig
+        Specifies the model, tokenizer, PEFT adapters, and other settings.
+    score_cfg : ScoreConfig
+        Score configuration specifying query path, target modules, and scoring
+        method (mean/nearest/individual).
+    ds : Dataset | IterableDataset
+        The entire dataset to be indexed. A subset is assigned to each worker.
+    query_grads : dict[str, torch.Tensor]
+        Preprocessed query gradient tensors (often [1, grad_dim]) keyed by module name.
+    """
     torch.cuda.set_device(rank)
 
     # These should be set by the main process
@@ -298,14 +317,26 @@ def score_worker(
             processor.save(index_cfg.partial_run_path)
 
 
-def score_dataset(cfg: IndexConfig, score_cfg: ScoreConfig):
-    cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
-    with (cfg.partial_run_path / "index_config.json").open("w") as f:
-        json.dump(asdict(cfg), f, indent=2)
-    with (cfg.partial_run_path / "score_config.json").open("w") as f:
+def score_dataset(index_cfg: IndexConfig, score_cfg: ScoreConfig):
+    """
+    Score a dataset against an existing gradient index.
+
+    Parameters
+    ----------
+    index_cfg : IndexConfig
+        Specifies the run path, dataset, model, tokenizer, PEFT adapters,
+        and other gradient collection settings.
+    score_cfg : ScoreConfig
+        Specifies the query path, target modules, and scoring method
+        (mean/nearest/individual).
+    """
+    index_cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
+    with (index_cfg.partial_run_path / "index_config.json").open("w") as f:
+        json.dump(asdict(index_cfg), f, indent=2)
+    with (index_cfg.partial_run_path / "score_config.json").open("w") as f:
         json.dump(asdict(score_cfg), f, indent=2)
 
-    ds = setup_data_pipeline(cfg)
+    ds = setup_data_pipeline(index_cfg)
     query_ds = get_query_ds(score_cfg, f"cuda:{0}", 0)
     query_grads = preprocess_grads(
         query_ds,
@@ -317,6 +348,8 @@ def score_dataset(cfg: IndexConfig, score_cfg: ScoreConfig):
         normalize_accumulated_grad=score_cfg.score == "mean",
     )
 
-    launch_distributed_run("score", score_worker, [cfg, score_cfg, ds, query_grads])
+    launch_distributed_run(
+        "score", score_worker, [index_cfg, score_cfg, ds, query_grads]
+    )
 
-    shutil.move(cfg.partial_run_path, cfg.run_path)
+    shutil.move(index_cfg.partial_run_path, index_cfg.run_path)

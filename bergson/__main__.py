@@ -94,6 +94,7 @@ def get_parser():
 
 
 def main(args: Optional[list[str]] = None):
+    """Parse CLI arguments and dispatch to the selected subcommand."""
     parser = get_parser()
     prog: Main = parser.parse_args(args=args).prog
     prog.execute()

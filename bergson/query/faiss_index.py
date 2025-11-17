@@ -32,6 +32,16 @@ class Index(Protocol):
 
 
 def validate_ram(batch: NDArray, max_shard_size: int):
+    """
+    Estimate the peak RAM footprint for the largest shard and assert it fits.
+
+    Parameters
+    ----------
+    batch : NDArray
+        Sample of gradients used to approximate bytes per gradient vector.
+    max_shard_size : int
+        Maximum number of gradients that will be grouped into any shard.
+    """
     available_ram_gb = psutil.virtual_memory().available / (1024**3)
 
     bytes_per_grad = batch.nbytes / batch.shape[0]
@@ -51,6 +61,18 @@ def normalize_grads(
     device: str,
     batch_size: int,
 ) -> NDArray:
+    """
+    Normalize gradients to unit norm in batches to keep GPU memory bounded.
+
+    Parameters
+    ----------
+    grads : NDArray
+        Array containing all gradient vectors to normalize.
+    device : str
+        Device identifier understood by PyTorch (e.g., ``\"cuda:0\"`` or ``\"cpu\"``).
+    batch_size : int
+        Number of gradients processed per batch before writing back to host memory.
+    """
     normalized_grads = np.zeros_like(grads).astype(grads.dtype)
 
     for i in range(0, grads.shape[0], batch_size):
@@ -63,6 +85,14 @@ def normalize_grads(
 
 
 def gradients_loader(root_dir: Path):
+    """
+    Yield memory-mapped gradient shards stored under ``root_dir``.
+
+    Handles both single-shard exports (``info.json`` directly under ``root_dir``)
+    and multi-shard layouts (directories named ``*shard*``). Each yielded object
+    stays memory-mapped so downstream code can stream slices without excessive RAM.
+    """
+
     def load_shard(shard_dir: Path) -> np.memmap:
         with (shard_dir / "info.json").open("r") as f:
             info = json.load(f)
@@ -94,6 +124,16 @@ def _require_faiss() -> ModuleType:
 
 
 def index_to_device(index: Index, device: str) -> Index:
+    """
+    Move a FAISS index between CPU and GPU devices, optionally sharding.
+
+    Parameters
+    ----------
+    index : Index
+        Existing FAISS index instance.
+    device : str
+        Destination device string, e.g. ``\"cpu\"``, ``\"cuda\"``, or ``\"cuda:1\"``.
+    """
     faiss = _require_faiss()
 
     if device != "cpu":
