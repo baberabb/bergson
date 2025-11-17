@@ -28,7 +28,7 @@ dev = [
     "pyright",
     "setuptools",
     "trl",
-    "wandb"
+    "wandb",
     # Generate documentation
     "furo",
     "myst-parser",
