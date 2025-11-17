@@ -13,12 +13,8 @@ from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_pr
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
-from bergson.data import (
-    DataConfig,
-    IndexConfig,
-    load_data_string,
-    tokenize,
-)
+from bergson.config import DataConfig, IndexConfig
+from bergson.data import load_data_string, tokenize
 from bergson.huggingface import (
     GradientCollectorCallback,
     prepare_for_gradient_collection,

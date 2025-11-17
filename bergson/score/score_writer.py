@@ -38,24 +38,22 @@ class MemmapScoreWriter(ScoreWriter):
 
     def __init__(
         self,
-        scores_path: Path,
+        path: Path,
         num_items: int,
         num_scores: int,
         *,
-        rank: int,
         dtype: torch.dtype = torch.float32,
         flush_interval: int = 64,
     ):
-        self.scores_path = scores_path
+        self.path = path
         self.num_scores = num_scores
-        self.rank = rank
         self.dtype = dtype
         self.flush_interval = flush_interval
 
         self.num_batches_since_flush = 0
 
-        self.scores_path.mkdir(parents=True, exist_ok=True)
-        scores_file_path = self.scores_path / "scores.bin"
+        self.path.mkdir(parents=True, exist_ok=True)
+        scores_file_path = self.path / "scores.bin"
 
         # Build a json-serializable structured dtype
         names = []
@@ -81,6 +79,7 @@ class MemmapScoreWriter(ScoreWriter):
             "itemsize": itemsize,
         }
 
+        rank = dist.get_rank() if dist.is_initialized() else 0
         if rank == 0 and not scores_file_path.exists():
             print(f"Creating new scores file: {scores_file_path}")
 
@@ -97,7 +96,7 @@ class MemmapScoreWriter(ScoreWriter):
             self.flush()
 
             # Persist metadata for future runs
-            with (scores_path / "info.json").open("w") as f:
+            with (path / "info.json").open("w") as f:
                 json.dump(
                     {
                         "num_items": num_items,

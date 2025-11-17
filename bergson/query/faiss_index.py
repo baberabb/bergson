@@ -1,5 +1,4 @@
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from types import ModuleType
@@ -12,39 +11,10 @@ from numpy.lib.recfunctions import structured_to_unstructured
 from numpy.typing import NDArray
 from tqdm import tqdm
 
+from bergson.config import FaissConfig
+
 if TYPE_CHECKING:
     import faiss  # noqa: F401
-
-
-@dataclass
-class FaissConfig:
-    """Configuration for FAISS index."""
-
-    index_factory: str = "Flat"
-    """
-    The [FAISS index factory string](https://github.com/facebookresearch/faiss/wiki/Guidelines-to-choose-an-index).
-
-    Common FAISS factory strings:
-        - "IVF1,SQfp16": exact nearest neighbors with brute force search and fp16.
-            Valid for CPU or memmapped indices.
-        - "IVF1024,SQfp16": approximate nearest neighbors with 1024 cluster centers
-            and fp16. Fast approximate queries are produced at the cost of a slower
-            initial index build.
-        - "PQ6720": nearest neighbors with vector product quantization to 6720 elements.
-            Reduces memory usage at the cost of accuracy.
-    """
-    mmap_index: bool = False
-    """Whether to query the gradients on-disk."""
-    max_train_examples: int | None = None
-    """The maximum number of examples to train the index on.
-        If `None`, all examples will be used."""
-    batch_size: int = 1024
-    """The batch size for pre-processing gradients."""
-    num_shards: int = 1
-    """The number of shards to build for an index.
-        Using more shards reduces peak RAM usage."""
-    nprobe: int = 10
-    """The number of FAISS vector clusters to search if using ANN."""
 
 
 class Index(Protocol):
@@ -62,6 +32,16 @@ class Index(Protocol):
 
 
 def validate_ram(batch: NDArray, max_shard_size: int):
+    """
+    Estimate the peak RAM footprint for the largest shard and assert it fits.
+
+    Parameters
+    ----------
+    batch : NDArray
+        Sample of gradients used to approximate bytes per gradient vector.
+    max_shard_size : int
+        Maximum number of gradients that will be grouped into any shard.
+    """
     available_ram_gb = psutil.virtual_memory().available / (1024**3)
 
     bytes_per_grad = batch.nbytes / batch.shape[0]
@@ -81,6 +61,18 @@ def normalize_grads(
     device: str,
     batch_size: int,
 ) -> NDArray:
+    """
+    Normalize gradients to unit norm in batches to keep GPU memory bounded.
+
+    Parameters
+    ----------
+    grads : NDArray
+        Array containing all gradient vectors to normalize.
+    device : str
+        Device identifier understood by PyTorch (e.g., ``\"cuda:0\"`` or ``\"cpu\"``).
+    batch_size : int
+        Number of gradients processed per batch before writing back to host memory.
+    """
     normalized_grads = np.zeros_like(grads).astype(grads.dtype)
 
     for i in range(0, grads.shape[0], batch_size):
@@ -93,6 +85,14 @@ def normalize_grads(
 
 
 def gradients_loader(root_dir: Path):
+    """
+    Yield memory-mapped gradient shards stored under ``root_dir``.
+
+    Handles both single-shard exports (``info.json`` directly under ``root_dir``)
+    and multi-shard layouts (directories named ``*shard*``). Each yielded object
+    stays memory-mapped so downstream code can stream slices without excessive RAM.
+    """
+
     def load_shard(shard_dir: Path) -> np.memmap:
         with (shard_dir / "info.json").open("r") as f:
             info = json.load(f)
@@ -124,6 +124,16 @@ def _require_faiss() -> ModuleType:
 
 
 def index_to_device(index: Index, device: str) -> Index:
+    """
+    Move a FAISS index between CPU and GPU devices, optionally sharding.
+
+    Parameters
+    ----------
+    index : Index
+        Existing FAISS index instance.
+    device : str
+        Destination device string, e.g. ``\"cpu\"``, ``\"cuda\"``, or ``\"cuda:1\"``.
+    """
     faiss = _require_faiss()
 
     if device != "cpu":

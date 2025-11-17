@@ -10,11 +10,11 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from bergson import (
     GradientCollector,
     GradientProcessor,
-    MemmapScoreWriter,
     collect_gradients,
 )
-from bergson.data import IndexConfig, QueryConfig, create_index
-from bergson.scorer import Scorer
+from bergson.config import IndexConfig, ScoreConfig
+from bergson.data import create_index
+from bergson.score.scorer import Scorer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -41,14 +41,12 @@ def test_large_gradients_query(tmp_path: Path, dataset):
             "python",
             "-m",
             "bergson",
-            "query",
-            "test_query_e2e",
+            "score",
+            "test_score_e2e",
             "--projection_dim",
             "0",
             "--query_path",
             str(tmp_path / "query_ds"),
-            "--scores_path",
-            str(tmp_path / "scores"),
             "--model",
             "EleutherAI/pythia-1.4b",
             "--dataset",
@@ -59,8 +57,6 @@ def test_large_gradients_query(tmp_path: Path, dataset):
             "--token_batch_size",
             "256",
             "--skip_preconditioners",
-            "--save_index",
-            "false",
         ],
         cwd=tmp_path,
         capture_output=True,
@@ -68,11 +64,13 @@ def test_large_gradients_query(tmp_path: Path, dataset):
     )
 
     assert result.returncode == 0
-    assert "Error" not in result.stderr, f"Error found in stderr:\n{result.stderr}"
+    assert (
+        "error" not in result.stderr.lower()
+    ), f"Error found in stderr: {result.stderr}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_query(tmp_path: Path, model, dataset):
+def test_score(tmp_path: Path, model, dataset):
     cfg = IndexConfig(run_path=str(tmp_path))
 
     processor = GradientProcessor(projection_dim=16)
@@ -84,21 +82,15 @@ def test_query(tmp_path: Path, model, dataset):
 
     dtype = model.dtype if model.dtype != "auto" else torch.float32
 
-    score_writer = MemmapScoreWriter(
+    scorer = Scorer(
         tmp_path,
         len(dataset),
-        1,
-        rank=0,
-    )
-
-    scorer = Scorer(
         query_grads,
-        QueryConfig(
+        ScoreConfig(
             query_path=str(tmp_path / "query_gradient_ds"),
             modules=list(shapes.keys()),
             score="mean",
         ),
-        writer=score_writer,
         device=torch.device("cpu"),
         dtype=dtype,
     )

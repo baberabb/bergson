@@ -1,13 +1,14 @@
+from pathlib import Path
 from typing import Callable
 
 import torch
 
-from .data import QueryConfig
-from .score_writer import ScoreWriter
+from bergson.config import ScoreConfig
+from bergson.score.score_writer import MemmapScoreWriter, ScoreWriter
 
 
 class Scorer:
-    callback: Callable
+    scorer_callback: Callable
 
     num_scores: int
 
@@ -17,20 +18,28 @@ class Scorer:
 
     def __init__(
         self,
+        path: Path,
+        num_items: int,
         query_grads: dict[str, torch.Tensor],
-        query_cfg: QueryConfig,
-        writer: ScoreWriter,
+        score_cfg: ScoreConfig,
         device: torch.device,
         dtype: torch.dtype,
     ):
-        self.num_scores = len(query_grads[query_cfg.modules[0]])
-        self.writer = writer
         self.device = device
         self.dtype = dtype
+        self.num_items = num_items
 
-        self.callback = self.build_scorer_callback(
+        self.scorer_callback = self.build_scorer_callback(
             query_grads,
-            query_cfg,
+            score_cfg,
+        )
+
+        num_scores = len(query_grads[score_cfg.modules[0]])
+
+        self.writer = MemmapScoreWriter(
+            path,
+            num_items,
+            num_scores,
         )
 
     def __call__(
@@ -38,30 +47,34 @@ class Scorer:
         indices: list[int],
         mod_grads: dict[str, torch.Tensor],
     ):
-        scores = self.callback(mod_grads)
+        first_grad = next(iter(mod_grads.values()))
+        if first_grad.dtype != self.dtype:
+            mod_grads = {name: grad.to(self.device) for name, grad in mod_grads.items()}
+
+        scores = self.scorer_callback(mod_grads)
         self.writer(indices, scores)
 
     def build_scorer_callback(
         self,
         query_grads: dict[str, torch.Tensor],
-        query_cfg: QueryConfig,
+        score_cfg: ScoreConfig,
     ) -> Callable:
         """Unified scorer builder for all scorer types."""
         query_tensor = torch.cat(
             [
                 query_grads[m].to(device=self.device, dtype=self.dtype)
-                for m in query_cfg.modules
+                for m in score_cfg.modules
             ],
             dim=1,
         )
 
         @torch.inference_mode()
         def callback(mod_grads: dict[str, torch.Tensor]):
-            grads = torch.cat([mod_grads[m] for m in query_cfg.modules], dim=1)
-            if query_cfg.unit_normalize:
+            grads = torch.cat([mod_grads[m] for m in score_cfg.modules], dim=1)
+            if score_cfg.unit_normalize:
                 grads /= grads.norm(dim=1, keepdim=True)
 
-            if query_cfg.score == "nearest":
+            if score_cfg.score == "nearest":
                 all_scores = grads @ query_tensor.T
                 return all_scores.max(dim=-1).values
 

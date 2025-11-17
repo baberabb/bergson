@@ -29,6 +29,13 @@ dev = [
     "setuptools",
     "trl",
     "wandb"
+    # Generate documentation
+    "furo",
+    "myst-parser",
+    "sphinx",
+    "sphinx-autodoc-typehints",
+    "sphinx-rtd-theme",
+    "nbsphinx",
 ]
 example = [
     "trl",
