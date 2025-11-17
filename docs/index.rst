@@ -11,7 +11,7 @@ We provide options for analyzing models and datasets at any scale or level of gr
 * Query small gradient datasets on-GPU, and large ones using a sharded FAISS index.
 * Collect gradients during or after training.
 * Parallelize Bergson operations across multiple GPUs or nodes.
-* Load gradients with or without their module-wise structure
+* Load gradients with or without their module-wise structure.
 * Split attention module gradients by head.
 
 Installation
