@@ -182,47 +182,57 @@ def new_build_worker(
     model, target_modules = setup_model_and_peft(cfg, rank)
     processor = create_processor(cfg, rank)
 
-    attention_cfgs = {module: cfg.attention for module in cfg.split_attention_modules}
-
-    kwargs = {
-        "model": model,
-        "data": ds,
-        "processor": processor,
-        "cfg": cfg,
-        "target_modules": target_modules,
-        "attention_cfgs": attention_cfgs,
-    }
-
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"], cfg.token_batch_size)
-        kwargs["batches"] = batches
-        kwargs["collector"] = GradientCollector(
-            model=model,  # type:ignore
+
+        collector = GradientCollector(
+            model=model.base_model,  # type: ignore
             cfg=cfg,
             processor=processor,
             target_modules=target_modules,
             data=ds,
+            scorer=None,
         )
-        collector_computer = CollectorComputer(**kwargs)
 
-        collector_computer._compute()
+        computer = CollectorComputer(
+            model=model,  # type: ignore
+            data=ds,
+            collector=collector,
+            batches=batches,
+            cfg=cfg,
+        )
+
+        computer._compute()
 
     else:
         # Convert each shard to a Dataset then map over its gradients
         buf, shard_id = [], 0
 
-        def flush(kwargs):
+        def flush():
             nonlocal buf, shard_id
             if not buf:
                 return
             ds_shard = assert_type(Dataset, Dataset.from_list(buf))
             batches = allocate_batches(ds_shard["length"][:], cfg.token_batch_size)
-            kwargs["ds"] = ds_shard
-            kwargs["batches"] = batches
-            kwargs["collector"] = GradientCollector(**kwargs)
-            collector_computer = CollectorComputer(**kwargs)
 
-            collector_computer._compute()
+            collector = GradientCollector(
+                model=model.base_model,  # type: ignore
+                cfg=cfg,
+                processor=processor,
+                target_modules=target_modules,
+                data=ds_shard,
+                scorer=None,
+            )
+
+            computer = CollectorComputer(
+                model=model,  # type: ignore
+                data=ds_shard,
+                collector=collector,
+                batches=batches,
+                cfg=cfg,
+            )
+
+            computer._compute()
 
             buf.clear()
             shard_id += 1
@@ -230,8 +240,8 @@ def new_build_worker(
         for ex in tqdm(ds, desc="Collecting gradients"):
             buf.append(ex)
             if len(buf) == cfg.stream_shard_size:
-                flush(kwargs=kwargs)
+                flush()
 
-        flush(kwargs=kwargs)  # Final flush
+        flush()  # Final flush
         if rank == 0:
             processor.save(cfg.partial_run_path)

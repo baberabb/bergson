@@ -1,3 +1,4 @@
+import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import ContextDecorator, nullcontext
@@ -24,7 +25,7 @@ from transformers import PreTrainedModel
 
 from bergson.collection import Builder
 from bergson.collector.logger import get_logger
-from bergson.config import IndexConfig, ReduceConfig
+from bergson.config import IndexConfig
 from bergson.data import pad_and_tensor
 from bergson.gradients import GradientProcessor, LayerAdapter
 from bergson.peft import set_peft_enabled
@@ -271,8 +272,14 @@ class HookCollectorBase(ContextDecorator, ABC):
         pass
 
     @abstractmethod
-    def process_batch(self, *args, **kwargs) -> None:
-        """Process collected data for a batch."""
+    def process_batch(self, indices: list[int], **kwargs) -> None:
+        """
+        Process collected data for a batch.
+
+        Args:
+            indices: List of data indices in the current batch
+            **kwargs: Additional batch-specific data (e.g., losses)
+        """
         pass
 
 
@@ -294,28 +301,38 @@ class GradientCollector(HookCollectorBase):
     lo = torch.finfo(dtype).min
     hi = torch.finfo(dtype).max
 
-    save_index: bool = False
-
-    reduce_cfg: ReduceConfig | None = None
-
-    builder: Builder | None = None
-    scorer: Scorer | None = None
+    builder: "Builder | None" = None
+    scorer: "Scorer | None" = None
 
     def setup(self) -> None:
         """Initialize gradient storage dictionary."""
         self.mod_grads = {}
-        # Allocate space ahead of time for the gradients
 
         assert isinstance(self.model.device, torch.device), (
             "Model device is not set correctly"
         )
-        # TODO: never mentioned per_doc_losses before, maybe should also be part of the dataclass? Seems kinda unnecessary
+
         self.per_doc_losses = torch.full(
             (len(self.data),),
             device=self.model.device,
             dtype=self.dtype,
             fill_value=0.0,
         )
+
+        # Compute whether we need to save the index
+        save_index = self.scorer is None and not self.cfg.skip_index
+
+        if save_index:
+            grad_sizes = {name: math.prod(s) for name, s in self.shapes().items()}
+            self.builder = Builder(
+                self.cfg.partial_run_path,
+                self.data,
+                grad_sizes,
+                self.dtype,
+                reduce_cfg=None,
+            )
+        else:
+            self.builder = None
 
     def forward_hook(self, module: nn.Module, a: torch.Tensor):
         p = self.processor.projection_dim
@@ -328,6 +345,7 @@ class GradientCollector(HookCollectorBase):
 
     def backward_hook(self, module: nn.Module, g: torch.Tensor):
         g = g.flatten(1).clamp_(self.lo, self.hi)
+
         a = module._inputs  # [N, S, I]
         assert isinstance(a, torch.Tensor), "Activation cache missing for module"
 
@@ -341,7 +359,7 @@ class GradientCollector(HookCollectorBase):
             g = g @ A.T  # [N, S, p]
 
         P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
-        if self.save_index:
+        if self.builder is not None:
             # Asynchronously move the gradient to CPU and convert to the final dtype
             self.mod_grads[name] = P.to(
                 device="cpu", dtype=self.dtype, non_blocking=True
@@ -349,8 +367,11 @@ class GradientCollector(HookCollectorBase):
         else:
             self.mod_grads[name] = P.to(dtype=self.dtype)
 
-    def process_batch(self, indices: list[int], losses: torch.Tensor):
+    def process_batch(self, indices: list[int], **kwargs):
         """Process collected gradients for a batch and update losses."""
+        losses = kwargs.get("losses")
+        assert losses is not None, "losses must be provided in kwargs"
+
         if self.builder:
             self.builder(indices, self.mod_grads)
         if self.scorer:
@@ -420,7 +441,7 @@ class CollectorComputer:
             "CollectorComputer", level="DEBUG" if cfg.debug else "INFO"
         )
 
-        ### Distributed related
+        # Distributed related
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
 
@@ -483,7 +504,7 @@ class CollectorComputer:
                     prof.step()
                 step += 1
 
-                self.collector.process_batch(indices, losses)
+                self.collector.process_batch(indices, losses=losses)
 
             if dist.is_initialized():
                 dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
