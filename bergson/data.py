@@ -20,7 +20,7 @@ from datasets import (
 from numpy.typing import DTypeLike
 
 from .config import DataConfig, ReduceConfig
-from .utils.utils import assert_type
+from .utils.utils import assert_type, simple_parse_args_string
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -226,7 +226,7 @@ def load_data_string(
     data_str: str,
     split: str = "train",
     subset: str | None = None,
-    streaming: bool = False,
+    data_args: str = "",
 ) -> Dataset | IterableDataset:
     """Load a dataset from a string identifier or path."""
     if data_str.endswith(".csv"):
@@ -235,9 +235,8 @@ def load_data_string(
         ds = assert_type(Dataset, Dataset.from_json(data_str))
     else:
         try:
-            ds = load_dataset(
-                data_str, subset, split=split, streaming=streaming  # type: ignore
-            )
+            kwargs = simple_parse_args_string(data_args)
+            ds = load_dataset(data_str, subset, split=split, **kwargs)
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
                 raise NotImplementedError(
