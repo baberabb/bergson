@@ -67,7 +67,7 @@ You can score a large dataset against a previously built query index without sav
 bergson score <output_path> --model <model_name> --dataset <dataset_name> --query_path <existing_index_path> --score mean --projection_dim 0
 ```
 
-We provide a utility to reduce a dataset into its mean or sum query gradient:
+We provide a utility to reduce a dataset into its mean or sum query gradient, for use as a query index:
 
 ```bash
 bergson reduce <output_path> --model <model_name> --dataset <dataset_name> --method mean --unit_normalize --projection_dim 0
