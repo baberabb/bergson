@@ -80,9 +80,9 @@ def test_split_attention_build(tmp_path: Path, model, dataset):
         attention_cfgs=attention_cfgs,
     )
 
-    assert any(
-        Path(cfg.partial_run_path).iterdir()
-    ), "Expected artifacts in the temp run_path"
+    assert any(Path(cfg.partial_run_path).iterdir()), (
+        "Expected artifacts in the temp run_path"
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -107,9 +107,9 @@ def test_conv1d_build(tmp_path: Path, dataset):
         cfg=cfg,
     )
 
-    assert any(
-        Path(cfg.partial_run_path).iterdir()
-    ), "Expected artifacts in the run path"
+    assert any(Path(cfg.partial_run_path).iterdir()), (
+        "Expected artifacts in the run path"
+    )
 
     index = load_gradients(cfg.partial_run_path)
 

@@ -57,8 +57,7 @@ class Score:
 
         if self.index_cfg.projection_dim != 0:
             print(
-                "Warning: projection_dim is not 0. "
-                "Compressed gradients will be scored."
+                "Warning: projection_dim is not 0. Compressed gradients will be scored."
             )
 
         score_dataset(self.index_cfg, self.score_cfg)

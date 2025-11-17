@@ -243,9 +243,9 @@ class GradientCollectorCallback(TrainerCallback):
 
         # Record training order if enabled
         if self.order is not None:
-            assert (
-                self.batch_indices is not None
-            ), "Batch indices are not available for training order tracking"
+            assert self.batch_indices is not None, (
+                "Batch indices are not available for training order tracking"
+            )
 
             epoch = int(state.epoch or 0)
             global_step = state.global_step

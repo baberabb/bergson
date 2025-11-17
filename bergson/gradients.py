@@ -155,9 +155,9 @@ class AdamNormalizer(Normalizer):
         and the factored second moments.
         """
         # We assume avg_sq is a square matrix of shape [O, I]
-        assert (
-            self.avg_sq.ndim == 2
-        ), f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
+        assert self.avg_sq.ndim == 2, (
+            f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
+        )
 
         # Compute row and column means
         return AdafactorNormalizer(
@@ -563,7 +563,6 @@ class GradientCollector(ContextDecorator):
         # If we are using AdamNormalizer, or including bias gradients
         # we need to materialize the full gradient and then project
         if isinstance(norm, AdamNormalizer) or include_bias:
-
             P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
             if include_bias:
                 # Append the bias gradient to the input

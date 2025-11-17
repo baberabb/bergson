@@ -242,9 +242,9 @@ class FaissIndex:
         shard_sizes[-1] += remainder
 
         # Verify all gradients will be consumed
-        assert (
-            sum(shard_sizes) == total_grads
-        ), f"Shard sizes {shard_sizes} don't sum to total_grads {total_grads}"
+        assert sum(shard_sizes) == total_grads, (
+            f"Shard sizes {shard_sizes} don't sum to total_grads {total_grads}"
+        )
 
         dl = gradients_loader(gradients_path)
         buffer: list[NDArray] = []

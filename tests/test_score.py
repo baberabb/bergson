@@ -64,9 +64,9 @@ def test_large_gradients_query(tmp_path: Path, dataset):
     )
 
     assert result.returncode == 0
-    assert (
-        "error" not in result.stderr.lower()
-    ), f"Error found in stderr: {result.stderr}"
+    assert "error" not in result.stderr.lower(), (
+        f"Error found in stderr: {result.stderr}"
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
