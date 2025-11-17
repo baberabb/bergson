@@ -1,21 +1,19 @@
 Command Line Interface
 ======================
 
-Bergson provides a command-line interface with two main commands: ``build`` and ``query``.
+Bergson provides a command-line interface with four main commands: ``build``, ``query``, ``reduce``, and ``score``.
 
-Usage
------
+``build`` and ``query`` are designed for working with compressed gradients stored on disk and queried
+multiple times.
 
-.. code-block:: bash
-
-   bergson {build,query,score} [OPTIONS]
-
-Commands
---------
+``reduce`` and ``score`` are designed for working with uncompressed gradients primarily on GPUs, with
+a single predetermined query set. Use ``reduce`` to accumulate a dataset into a single query gradient (mean or sum),
+and ``score`` to map over an arbitrarily large dataset, computing the gradient of each item and scoring it against
+precomputed query gradients.
 
 .. code-block:: bash
 
-   bergson build [OPTIONS]
+   bergson {build,query,reduce,score} [OPTIONS]
 
 .. autoclass:: bergson.__main__.Build
    :members:
@@ -30,10 +28,6 @@ Commands
        --model EleutherAI/pythia-14m \
        --dataset NeelNanda/pile-10k \
 
-.. code-block:: bash
-
-   bergson query [OPTIONS]
-
 .. autoclass:: bergson.__main__.Query
    :members:
    :undoc-members:
@@ -45,10 +39,6 @@ Commands
 
    bergson query \
        --index runs/my-index
-
-.. code-block:: bash
-
-   bergson reduce [OPTIONS]
 
 .. autoclass:: bergson.__main__.Reduce
    :members:
@@ -64,10 +54,7 @@ Commands
        --dataset NeelNanda/pile-10k \
        --method mean \
        --unit_normalize
-
-.. code-block:: bash
-
-   bergson score [OPTIONS]
+       --projection_dim 0
 
 .. autoclass:: bergson.__main__.Score
    :members:
@@ -79,41 +66,7 @@ Commands
 .. code-block:: bash
 
    bergson score \
-        runs/my-index-metadata \
+        runs/my-scores \
         --query_path /runs/my-index \
-        --scores_path /runs/scores \
         --dataset EleutherAI/SmolLM2-135M-10B
-
-
-Configuration
-^^^^^^^^^^^^^
-
-Index Configuration:
-
-.. autoclass:: bergson.data.IndexConfig
-   :members:
-   :undoc-members:
-
-Data Configuration:
-
-.. autoclass:: bergson.data.DataConfig
-   :members:
-   :undoc-members:
-
-Attention Configuration:
-
-.. autoclass:: bergson.data.AttentionConfig
-   :members:
-   :undoc-members:
-
-Query Configuration:
-
-.. autoclass:: bergson.data.QueryConfig
-   :members:
-   :undoc-members:
-
-Score Configuration:
-
-.. autoclass:: bergson.data.ScoreConfig
-   :members:
-   :undoc-members:
+        --projection_dim 0

@@ -1,5 +1,4 @@
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 from datasets import Dataset, load_dataset
@@ -7,43 +6,36 @@ from simple_parsing import ArgumentParser, ConflictResolution
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from bergson import Attributor, FaissConfig
+from bergson.config import QueryConfig
 from bergson.utils import assert_type
 
 
-@dataclass
-class QueryConfig:
-    index: str = ""
-    """Path to the existing index."""
+def query(query_cfg: QueryConfig):
+    """
+    Run an interactive CLI session that queries a pre-built gradient index.
 
-    model: str = ""
-    """Model to use for the query. When not provided the model used to build the
-    index is used."""
-
-    text_field: str = "text"
-    """Field to use for the query."""
-
-    unit_norm: bool = False
-    """Whether to unit normalize the query."""
-
-    faiss: bool = False
-    """Whether to use FAISS for the query."""
-
-
-def query(cfg: QueryConfig):
-    with open(Path(cfg.index) / "index_config.json", "r") as f:
+    Parameters
+    ----------
+    cfg : QueryConfig
+        Configuration describing the index path, HF model to load, and dataset field
+        used to print the retrieved documents.
+    """
+    with open(Path(query_cfg.index) / "index_config.json", "r") as f:
         index_cfg = json.load(f)
 
     dataset_name = index_cfg["data"]["dataset"]
-    if not cfg.model:
-        cfg.model = index_cfg["model"]
+    if not query_cfg.model:
+        query_cfg.model = index_cfg["model"]
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model)
-    model = AutoModelForCausalLM.from_pretrained(cfg.model, device_map={"": "cuda:0"})
+    tokenizer = AutoTokenizer.from_pretrained(query_cfg.model)
+    model = AutoModelForCausalLM.from_pretrained(
+        query_cfg.model, device_map={"": "cuda:0"}
+    )
     dataset = load_dataset(dataset_name, split="train")
     dataset = assert_type(Dataset, dataset)
 
-    faiss_cfg = FaissConfig() if cfg.faiss else None
-    attr = Attributor(Path(cfg.index), device="cuda", faiss_cfg=faiss_cfg)
+    faiss_cfg = FaissConfig() if query_cfg.faiss else None
+    attr = Attributor(Path(query_cfg.index), device="cuda", faiss_cfg=faiss_cfg)
 
     # Query loop
     while True:
@@ -68,13 +60,14 @@ def query(cfg: QueryConfig):
                 print("Found invalid result, skipping")
                 continue
 
-            text = dataset[int(idx.item())][cfg.text_field]
+            text = dataset[int(idx.item())][query_cfg.text_field]
             print(text[:5000])
 
             print(f"{i + 1}: (distance: {d.item():.4f})")
 
 
 def main():
+    """Parse arguments for `query_index.py` and launch the REPL."""
     parser = ArgumentParser(conflict_resolution=ConflictResolution.EXPLICIT)
     parser.add_arguments(QueryConfig, dest="prog")
     prog: QueryConfig = parser.parse_args().prog

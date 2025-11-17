@@ -6,7 +6,7 @@ We view attribution as a counterfactual question: **_If we "unlearned" this trai
 ## Core features
 
 - Gradient store for serial queries. We provide collection-time gradient compression for efficient storage, and integrate with FAISS for fast KNN search over large stores.
-- On-the-fly queries. Query uncompressed gradients without disk I/O overhead via a single pass over a dataset with a set of precomputed query gradients.
+- On-the-fly queries. Query gradients without compression or disk I/O overhead via a single pass over a dataset with a set of precomputed query gradients.
   - Experiment with multiple query strategies based on [LESS](https://arxiv.org/pdf/2402.04333).
 - Train‑time gradient collection. Capture gradients produced during training with a ~17% performance overhead.
 - Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and other performance optimizations to support large models, datasets, and clusters.
@@ -39,7 +39,7 @@ pip install bergson
 # Quickstart
 
 ```
-python -m bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
+bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
 ```
 
 # Usage
@@ -47,7 +47,7 @@ python -m bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset 
 You can build an index of gradients for each training sample from the command line, using `bergson` as a CLI tool:
 
 ```bash
-python -m bergson build <output_path> --model <model_name> --dataset <dataset_name>
+bergson build <output_path> --model <model_name> --dataset <dataset_name>
 ```
 
 This will create a directory at `<output_path>` containing the gradients for each training sample in the specified dataset. The `--model` and `--dataset` arguments should be compatible with the Hugging Face `transformers` library. By default it assumes that the dataset has a `text` column, but you can specify other columns using `--prompt_column` and optionally `--completion_column`. The `--help` flag will show you all available options.
@@ -61,10 +61,16 @@ At the lowest level of abstraction, the `GradientCollector` context manager allo
 
 ## On-the-fly Query
 
-You can query a large dataset without first building an index, by specifying a previously built index to query against:
+You can score a large dataset against a previously built query index without saving its gradients to disk:
 
 ```bash
-python -m bergson query <output_path> --model <model_name> --dataset <dataset_name> --query_path <existing_index_path> --scores_path <output_path> --score mean --save_index False
+bergson score <output_path> --model <model_name> --dataset <dataset_name> --query_path <existing_index_path> --score mean --projection_dim 0
+```
+
+We provide a utility to reduce a dataset into its mean or sum query gradient:
+
+```bash
+bergson reduce <output_path> --model <model_name> --dataset <dataset_name> --method mean --unit_normalize --projection_dim 0
 ```
 
 ## Index Query
@@ -144,7 +150,7 @@ collect_gradients(
 Where a reward signal is available we compute gradients using a weighted advantage estimate based on Dr. GRPO:
 
 ```bash
-python -m bergson build <output_path> --model <model_name> --dataset <dataset_name> --reward_column <reward_column_name>
+bergson build <output_path> --model <model_name> --dataset <dataset_name> --reward_column <reward_column_name>
 ```
 
 # Development

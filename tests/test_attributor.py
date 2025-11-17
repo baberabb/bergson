@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from bergson import Attributor, FaissConfig, GradientProcessor, collect_gradients
-from bergson.data import IndexConfig
+from bergson.config import IndexConfig
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

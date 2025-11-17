@@ -13,7 +13,8 @@ from peft import PeftConfig, PeftModel, get_peft_model_state_dict
 from torch.distributed.fsdp import fully_shard
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-from bergson.data import DataConfig, IndexConfig, tokenize
+from bergson.config import DataConfig, IndexConfig
+from bergson.data import tokenize
 from bergson.gradients import GradientProcessor
 from bergson.utils import assert_type, get_layer_list
 

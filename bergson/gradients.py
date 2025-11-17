@@ -11,7 +11,7 @@ from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 from transformers.pytorch_utils import Conv1D as HFConv1D
 
-from .data import AttentionConfig
+from .config import AttentionConfig
 from .math import reshape_to_nearest_square
 from .utils import assert_type, create_projection_matrix
 

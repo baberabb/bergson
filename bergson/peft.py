@@ -3,6 +3,14 @@ from transformers import PreTrainedModel
 
 
 def detect_peft_modules(model: PeftModel) -> set[str]:
+    """
+    Infer the names of PEFT modules from a wrapped model.
+
+    Returns
+    -------
+    set[str]
+        Fully-qualified module names that correspond to adapter weights.
+    """
     # Extract target modules
     target_modules = set()
     peft_state_dict = get_peft_model_state_dict(model)

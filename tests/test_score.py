@@ -12,7 +12,8 @@ from bergson import (
     GradientProcessor,
     collect_gradients,
 )
-from bergson.data import IndexConfig, ScoreConfig, create_index
+from bergson.config import IndexConfig, ScoreConfig
+from bergson.data import create_index
 from bergson.score.scorer import Scorer
 
 
@@ -46,8 +47,6 @@ def test_large_gradients_query(tmp_path: Path, dataset):
             "0",
             "--query_path",
             str(tmp_path / "query_ds"),
-            "--scores_path",
-            str(tmp_path / "scores"),
             "--model",
             "EleutherAI/pythia-1.4b",
             "--dataset",
@@ -58,8 +57,6 @@ def test_large_gradients_query(tmp_path: Path, dataset):
             "--token_batch_size",
             "256",
             "--skip_preconditioners",
-            "--save_index",
-            "false",
         ],
         cwd=tmp_path,
         capture_output=True,
@@ -67,7 +64,9 @@ def test_large_gradients_query(tmp_path: Path, dataset):
     )
 
     assert result.returncode == 0
-    assert "Error" not in result.stderr, f"Error found in stderr:\n{result.stderr}"
+    assert (
+        "error" not in result.stderr.lower()
+    ), f"Error found in stderr: {result.stderr}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

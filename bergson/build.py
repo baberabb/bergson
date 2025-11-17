@@ -10,7 +10,8 @@ from datasets import Dataset, IterableDataset
 from tqdm.auto import tqdm
 
 from bergson.collection import collect_gradients
-from bergson.data import IndexConfig, allocate_batches
+from bergson.config import IndexConfig
+from bergson.data import allocate_batches
 from bergson.utils import assert_type
 from bergson.worker_utils import setup_model_and_peft
 
@@ -24,6 +25,20 @@ def build_worker(
     cfg: IndexConfig,
     ds: Dataset | IterableDataset,
 ):
+    """
+    Build worker executed per rank to collect gradients to populate the index.
+
+    Parameters
+    ----------
+    rank : int
+        Distributed rank / GPU ID for this worker.
+    world_size : int
+        Total number of workers participating in the run.
+    cfg : IndexConfig
+        Specifies the model, tokenizer, PEFT adapters, and other settings.
+    ds : Dataset | IterableDataset
+        The entire dataset to be indexed. A subset is assigned to each worker.
+    """
     torch.cuda.set_device(rank)
 
     # These should be set by the main process
@@ -85,13 +100,22 @@ def build_worker(
             processor.save(cfg.partial_run_path)
 
 
-def build(cfg: IndexConfig):
-    cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
-    with (cfg.partial_run_path / "index_config.json").open("w") as f:
-        json.dump(asdict(cfg), f, indent=2)
+def build(index_cfg: IndexConfig):
+    """
+    Build a gradient index by distributing work across all available GPUs.
 
-    ds = setup_data_pipeline(cfg)
+    Parameters
+    ----------
+    index_cfg : IndexConfig
+        Specifies the run path, dataset, model, tokenizer, PEFT adapters,
+        and many other gradient collection settings.
+    """
+    index_cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
+    with (index_cfg.partial_run_path / "index_config.json").open("w") as f:
+        json.dump(asdict(index_cfg), f, indent=2)
 
-    launch_distributed_run("build", build_worker, [cfg, ds])
+    ds = setup_data_pipeline(index_cfg)
 
-    shutil.move(cfg.partial_run_path, cfg.run_path)
+    launch_distributed_run("build", build_worker, [index_cfg, ds])
+
+    shutil.move(index_cfg.partial_run_path, index_cfg.run_path)

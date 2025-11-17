@@ -25,6 +25,20 @@ def dist_worker(
 
 
 def launch_distributed_run(process_name: str, worker, const_worker_args: list[Any]):
+    """
+    Launch a distributed multi-process job over all visible CUDA devices.
+
+    Parameters
+    ----------
+    process_name : str
+        Label used by Torch Elastic to tag logs and processes.
+    worker : Callable
+        Function that will be executed on every spawned process. It must accept
+        ``(rank, world_size, *const_worker_args)`` in that order.
+    const_worker_args : list
+        Arguments passed verbatim to every worker invocation after ``rank`` and
+        ``world_size``. These are typically configuration or shared datasets.
+    """
     world_size = torch.cuda.device_count()
     if world_size <= 1:
         # Run the worker directly if no distributed training is needed. This is great
