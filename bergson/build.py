@@ -86,13 +86,13 @@ def build_worker(
             processor.save(cfg.partial_run_path)
 
 
-def build(cfg: IndexConfig):
-    cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
-    with (cfg.partial_run_path / "index_config.json").open("w") as f:
-        json.dump(asdict(cfg), f, indent=2)
+def build(index_cfg: IndexConfig):
+    index_cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
+    with (index_cfg.partial_run_path / "index_config.json").open("w") as f:
+        json.dump(asdict(index_cfg), f, indent=2)
 
-    ds = setup_data_pipeline(cfg)
+    ds = setup_data_pipeline(index_cfg)
 
-    launch_distributed_run("build", build_worker, [cfg, ds])
+    launch_distributed_run("build", build_worker, [index_cfg, ds])
 
-    shutil.move(cfg.partial_run_path, cfg.run_path)
+    shutil.move(index_cfg.partial_run_path, index_cfg.run_path)

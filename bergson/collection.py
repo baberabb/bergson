@@ -33,6 +33,9 @@ def collect_gradients(
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
 
+    score = scorer is not None
+    save_index = not score and not cfg.skip_index
+
     # Batch size of one by default
     if batches is None:
         batches = [[idx] for idx in range(len(data))]
@@ -48,7 +51,7 @@ def collect_gradients(
 
     def callback(name: str, g: torch.Tensor):
         g = g.flatten(1).clamp_(lo, hi)
-        if cfg.save_index:
+        if save_index:
             # Asynchronously move the gradient to CPU and convert to the final dtype
             mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
         else:
@@ -75,7 +78,7 @@ def collect_gradients(
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
     builder = (
         Builder(cfg.partial_run_path, data, grad_sizes, dtype, reduce_cfg)
-        if cfg.save_index
+        if save_index
         else None
     )
 
@@ -132,7 +135,7 @@ def collect_gradients(
         if builder is not None:
             builder(indices, mod_grads)
 
-        if scorer is not None:
+        if score:
             scorer(indices, mod_grads)
 
         mod_grads.clear()
@@ -161,7 +164,7 @@ def collect_gradients(
     # Make sure the gradients are written to disk
     if builder is not None:
         builder.flush()
-        builder.all_reduce()
+        builder.dist_reduce()
 
 
 class Builder:
@@ -243,7 +246,7 @@ class Builder:
     def flush(self):
         self.grad_buffer.flush()
 
-    def all_reduce(self):
+    def dist_reduce(self):
         if self.reduce_cfg is None:
             return
 
@@ -252,15 +255,16 @@ class Builder:
         self.in_memory_grad_buffer = self.in_memory_grad_buffer.cuda()
 
         if dist.is_initialized():
-            dist.all_reduce(self.in_memory_grad_buffer, op=dist.ReduceOp.SUM)
+            dist.reduce(self.in_memory_grad_buffer, dst=0, op=dist.ReduceOp.SUM)
 
         if self.reduce_cfg.method == "mean":
             self.in_memory_grad_buffer /= self.num_items
 
-        self.grad_buffer[:] = (
-            self.in_memory_grad_buffer.cpu().numpy().astype(self.grad_buffer.dtype)
-        )
-        self.flush()
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if rank == 0:
+            self.grad_buffer[:] = (
+                self.in_memory_grad_buffer.cpu().numpy().astype(self.grad_buffer.dtype)
+            )
 
 
 def process_preconditioners(

@@ -58,9 +58,6 @@ class IndexConfig:
     run_path: str = field(positional=True)
     """Name of the run. Used to create a directory for run artifacts."""
 
-    save_index: bool = True
-    """Whether to write the gradient index to disk."""
-
     data: DataConfig = field(default_factory=DataConfig)
     """Specification of the data on which to build the index."""
 
@@ -93,6 +90,9 @@ class IndexConfig:
 
     skip_preconditioners: bool = False
     """Whether to skip computing preconditioners for the gradients."""
+
+    skip_index: bool = False
+    """Whether to skip building the gradient index."""
 
     stats_sample_size: int | None = 10_000
     """Number of examples to use for estimating processor statistics."""
@@ -154,14 +154,13 @@ class ScoreConfig:
     query_path: str = ""
     """Path to the existing query index."""
 
-    scores_path: str = ""
-    """Path to the directory where query scores should be written."""
-
     score: Literal["mean", "nearest", "individual"] = "mean"
-    """Method for scoring the gradients with the query. If mean
-    gradients will be scored by their similarity with the mean
-    query gradients, if max by the most similar query gradient,
-    if individual by each separate query gradient."""
+    """Method for scoring the gradients with the query.
+        `mean`: compute each gradient's similarity to the mean
+            query gradient.
+        `nearest`: compute each gradient's similarity to the most
+            similar query gradient (the maximum score).
+        `individual`: compute a separate score for each query gradient."""
 
     query_preconditioner_path: str | None = None
     """Path to a precomputed preconditioner to be applied to

@@ -109,16 +109,16 @@ def preprocess_grads(
     return grads
 
 
-def get_query_ds(query_cfg: ScoreConfig, device: str, rank: int | None = None):
+def get_query_ds(score_cfg: ScoreConfig, device: str, rank: int | None = None):
     """
     Load and preprocess the query dataset to get the query gradients. Preconditioners
     may be mixed as described in https://arxiv.org/html/2410.17413v1#S3.
     """
     # Collect the query gradients if they don't exist
-    query_path = Path(query_cfg.query_path)
+    query_path = Path(score_cfg.query_path)
     if not query_path.exists():
         raise FileNotFoundError(
-            f"Query dataset not found at {query_cfg.query_path}. "
+            f"Query dataset not found at {score_cfg.query_path}. "
             "Please build a query dataset index first."
         )
 
@@ -126,11 +126,11 @@ def get_query_ds(query_cfg: ScoreConfig, device: str, rank: int | None = None):
     with open(query_path / "info.json", "r") as f:
         target_modules = json.load(f)["dtype"]["names"]
 
-    if not query_cfg.modules:
-        query_cfg.modules = target_modules
+    if not score_cfg.modules:
+        score_cfg.modules = target_modules
 
     try:
-        query_ds = load_gradient_dataset(Path(query_cfg.query_path), structured=True)
+        query_ds = load_gradient_dataset(Path(score_cfg.query_path), structured=True)
     except ValueError as e:
         if "integer won't fit into a C int" not in str(e):
             raise e
@@ -141,7 +141,7 @@ def get_query_ds(query_cfg: ScoreConfig, device: str, rank: int | None = None):
                 "Attempting to load without structure..."
             )
 
-        mmap = load_gradients(Path(query_cfg.query_path), structured=False)
+        mmap = load_gradients(Path(score_cfg.query_path), structured=False)
 
         # Convert unstructured gradients to a dictionary of module-wise tensors
         with open(query_path / "info.json", "r") as f:
@@ -161,27 +161,27 @@ def get_query_ds(query_cfg: ScoreConfig, device: str, rank: int | None = None):
 
     query_ds = query_ds.with_format("torch", columns=target_modules)
 
-    use_q = query_cfg.query_preconditioner_path is not None
-    use_i = query_cfg.index_preconditioner_path is not None
+    use_q = score_cfg.query_preconditioner_path is not None
+    use_i = score_cfg.index_preconditioner_path is not None
 
     if use_q or use_i:
         q, i = {}, {}
         if use_q:
-            assert query_cfg.query_preconditioner_path is not None
+            assert score_cfg.query_preconditioner_path is not None
             q = GradientProcessor.load(
-                Path(query_cfg.query_preconditioner_path),
+                Path(score_cfg.query_preconditioner_path),
                 map_location=device,
             ).preconditioners
         if use_i:
-            assert query_cfg.index_preconditioner_path is not None
+            assert score_cfg.index_preconditioner_path is not None
             i = GradientProcessor.load(
-                Path(query_cfg.index_preconditioner_path), map_location=device
+                Path(score_cfg.index_preconditioner_path), map_location=device
             ).preconditioners
 
         mixed_preconditioner = (
             {
-                k: q[k] * query_cfg.mixing_coefficient
-                + i[k] * (1 - query_cfg.mixing_coefficient)
+                k: q[k] * score_cfg.mixing_coefficient
+                + i[k] * (1 - score_cfg.mixing_coefficient)
                 for k in q
             }
             if (q and i)
@@ -200,17 +200,17 @@ def get_query_ds(query_cfg: ScoreConfig, device: str, rank: int | None = None):
             return batch
 
         query_ds = query_ds.map(
-            precondition, batched=True, batch_size=query_cfg.batch_size
+            precondition, batched=True, batch_size=score_cfg.batch_size
         )
 
-    return query_ds.with_format("torch", columns=query_cfg.modules)
+    return query_ds.with_format("torch", columns=score_cfg.modules)
 
 
-def query_worker(
+def score_worker(
     rank: int,
     world_size: int,
     index_cfg: IndexConfig,
-    query_cfg: ScoreConfig,
+    score_cfg: ScoreConfig,
     ds: Dataset | IterableDataset,
     query_grads: dict[str, torch.Tensor],
 ):
@@ -250,10 +250,10 @@ def query_worker(
     if isinstance(ds, Dataset):
         kwargs["batches"] = allocate_batches(ds["length"], index_cfg.token_batch_size)
         kwargs["scorer"] = Scorer(
-            Path(query_cfg.scores_path),
+            index_cfg.partial_run_path,
             len(ds),
             query_grads,
-            query_cfg,
+            score_cfg,
             device=torch.device(f"cuda:{rank}"),
             dtype=model.dtype if model.dtype != "auto" else torch.float32,
         )
@@ -275,10 +275,10 @@ def query_worker(
             kwargs["batches"] = batches
 
             kwargs["scorer"] = Scorer(
-                Path(query_cfg.scores_path) / f"shard-{shard_id:05d}",
+                index_cfg.partial_run_path / f"shard-{shard_id:05d}",
                 len(ds_shard),
                 query_grads,
-                query_cfg,
+                score_cfg,
                 torch.device(f"cuda:{rank}"),
                 model.dtype if model.dtype != "auto" else torch.float32,
             )
@@ -298,23 +298,25 @@ def query_worker(
             processor.save(index_cfg.partial_run_path)
 
 
-def score_dataset(cfg: IndexConfig, query_cfg: ScoreConfig):
+def score_dataset(cfg: IndexConfig, score_cfg: ScoreConfig):
     cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
     with (cfg.partial_run_path / "index_config.json").open("w") as f:
         json.dump(asdict(cfg), f, indent=2)
+    with (cfg.partial_run_path / "score_config.json").open("w") as f:
+        json.dump(asdict(score_cfg), f, indent=2)
 
     ds = setup_data_pipeline(cfg)
-    query_ds = get_query_ds(query_cfg, f"cuda:{0}", 0)
+    query_ds = get_query_ds(score_cfg, f"cuda:{0}", 0)
     query_grads = preprocess_grads(
         query_ds,
-        query_cfg.modules,
-        query_cfg.unit_normalize,
-        query_cfg.batch_size,
+        score_cfg.modules,
+        score_cfg.unit_normalize,
+        score_cfg.batch_size,
         torch.device("cuda:0"),
-        accumulate_grads="mean" if query_cfg.score == "mean" else "none",
-        normalize_accumulated_grad=query_cfg.score == "mean",
+        accumulate_grads="mean" if score_cfg.score == "mean" else "none",
+        normalize_accumulated_grad=score_cfg.score == "mean",
     )
 
-    launch_distributed_run("query", query_worker, [cfg, query_cfg, ds, query_grads])
+    launch_distributed_run("score", score_worker, [cfg, score_cfg, ds, query_grads])
 
     shutil.move(cfg.partial_run_path, cfg.run_path)

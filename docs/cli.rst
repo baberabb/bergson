@@ -54,6 +54,7 @@ precomputed query gradients.
        --dataset NeelNanda/pile-10k \
        --method mean \
        --unit_normalize
+       --projection_dim 0
 
 .. autoclass:: bergson.__main__.Score
    :members:
@@ -65,47 +66,7 @@ precomputed query gradients.
 .. code-block:: bash
 
    bergson score \
-        runs/my-index-metadata \
+        runs/my-scores \
         --query_path /runs/my-index \
-        --scores_path /runs/scores \
         --dataset EleutherAI/SmolLM2-135M-10B
-
-
-Configuration
-^^^^^^^^^^^^^
-
-Index Configuration:
-
-.. autoclass:: bergson.config.IndexConfig
-   :members:
-   :undoc-members:
-
-Data Configuration:
-
-.. autoclass:: bergson.config.DataConfig
-   :members:
-   :undoc-members:
-
-Attention Configuration:
-
-.. autoclass:: bergson.config.AttentionConfig
-   :members:
-   :undoc-members:
-
-Query Configuration:
-
-.. autoclass:: bergson.config.QueryConfig
-   :members:
-   :undoc-members:
-
-Reduce Configuration:
-
-.. autoclass:: bergson.config.ReduceConfig
-   :members:
-   :undoc-members:
-
-Score Configuration:
-
-.. autoclass:: bergson.config.ScoreConfig
-   :members:
-   :undoc-members:
+        --projection_dim 0
