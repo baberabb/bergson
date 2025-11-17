@@ -120,6 +120,13 @@ class IndexConfig:
     """Configuration for each attention module to be split into head matrices.
     Used for attention modules specified in `split_attention_modules`."""
 
+    profile: bool = False
+    """Whether to enable profiling during gradient collection. 
+    If true, by default the first 4 steps will be profiled."""
+
+    debug: bool = False
+    """Whether to enable debug mode with additional logging."""
+
     @property
     def partial_run_path(self) -> Path:
         """Temporary path to use while writing build artifacts."""

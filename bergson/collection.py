@@ -168,6 +168,8 @@ def collect_gradients(
 
 
 class Builder:
+    """Creates and writes gradients to disk, with optional distributed reduction."""
+
     num_items: int
 
     grad_buffer: np.memmap
