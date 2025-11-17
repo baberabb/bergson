@@ -55,10 +55,12 @@ reportPrivateImportUsage = false
 include = ["bergson*"]
 
 [tool.ruff]
-lint.ignore = ["E741"]   # Ambiguous variable name
+lint.ignore = ["E741", # Ambiguous variable name
+               "E501", # line-too-long (formatter takes care of it)
+]
 # Enable pycodestyle (`E`), Pyflakes (`F`), and isort (`I`) codes
 # See https://beta.ruff.rs/docs/rules/ for more possible rules
-lint.select = ["E", "F", "I"]
+lint.extend-select = ["E", "F", "I"]
 # Same as Black.
 line-length = 88
 
