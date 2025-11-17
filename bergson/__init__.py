@@ -10,7 +10,7 @@ from .config import (
     ScoreConfig,
 )
 from .data import load_gradient_dataset, load_gradients
-from .gradients import GradientProcessor
+from .gradients import GradientCollector, GradientProcessor, fit_normalizers
 from .query.attributor import Attributor
 from .query.faiss_index import FaissConfig
 from .score.scorer import Scorer
@@ -20,10 +20,12 @@ __all__ = [
     "collect_gradients",
     "load_gradients",
     "load_gradient_dataset",
+    "fit_normalizers",
     "Attributor",
     "FaissConfig",
     "FiniteDiff",
     "GradientProcessor",
+    "GradientCollector",
     "IndexConfig",
     "DataConfig",
     "AttentionConfig",

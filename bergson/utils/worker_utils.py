@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -17,14 +18,53 @@ from transformers import (
 )
 
 from bergson.config import DataConfig, IndexConfig
-from bergson.data import load_data_string, tokenize
-from bergson.gradients import GradientProcessor
+from bergson.data import load_data_string, tokenize, allocate_batches
+from bergson.gradients import GradientProcessor, Normalizer
 from bergson.utils.utils import assert_type, get_layer_list
+from bergson.normalizer.fit_normalizers import fit_normalizers
+
+
+def create_normalizers(
+    model: PreTrainedModel,
+    ds: Dataset | IterableDataset,
+    cfg: IndexConfig,
+    target_modules: set[str] | None = None,
+) -> dict[str, Normalizer]:
+    """Create normalizers for the model"""
+    if cfg.normalizer != "none":
+        # Evenly sample `stats_sample_size` examples to compute statistics
+        if isinstance(ds, Dataset):
+            if cfg.stats_sample_size is not None and cfg.stats_sample_size < len(ds):
+                stats_ds = ds.shuffle(seed=0).select(range(cfg.stats_sample_size))
+            else:
+                stats_ds = ds
+        else:
+            if cfg.stats_sample_size is None:
+                stats_iterable_ds = ds
+            else:
+                stats_iterable_ds = ds.shuffle(seed=0).take(cfg.stats_sample_size)
+
+            stats_ds = assert_type(
+                Dataset, Dataset.from_generator(lambda: iter(stats_iterable_ds))
+            )
+
+        return fit_normalizers(
+            model,
+            stats_ds,
+            batches=allocate_batches(stats_ds["length"][:], cfg.token_batch_size),
+            kind=cfg.normalizer,
+            target_modules=target_modules,
+        )
+
+    return {}
 
 
 def create_processor(
+    model: PreTrainedModel,
+    ds: Dataset | IterableDataset,
     cfg: IndexConfig,
     rank: int,
+    target_modules: set[str] | None = None,
 ) -> GradientProcessor:
     """Handle processor creation and normalizer fitting"""
     processor_path = Path(cfg.processor_path)
@@ -37,8 +77,10 @@ def create_processor(
             map_location=f"cuda:{rank}",
         )
     else:
+        normalizers = create_normalizers(model, ds, cfg, target_modules)
+
         processor = GradientProcessor(
-            {},
+            normalizers,
             projection_dim=cfg.projection_dim or None,
             reshape_to_square=cfg.reshape_to_square,
             projection_type=cfg.projection_type,
@@ -148,6 +190,8 @@ def setup_model_and_peft(
         for layer in get_layer_list(model):  # type: ignore
             fully_shard(layer)
         fully_shard(model)
+
+    model = cast(PreTrainedModel, model)
 
     return model, target_modules  # type: ignore
 

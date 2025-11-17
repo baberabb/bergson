@@ -95,6 +95,9 @@ class IndexConfig:
     processor_path: str = ""
     """Path to a precomputed processor."""
 
+    normalizer: Literal["adafactor", "adam", "none"] = "none"
+    """Type of normalizer to use for the gradients."""
+
     skip_preconditioners: bool = False
     """Whether to skip computing preconditioners for the gradients."""
 
