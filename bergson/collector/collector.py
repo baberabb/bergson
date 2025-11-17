@@ -1,4 +1,3 @@
-import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import ContextDecorator, nullcontext
@@ -25,7 +24,7 @@ from transformers import PreTrainedModel
 
 from bergson.collection import Builder
 from bergson.collector.logger import get_logger
-from bergson.config import AttentionConfig, IndexConfig, ReduceConfig
+from bergson.config import IndexConfig, ReduceConfig
 from bergson.data import pad_and_tensor
 from bergson.gradients import GradientProcessor, LayerAdapter
 from bergson.peft import set_peft_enabled
@@ -271,6 +270,11 @@ class HookCollectorBase(ContextDecorator, ABC):
         """
         pass
 
+    @abstractmethod
+    def process_batch(self, *args, **kwargs) -> None:
+        """Process collected data for a batch."""
+        pass
+
 
 @dataclass(kw_only=True)
 class GradientCollector(HookCollectorBase):
@@ -293,6 +297,9 @@ class GradientCollector(HookCollectorBase):
     save_index: bool = False
 
     reduce_cfg: ReduceConfig | None = None
+
+    builder: Builder | None = None
+    scorer: Scorer | None = None
 
     def setup(self) -> None:
         """Initialize gradient storage dictionary."""
@@ -342,7 +349,21 @@ class GradientCollector(HookCollectorBase):
         else:
             self.mod_grads[name] = P.to(dtype=self.dtype)
 
+    def process_batch(self, indices: list[int], losses: torch.Tensor):
+        """Process collected gradients for a batch and update losses."""
+        if self.builder:
+            self.builder(indices, self.mod_grads)
+        if self.scorer:
+            self.scorer(indices, self.mod_grads)
+        self.mod_grads.clear()
+        self.per_doc_losses[indices] = losses.detach().type_as(self.per_doc_losses)
+
     def teardown(self):
+        # Flush and reduce builder if it exists
+        if self.builder is not None:
+            self.builder.flush()
+            self.builder.dist_reduce()
+
         if dist.is_initialized():
             dist.reduce(self.per_doc_losses, dst=0)
 
@@ -374,17 +395,12 @@ class CollectorComputer:
         batches: list[list[int]] | None = None,
         target_modules: set[str] | None = None,
         cfg: IndexConfig,
-        attention_cfgs: dict[str, AttentionConfig] | None = None,
-        reduce_cfg: ReduceConfig | None = None,
-        scorer: Scorer | None = None,
         **kwargs,
     ):
         # Model
         self.model = model
-
         self.device = model.device
         self.dtype = model.dtype
-        self.dtype_2 = torch.float32 if model.dtype == torch.float32 else torch.float16
 
         # Data
         self.data = data
@@ -395,44 +411,20 @@ class CollectorComputer:
 
         self.loss_fn = loss_fn_factory(cfg)
 
-        # TODO: Rewrite this
-        self.target_info = HookCollectorBase.discover_targets(
-            model.base_model, target_modules
-        )  # type: ignore
-        self.target_modules = target_modules  # which modules to compute EKFAC for, by default uses all MLPs
-
-        grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
+        # Collector
         self.collector = collector
-
-        # Disk related
-        save_index = bool(scorer) and not cfg.skip_index
-        self.mod_grads = {}
-        self.builder = (
-            Builder(cfg.partial_run_path, data, grad_sizes, self.dtype_2, reduce_cfg)
-            if save_index
-            else None
-        )
-        self.per_doc_losses = torch.full(
-            (len(data),),
-            device=model.device,
-            dtype=self.dtype_2,
-            fill_value=0.0,
-        )
-        self.scorer = scorer
 
         # Other
         self.cfg = cfg
         self.logger = get_logger(
-            "EkfacComputer", level="DEBUG" if cfg.debug else "INFO"
+            "CollectorComputer", level="DEBUG" if cfg.debug else "INFO"
         )
 
         ### Distributed related
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-        self.logger.info(
-            f"Computing EKFAC for {list(self.target_info)} target modules."
-        )
+        self.logger.info("Computing with collector for target modules.")
 
     def _setup_profiler(self):
         """Set up profiler if profiling is enabled."""
@@ -491,22 +483,10 @@ class CollectorComputer:
                     prof.step()
                 step += 1
 
-                if self.builder is not None:
-                    self.builder.flush()
-                    self.builder.dist_reduce()
-
-                if self.scorer is not None:
-                    self.scorer(indices, self.mod_grads)
-                self.mod_grads.clear()
-                self.per_doc_losses[indices] = losses.detach().type_as(
-                    self.per_doc_losses
-                )
+                self.collector.process_batch(indices, losses)
 
             if dist.is_initialized():
-                dist.reduce(self.per_doc_losses, dst=0)
-
-        if dist.is_initialized():
-            dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
+                dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
         self.logger.info(f"Total processed: {total_processed.item()}")
 
 
@@ -531,7 +511,7 @@ def loss_fn_factory(cfg: IndexConfig) -> Callable:
                 ref_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
                 set_peft_enabled(model, True)
 
-            ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
+            ft_lps = torch.log_softmax(logits, dim=-1)
 
             # Compute average KL across all unmasked tokens
             kls = torch.sum(ft_lps.exp() * (ft_lps - ref_lps), dim=-1)
@@ -548,5 +528,7 @@ def loss_fn_factory(cfg: IndexConfig) -> Callable:
             losses = losses.sum(1) / denoms
             if "advantage" in batch:
                 losses *= torch.tensor(batch["advantage"], device=losses.device)
+
+        return losses
 
     return loss_fn
