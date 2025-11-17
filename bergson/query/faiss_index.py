@@ -1,5 +1,4 @@
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from types import ModuleType
@@ -12,39 +11,10 @@ from numpy.lib.recfunctions import structured_to_unstructured
 from numpy.typing import NDArray
 from tqdm import tqdm
 
+from bergson.config import FaissConfig
+
 if TYPE_CHECKING:
     import faiss  # noqa: F401
-
-
-@dataclass
-class FaissConfig:
-    """Configuration for FAISS index."""
-
-    index_factory: str = "Flat"
-    """
-    The [FAISS index factory string](https://github.com/facebookresearch/faiss/wiki/Guidelines-to-choose-an-index).
-
-    Common FAISS factory strings:
-        - "IVF1,SQfp16": exact nearest neighbors with brute force search and fp16.
-            Valid for CPU or memmapped indices.
-        - "IVF1024,SQfp16": approximate nearest neighbors with 1024 cluster centers
-            and fp16. Fast approximate queries are produced at the cost of a slower
-            initial index build.
-        - "PQ6720": nearest neighbors with vector product quantization to 6720 elements.
-            Reduces memory usage at the cost of accuracy.
-    """
-    mmap_index: bool = False
-    """Whether to query the gradients on-disk."""
-    max_train_examples: int | None = None
-    """The maximum number of examples to train the index on.
-        If `None`, all examples will be used."""
-    batch_size: int = 1024
-    """The batch size for pre-processing gradients."""
-    num_shards: int = 1
-    """The number of shards to build for an index.
-        Using more shards reduces peak RAM usage."""
-    nprobe: int = 10
-    """The number of FAISS vector clusters to search if using ANN."""
 
 
 class Index(Protocol):

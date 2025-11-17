@@ -76,36 +76,36 @@ Configuration
 
 Index Configuration:
 
-.. autoclass:: bergson.data.IndexConfig
+.. autoclass:: bergson.config.IndexConfig
    :members:
    :undoc-members:
 
 Data Configuration:
 
-.. autoclass:: bergson.data.DataConfig
+.. autoclass:: bergson.config.DataConfig
    :members:
    :undoc-members:
 
 Attention Configuration:
 
-.. autoclass:: bergson.data.AttentionConfig
+.. autoclass:: bergson.config.AttentionConfig
    :members:
    :undoc-members:
 
 Query Configuration:
 
-.. autoclass:: bergson.data.QueryConfig
+.. autoclass:: bergson.config.QueryConfig
    :members:
    :undoc-members:
 
 Reduce Configuration:
 
-.. autoclass:: bergson.data.ReduceConfig
+.. autoclass:: bergson.config.ReduceConfig
    :members:
    :undoc-members:
 
 Score Configuration:
 
-.. autoclass:: bergson.data.ScoreConfig
+.. autoclass:: bergson.config.ScoreConfig
    :members:
    :undoc-members:

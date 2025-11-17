@@ -5,8 +5,8 @@ from typing import Optional, Union
 from simple_parsing import ArgumentParser, ConflictResolution
 
 from .build import build
-from .data import IndexConfig, ReduceConfig, ScoreConfig
-from .query.query_index import QueryConfig, query
+from .config import IndexConfig, QueryConfig, ReduceConfig, ScoreConfig
+from .query.query_index import query
 from .reduce import reduce
 from .score.score import score_dataset
 

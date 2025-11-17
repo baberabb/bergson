@@ -1,5 +1,4 @@
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 from datasets import Dataset, load_dataset
@@ -7,26 +6,8 @@ from simple_parsing import ArgumentParser, ConflictResolution
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from bergson import Attributor, FaissConfig
+from bergson.config import QueryConfig
 from bergson.utils import assert_type
-
-
-@dataclass
-class QueryConfig:
-    index: str = ""
-    """Path to the existing index."""
-
-    model: str = ""
-    """Model to use for the query. When not provided the model used to build the
-    index is used."""
-
-    text_field: str = "text"
-    """Field to use for the query."""
-
-    unit_norm: bool = False
-    """Whether to unit normalize the query."""
-
-    faiss: bool = False
-    """Whether to use FAISS for the query."""
 
 
 def query(cfg: QueryConfig):

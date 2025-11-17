@@ -1,7 +1,15 @@
 __version__ = "0.2.0"
 
 from .collection import collect_gradients
-from .data import AttentionConfig, DataConfig, IndexConfig, load_gradients
+from .config import (
+    AttentionConfig,
+    DataConfig,
+    IndexConfig,
+    QueryConfig,
+    ReduceConfig,
+    ScoreConfig,
+)
+from .data import load_gradients
 from .gradcheck import FiniteDiff
 from .gradients import GradientCollector, GradientProcessor
 from .query.attributor import Attributor
@@ -21,4 +29,6 @@ __all__ = [
     "AttentionConfig",
     "Scorer",
     "ScoreConfig",
+    "ReduceConfig",
+    "QueryConfig",
 ]

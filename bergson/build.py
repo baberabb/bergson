@@ -10,7 +10,8 @@ from datasets import Dataset, IterableDataset
 from tqdm.auto import tqdm
 
 from bergson.collection import collect_gradients
-from bergson.data import IndexConfig, allocate_batches
+from bergson.config import IndexConfig
+from bergson.data import allocate_batches
 from bergson.utils import assert_type
 from bergson.worker_utils import setup_model_and_peft
 

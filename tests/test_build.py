@@ -6,12 +6,9 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM
 
-from bergson import (
-    AttentionConfig,
-    GradientProcessor,
-    collect_gradients,
-)
-from bergson.data import IndexConfig, load_gradients
+from bergson import GradientProcessor, collect_gradients
+from bergson.config import AttentionConfig, IndexConfig
+from bergson.data import load_gradients
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

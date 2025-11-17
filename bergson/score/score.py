@@ -13,13 +13,8 @@ from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
 from bergson.collection import collect_gradients
-from bergson.data import (
-    IndexConfig,
-    ScoreConfig,
-    allocate_batches,
-    load_gradient_dataset,
-    load_gradients,
-)
+from bergson.config import IndexConfig, ScoreConfig
+from bergson.data import allocate_batches, load_gradient_dataset, load_gradients
 from bergson.distributed import launch_distributed_run
 from bergson.gradients import GradientProcessor
 from bergson.score.scorer import Scorer

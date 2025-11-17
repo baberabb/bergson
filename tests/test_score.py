@@ -12,7 +12,8 @@ from bergson import (
     GradientProcessor,
     collect_gradients,
 )
-from bergson.data import IndexConfig, ScoreConfig, create_index
+from bergson.config import IndexConfig, ScoreConfig
+from bergson.data import create_index
 from bergson.score.scorer import Scorer
 
 

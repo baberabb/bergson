@@ -3,7 +3,7 @@ from typing import Callable
 
 import torch
 
-from bergson.data import ScoreConfig
+from bergson.config import ScoreConfig
 from bergson.score.score_writer import MemmapScoreWriter, ScoreWriter
 
 
