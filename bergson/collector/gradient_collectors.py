@@ -143,13 +143,8 @@ class GradientCollector(HookCollectorBase):
             a_factor = a_factor.rsqrt()
             a = a * a_factor.type_as(a)  # [N, S, I] * [I] → [N, S, I]
 
-        if module._has_bias:
-            # Append ones to activation for bias term
-            ones = torch.ones(a.size(0), a.size(1), 1, device=a.device, dtype=a.dtype)
-            a = torch.cat([a, ones], dim=-1)
-            i = i + 1
-            setattr(module, LayerAdapter.in_attr(module), i)
-        if p is not None:
+        # Only project if no bias (bias requires full gradient to be materialized)
+        if p is not None and not module._has_bias:
             a_projection = self.projection(name, p, i, "right", a.device, a.dtype).T
             a = a @ a_projection  # type: ignore
         # set module._inputs to a
@@ -171,25 +166,77 @@ class GradientCollector(HookCollectorBase):
         i = getattr(module, LayerAdapter.in_attr(module))
         o = getattr(module, LayerAdapter.out_attr(module))
         normalizer = self.processor.normalizers.get(name)
+        bias_grad = None
 
-        if isinstance(normalizer, AdamNormalizer):
-            full_gradient = g.mT @ a  # [N, O, S] @ [N, S, I] → [N, O, I]
-            P = normalizer.normalize_(full_gradient)
-            if p is not None:
-                g_projection = self.projection(name, p, o, "left", g.device, g.dtype)
-                a_projection = self.projection(name, p, i, "right", g.device, g.dtype).T
-                P = g_projection @ P @ a_projection
-        else:
-            if isinstance(normalizer, AdafactorNormalizer):
+        match normalizer:
+            case AdamNormalizer():
+                if module._has_bias and normalizer.bias_avg_sq is not None:
+                    # Normalize bias with bias second moments # [N, S, O] → [N, O]
+                    bias_grad = g.sum(dim=1) / normalizer.bias_avg_sq.sqrt().add(1e-8)
+
+                P = g.mT @ a  # [N, O, S] @ [N, S, I] → [N, O, I]
+                P = normalizer.normalize_(P)
+
+                # Append pre-normalized bias gradient
+                if bias_grad is not None:
+                    P = torch.cat([P, bias_grad.unsqueeze(2)], dim=2)  # [N, O, I+1]
+                    i += 1
+
+                if p is not None:
+                    g_projection = self.projection(
+                        name, p, o, "left", g.device, g.dtype
+                    )
+                    a_projection = self.projection(
+                        name, p, i, "right", g.device, g.dtype
+                    ).T
+                    P = g_projection @ P @ a_projection
+
+            case AdafactorNormalizer():
+                if module._has_bias and normalizer.bias_avg_sq is not None:
+                    # Compute bias from RAW g (before row normalization)
+                    bias_grad = g.sum(dim=1)  # [N, S, O] → [N, O]
+                    # Normalize bias with bias second moments
+                    bias_grad = bias_grad / normalizer.bias_avg_sq.add(1e-30).sqrt()
+
+                # Apply row normalization to g (for weights)
                 g_factor = normalizer.row.add(1e-30)
                 g_factor = g_factor.mean().sqrt() * g_factor.rsqrt()
                 g = g * g_factor.type_as(g)  # [N, S, O] * [O] → [N, S, O]
 
-            if p is not None:
-                g_projection = self.projection(name, p, o, "left", g.device, g.dtype)
-                g = g @ g_projection.T  # [N, S, p]
+                # If bias is present, materialize full gradient then project
+                if bias_grad is not None:
+                    P = g.mT @ a  # [N, O, I/q]
 
-            P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
+                    # Append pre-normalized bias gradient
+                    P = torch.cat([P, bias_grad.unsqueeze(2)], dim=2)  # [N, O, I+1]
+                    i += 1
+
+                    # Project the entire normalized gradient
+                    if p is not None:
+                        g_projection = self.projection(
+                            name, p, o, "left", g.device, g.dtype
+                        )
+                        a_projection = self.projection(
+                            name, p, i, "right", a.device, a.dtype
+                        ).T
+                        P = g_projection @ P @ a_projection
+                else:
+                    if p is not None:
+                        g_projection = self.projection(
+                            name, p, o, "left", g.device, g.dtype
+                        )
+                        g = g @ g_projection.T  # [N, S, p]
+
+                    P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
+            # no normalizer
+            case _:
+                if p is not None:
+                    g_projection = self.projection(
+                        name, p, o, "left", g.device, g.dtype
+                    )
+                    g = g @ g_projection.T
+
+                P = g.mT @ a  # [N, O/p, I/q]
 
         P = P.flatten(1).clamp_(self.lo, self.hi)
 
