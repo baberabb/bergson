@@ -13,7 +13,7 @@ from bergson.collection import collect_gradients
 from bergson.collector.collector import CollectorComputer, GradientCollector
 from bergson.config import IndexConfig
 from bergson.data import allocate_batches
-from bergson.utils import assert_type
+from bergson.utils import assert_type, setup_reproducibility
 from bergson.worker_utils import setup_model_and_peft
 
 from .distributed import launch_distributed_run
@@ -111,6 +111,8 @@ def build(index_cfg: IndexConfig):
         Specifies the run path, dataset, model, tokenizer, PEFT adapters,
         and many other gradient collection settings.
     """
+    if index_cfg.debug:
+        setup_reproducibility()
     index_cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
     with (index_cfg.partial_run_path / "index_config.json").open("w") as f:
         json.dump(asdict(index_cfg), f, indent=2)
@@ -132,6 +134,9 @@ def new_build(index_cfg: IndexConfig):
         Specifies the run path, dataset, model, tokenizer, PEFT adapters,
         and many other gradient collection settings.
     """
+    if index_cfg.debug:
+        setup_reproducibility()
+
     index_cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
     with (index_cfg.partial_run_path / "index_config.json").open("w") as f:
         json.dump(asdict(index_cfg), f, indent=2)

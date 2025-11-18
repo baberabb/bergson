@@ -1,4 +1,6 @@
 import hashlib
+import os
+import random
 from typing import Any, Literal, Type, TypeVar, cast
 
 import numpy as np
@@ -58,3 +60,25 @@ def create_projection_matrix(
         raise ValueError(f"Unknown projection type: {projection_type}")
     A /= A.norm(dim=1, keepdim=True)
     return A
+
+
+def setup_reproducibility():
+    """Setup reproducibility for distributed training"""
+    print("WARNING: Running in debug mode, much slower performance expected.")
+    seed: int = 42
+    # Set all random seeds - same across all ranks for model consistency
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    # Force deterministic behavior
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+
+    # Environment variables for determinism
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
