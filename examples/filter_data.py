@@ -17,7 +17,8 @@ from transformers.modeling_utils import PreTrainedModel
 from trl import SFTConfig, SFTTrainer, setup_chat_format
 
 from bergson.collection import GradientCollector, GradientProcessor
-from bergson.data import DataConfig, load_gradient_dataset, tokenize, unflatten
+from bergson.config import DataConfig
+from bergson.data import load_gradient_dataset, tokenize, unflatten
 from bergson.utils import assert_type
 
 

@@ -239,13 +239,12 @@ class GradientCollectorCallback(TrainerCallback):
         **kwargs,
     ):
         self.on_substep_end(args, state, control)
-        print("Step end")
 
         # Record training order if enabled
         if self.order is not None:
-            assert (
-                self.batch_indices is not None
-            ), "Batch indices are not available for training order tracking"
+            assert self.batch_indices is not None, (
+                "Batch indices are not available for training order tracking"
+            )
 
             epoch = int(state.epoch or 0)
             global_step = state.global_step
@@ -279,32 +278,75 @@ class GradientCollectorCallback(TrainerCallback):
 
         # Read normalizers off of the optimizer state. We need to figure out
         # what type of optimizer this is first.
+        # Collect references to both weight and bias second moments per layer
+        layer_second_moments: dict[str, dict[str, Tensor]] = {}
+
         for group in optimizer.param_groups:
-            lr_sqrt = group["lr"] ** 0.5
+            group_lr = group["lr"]
 
             for param in group["params"]:
-                name = param_to_name[param].removesuffix(".weight")
-                if name not in self.collector.target_info:
+                param_name = param_to_name[param]
+
+                # Extract layer name (remove .weight or .bias suffix)
+                if param_name.endswith(".weight"):
+                    param_type = "weight"
+                    layer_name = param_name.removesuffix(".weight")
+                elif param_name.endswith(".bias"):
+                    param_type = "bias"
+                    layer_name = param_name.removesuffix(".bias")
+                else:
+                    continue
+
+                if layer_name not in self.collector.target_info:
                     continue
 
                 p_state = optimizer.state[param]
 
+                # Initialize layer dict if needed, storing this group's learning rate
+                if layer_name not in layer_second_moments:
+                    layer_second_moments[layer_name] = {"lr": group_lr}
+
                 # Adam-like optimizer
                 if (eas := p_state.get("exp_avg_sq")) is not None:
-                    norm = AdamNormalizer(eas).to_adafactor()
-
+                    layer_second_moments[layer_name][param_type] = eas
                 # Adafactor-like optimizer
                 elif (vr := p_state.get("exp_avg_sq_row")) is not None:
                     vc = p_state.get("exp_avg_sq_col")
-                    norm = AdafactorNormalizer(vr, vc)
-                else:
-                    continue
+                    if param_type == "weight":
+                        # Factorized second moments for weights
+                        layer_second_moments[layer_name]["row"] = vr
+                        layer_second_moments[layer_name]["col"] = vc
+                    elif param_type == "bias":
+                        # Adafactor stores bias as regular exp_avg_sq
+                        bias_eas = p_state.get("exp_avg_sq")
+                        if bias_eas is not None:
+                            layer_second_moments[layer_name]["bias"] = bias_eas
 
-                # Scale the gradient by the current learning rate. It's factorized
-                # so we multiply each factor by the square root of the LR.
-                norm.row *= lr_sqrt
-                norm.col *= lr_sqrt
-                normalizers[name] = norm
+        # Build normalizers from collected second moments
+        for layer_name, moments in layer_second_moments.items():
+            lr = moments["lr"]
+
+            # Adam-like: has weight exp_avg_sq
+            if "weight" in moments:
+                weight_eas = moments["weight"]
+                bias_eas = moments.get("bias")  # May be None
+
+                # Create Adam normalizer with optional bias, then convert to Adafactor
+                # TODO: always convert to adafactor?
+                norm = (
+                    AdamNormalizer(weight_eas, bias_eas).to_adafactor().scale_by_lr(lr)
+                )
+
+            # Adafactor-like: has row/col
+            elif "row" in moments and "col" in moments:
+                bias_eas = moments.get("bias")  # May be present
+                norm = AdafactorNormalizer(
+                    moments["row"], moments["col"], bias_eas
+                ).scale_by_lr(lr)
+            else:
+                continue
+
+            normalizers[layer_name] = norm
 
         proc.normalizers = normalizers
 

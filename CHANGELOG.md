@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.2.0 (2025-11-13)
+
+### Features
+
+- Add on-the-fly queries
+  ([`0ce0ee2`](https://github.com/EleutherAI/bergson/commit/0ce0ee2a0ec151f3fa0e6ee1eef3810408a54128))
+
+
 ## v0.1.1 (2025-10-16)
 
 ### Bug Fixes

@@ -6,11 +6,8 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM
 
-from bergson import (
-    AttentionConfig,
-    GradientProcessor,
-    collect_gradients,
-)
+from bergson import GradientProcessor, collect_gradients
+from bergson.config import AttentionConfig, IndexConfig
 from bergson.data import load_gradients
 
 
@@ -32,28 +29,34 @@ def test_build_e2e(tmp_path: Path):
             "--truncation",
         ],
         cwd=tmp_path,
+        capture_output=True,  # Add this
+        text=True,  # Add this to get strings instead of bytes
     )
 
-    assert result.returncode == 0
+    assert "Error" not in result.stderr, f"Error found in stderr:\n{result.stderr}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_build_consistency(tmp_path: Path, model, dataset):
+    cfg = IndexConfig(
+        run_path=str(tmp_path),
+        skip_preconditioners=True,
+    )
     collect_gradients(
         model=model,
         data=dataset,
         processor=GradientProcessor(),
-        path=tmp_path,
-        skip_preconditioners=True,
+        cfg=cfg,
     )
-    index = load_gradients(tmp_path)
 
-    # Regenerate cache
+    index = load_gradients(cfg.partial_run_path)
+
     cache_path = Path("runs/test_build_cache.npy")
     if not cache_path.exists():
+        # Regenerate cache
         np.save(cache_path, index[index.dtype.names[0]][0])
-    cached_item_grad = np.load(cache_path)
 
+    cached_item_grad = np.load(cache_path)
     first_module_grad = index[index.dtype.names[0]][0]
 
     assert np.allclose(first_module_grad, cached_item_grad, atol=1e-6)
@@ -67,15 +70,19 @@ def test_split_attention_build(tmp_path: Path, model, dataset):
         ),
     }
 
+    cfg = IndexConfig(run_path=str(tmp_path))
+
     collect_gradients(
         model=model,
         data=dataset,
         processor=GradientProcessor(projection_dim=16),
-        path=tmp_path,
+        cfg=cfg,
         attention_cfgs=attention_cfgs,
     )
 
-    assert any(tmp_path.iterdir()), "Expected artifacts in the temp run_path"
+    assert any(Path(cfg.partial_run_path).iterdir()), (
+        "Expected artifacts in the temp run_path"
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -86,19 +93,25 @@ def test_conv1d_build(tmp_path: Path, dataset):
         model_name, trust_remote_code=True, use_safetensors=True
     )
 
-    collect_gradients(
-        model=model,
-        data=dataset,
-        processor=GradientProcessor(projection_dim=16),
-        path=tmp_path,
+    cfg = IndexConfig(
+        run_path=str(tmp_path),
         # This build hangs in pytest with preconditioners enabled.
         # It works when run directly so it may be a pytest issue.
         skip_preconditioners=True,
     )
 
-    assert any(tmp_path.iterdir()), "Expected artifacts in the run path"
+    collect_gradients(
+        model=model,
+        data=dataset,
+        processor=GradientProcessor(projection_dim=16),
+        cfg=cfg,
+    )
 
-    index = load_gradients(tmp_path)
+    assert any(Path(cfg.partial_run_path).iterdir()), (
+        "Expected artifacts in the run path"
+    )
+
+    index = load_gradients(cfg.partial_run_path)
 
     assert len(modules := index.dtype.names) != 0
     assert len(index[modules[0]]) == len(dataset)

@@ -1,6 +1,5 @@
 import math
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import torch
@@ -10,37 +9,32 @@ from datasets import Dataset, Value
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from .data import create_index, pad_and_tensor
-from .gradients import AttentionConfig, GradientCollector, GradientProcessor
-from .peft import set_peft_enabled
-from .scorer import Scorer
+from bergson.config import AttentionConfig, IndexConfig, ReduceConfig
+from bergson.data import create_index, pad_and_tensor
+from bergson.gradients import GradientCollector, GradientProcessor
+from bergson.peft import set_peft_enabled
+from bergson.score.scorer import Scorer
 
 
 def collect_gradients(
     model: PreTrainedModel,
     data: Dataset,
     processor: GradientProcessor,
-    path: Path,
+    cfg: IndexConfig,
     *,
     batches: list[list[int]] | None = None,
-    kl_divergence: bool | None = None,
-    loss_reduction: Literal["mean", "sum"] = "mean",
-    skip_preconditioners: bool = False,
     target_modules: set[str] | None = None,
     attention_cfgs: dict[str, AttentionConfig] | None = None,
-    save_index: bool = True,
-    drop_columns: bool = False,
     scorer: Scorer | None = None,
-    token_batch_size: int | None = None,
-    module_wise: bool = False,
+    reduce_cfg: ReduceConfig | None = None,
 ):
     """
     Compute projected gradients using a subset of the dataset.
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
 
-    if attention_cfgs is None:
-        attention_cfgs = {}
+    score = scorer is not None
+    save_index = not score and not cfg.skip_index
 
     # Batch size of one by default
     if batches is None:
@@ -52,11 +46,10 @@ def collect_gradients(
 
     # TODO: Handle this more elegantly
     dtype = torch.float32 if model.dtype == torch.float32 else torch.float16
-    np_dtype = np.float32 if dtype == torch.float32 else np.float16
     lo = torch.finfo(dtype).min
     hi = torch.finfo(dtype).max
 
-    def callback(name: str, g: torch.Tensor, indices: list[int]):
+    def callback(name: str, g: torch.Tensor):
         g = g.flatten(1).clamp_(lo, hi)
         if save_index:
             # Asynchronously move the gradient to CPU and convert to the final dtype
@@ -64,11 +57,8 @@ def collect_gradients(
         else:
             mod_grads[name] = g.to(dtype=dtype)
 
-        if scorer and module_wise:
-            scorer(indices, mod_grads, name=name)
-
         # Compute the outer product of the flattened gradient
-        if not skip_preconditioners:
+        if not cfg.skip_preconditioners:
             g = g.float()
             preconditioner = preconditioners.get(name, None)
             if preconditioner is None:
@@ -81,21 +71,13 @@ def collect_gradients(
         callback,
         processor,
         target_modules=target_modules,
-        attention_cfgs=attention_cfgs,
+        attention_cfgs=attention_cfgs or {},
     )
 
     # Allocate space ahead of time for the gradients
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
-
-    # Allocate space ahead of time for the gradients
-    grad_buffer = (
-        create_index(
-            path,
-            num_grads=len(data),
-            grad_sizes=grad_sizes,
-            dtype=np_dtype,
-            with_structure=False,
-        )
+    builder = (
+        Builder(cfg.partial_run_path, data, grad_sizes, dtype, reduce_cfg)
         if save_index
         else None
     )
@@ -115,17 +97,15 @@ def collect_gradients(
             device=model.device,
         )
         masks = y[:, 1:] != -100
-        denoms = masks.sum(dim=1, dtype=dtype) if loss_reduction == "mean" else 1.0
+        denoms = masks.sum(dim=1, dtype=dtype) if cfg.loss_reduction == "mean" else 1.0
 
-        if kl_divergence:
+        if cfg.loss_fn == "kl":
             with torch.inference_mode():
                 set_peft_enabled(model, False)
                 ref_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
                 set_peft_enabled(model, True)
 
             with collector:
-                collector.indices = indices
-
                 ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
 
                 # Compute average KL across all unmasked tokens
@@ -137,8 +117,6 @@ def collect_gradients(
                 losses.sum().backward()
         else:
             with collector:
-                collector.indices = indices
-
                 logits = model(x).logits[:, :-1]
 
                 losses = F.cross_entropy(
@@ -154,27 +132,11 @@ def collect_gradients(
 
         model.zero_grad()
 
-        if grad_buffer is not None:
-            # Weirdly you need to explicitly synchronize here in order to make
-            # sure that the nonblocking copies actually finish before we call
-            # .numpy()
-            torch.cuda.synchronize()
+        if builder is not None:
+            builder(indices, mod_grads)
 
-            # It turns out that it's very important for efficiency to write the
-            # gradients sequentially instead of first concatenating them, then
-            # writing to one vector
-            offset = 0
-            for module_name in grad_sizes.keys():
-                grad_buffer[
-                    indices, offset : offset + mod_grads[module_name].shape[1]
-                ] = mod_grads[module_name].numpy()
-                offset += mod_grads[module_name].shape[1]
-
-        if scorer is not None:
-            if module_wise:
-                scorer.finalize_module_wise(indices)
-            else:
-                scorer(indices, mod_grads)
+        if score:
+            scorer(indices, mod_grads)
 
         mod_grads.clear()
         per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
@@ -185,7 +147,7 @@ def collect_gradients(
         dist.reduce(per_doc_losses, dst=0)
 
     if rank == 0:
-        if drop_columns:
+        if cfg.drop_columns:
             data = data.remove_columns(["input_ids"])
 
         data = data.add_column(
@@ -194,13 +156,115 @@ def collect_gradients(
             feature=Value("float16" if dtype == torch.float16 else "float32"),
             new_fingerprint="loss",
         )
-        data.save_to_disk(path / "data.hf")
 
-        processor.save(path)
+        data.save_to_disk(cfg.partial_run_path / "data.hf")
+
+        processor.save(cfg.partial_run_path)
 
     # Make sure the gradients are written to disk
-    if grad_buffer is not None:
-        grad_buffer.flush()
+    if builder is not None:
+        builder.flush()
+        builder.dist_reduce()
+
+
+class Builder:
+    num_items: int
+
+    grad_buffer: np.memmap
+
+    reduce_cfg: ReduceConfig | None
+
+    def __init__(
+        self,
+        path: Path,
+        data: Dataset,
+        grad_sizes: dict[str, int],
+        dtype: torch.dtype,
+        reduce_cfg: ReduceConfig | None = None,
+    ):
+        self.grad_sizes = grad_sizes
+        self.num_items = len(data)
+        self.reduce_cfg = reduce_cfg
+
+        if reduce_cfg is not None:
+            num_grads = 1
+            self.in_memory_grad_buffer = torch.zeros(
+                (num_grads, sum(self.grad_sizes.values())), dtype=torch.float32
+            )
+            np_dtype = np.float32
+        else:
+            num_grads = self.num_items
+            self.in_memory_grad_buffer = None
+            # TODO: Handle this more elegantly
+            np_dtype = np.float32 if dtype == torch.float32 else np.float16
+
+        self.grad_buffer = create_index(
+            path,
+            num_grads=num_grads,
+            grad_sizes=self.grad_sizes,
+            dtype=np_dtype,
+            with_structure=False,
+        )
+
+    def reduce(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
+        assert self.reduce_cfg is not None and self.in_memory_grad_buffer is not None
+
+        if self.reduce_cfg.unit_normalize:
+            ssqs = torch.zeros(len(indices))
+            for mod_grad in mod_grads.values():
+                ssqs += mod_grad.pow(2).sum(dim=-1)
+            norms = ssqs.sqrt()
+        else:
+            norms = torch.ones(len(indices))
+
+        offset = 0
+        for module_name in self.grad_sizes.keys():
+            mod_grads[module_name] /= norms.unsqueeze(1)
+
+            grads = mod_grads[module_name].sum(dim=0).to(torch.float32)
+            self.in_memory_grad_buffer[
+                0, offset : offset + mod_grads[module_name].shape[1]
+            ] += grads
+            offset += mod_grads[module_name].shape[1]
+
+    def __call__(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
+        torch.cuda.synchronize()
+
+        if self.reduce_cfg is not None:
+            self.reduce(indices, mod_grads)
+        else:
+            # It turns out that it's very important for efficiency to write the
+            # gradients sequentially instead of first concatenating them, then
+            # writing to one vector
+            offset = 0
+            for module_name in self.grad_sizes.keys():
+                self.grad_buffer[
+                    indices, offset : offset + mod_grads[module_name].shape[1]
+                ] = mod_grads[module_name].numpy()
+                offset += mod_grads[module_name].shape[1]
+
+    def flush(self):
+        self.grad_buffer.flush()
+
+    def dist_reduce(self):
+        if self.reduce_cfg is None:
+            return
+
+        assert self.in_memory_grad_buffer is not None
+
+        self.in_memory_grad_buffer = self.in_memory_grad_buffer.cuda()
+
+        if dist.is_initialized():
+            dist.reduce(self.in_memory_grad_buffer, dst=0, op=dist.ReduceOp.SUM)
+
+        if self.reduce_cfg.method == "mean":
+            self.in_memory_grad_buffer /= self.num_items
+
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if rank == 0:
+            self.grad_buffer[:] = (
+                self.in_memory_grad_buffer.cpu().numpy().astype(self.grad_buffer.dtype)
+            )
 
 
 def process_preconditioners(

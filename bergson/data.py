@@ -2,9 +2,8 @@ import json
 import math
 import os
 import random
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Sequence
 
 import numpy as np
 import pyarrow as pa
@@ -18,175 +17,10 @@ from datasets import (
     concatenate_datasets,
     load_dataset,
 )
-from numpy.lib.recfunctions import structured_to_unstructured
 from numpy.typing import DTypeLike
-from simple_parsing import field
 
+from .config import DataConfig
 from .utils import assert_type
-
-
-@dataclass
-class DataConfig:
-    dataset: str = "EleutherAI/SmolLM2-135M-10B"
-    """Dataset identifier to build the index from."""
-
-    split: str = "train"
-    """Split of the dataset to use for building the index."""
-
-    subset: str | None = None
-    """Subset of the dataset to use for building the index."""
-
-    prompt_column: str = "text"
-    """Column in the dataset that contains the prompts."""
-
-    completion_column: str = ""
-    """Optional column in the dataset that contains the completions."""
-
-    conversation_column: str = ""
-    """Optional column in the dataset that contains the conversation."""
-
-    reward_column: str = ""
-    """Optional column in the dataset that contains the rewards.
-    When specified, gradients are calculated using the policy
-    gradient loss from Dr. GRPO. https://arxiv.org/abs/2503.20783"""
-
-    truncation: bool = False
-    """Whether to truncate long documents to fit the token budget."""
-
-
-@dataclass
-class AttentionConfig:
-    """Config for splitting an attention module into head matrices."""
-
-    num_heads: int = 0
-    """Number of attention heads."""
-
-    head_size: int = 0
-    """Size of each attention head."""
-
-    head_dim: int = 0
-    """Axis index for `num_heads` in the weight matrix."""
-
-
-@dataclass
-class QueryConfig:
-    """Config for querying an index on the fly."""
-
-    query_path: str = ""
-    """Path to the existing query index."""
-
-    score: Literal["mean", "nearest", "individual"] = "mean"
-    """Method for scoring the gradients with the query. If mean
-    gradients will be scored by their similarity with the mean
-    query gradients, if max by the most similar query gradient,
-    if individual by each separate query gradient."""
-
-    scores_path: str = ""
-    """Path to the directory where query scores should be written."""
-
-    query_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner to be applied to
-    the query dataset gradients."""
-
-    index_preconditioner_path: str | None = None
-    """Path to a precomputed preconditioner to be applied to
-    the query dataset gradients. This does not affect the
-    ability to compute a new preconditioner during the query."""
-
-    mixing_coefficient: float = 0.99
-    """Coefficient to weight the application of the query preconditioner
-    and the pre-computed index preconditioner. 0.0 means only use the
-    index preconditioner and 1.0 means only use the query preconditioner."""
-
-    modules: list[str] = field(default_factory=list)
-    """Modules to use for the query. If empty, all modules will be used."""
-
-    unit_normalize: bool = False
-    """Whether to unit normalize the gradients before computing the scores."""
-
-    batch_size: int = 1024
-    """Batch size for processing the query dataset."""
-
-
-@dataclass
-class IndexConfig:
-    """Config for building the index and running the model/dataset pipeline."""
-
-    run_path: str = field(positional=True)
-    """Name of the run. Used to create a directory for run artifacts."""
-
-    save_index: bool = True
-    """Whether to write the gradient index to disk."""
-
-    data: DataConfig = field(default_factory=DataConfig)
-    """Specification of the data on which to build the index."""
-
-    model: str = "HuggingFaceTB/SmolLM2-135M"
-    """Name of the model to load."""
-
-    fsdp: bool = False
-    """Whether to use Fully Sharded Data Parallel (FSDP) for collecing gradients."""
-
-    precision: Literal["auto", "bf16", "fp16", "fp32", "int4", "int8"] = "auto"
-    """Precision (dtype) to use for the model parameters."""
-
-    projection_dim: int = 16
-    """Dimension of the random projection for the index, or 0 to disable it."""
-
-    include_bias: bool = False
-    """Whether to append bias gradients for modules that have them."""
-
-    reshape_to_square: bool = False
-    """Whether to reshape the gradients to a square matrix."""
-
-    projection_type: Literal["normal", "rademacher"] = "rademacher"
-    """Type of random projections to use for the gradients."""
-
-    token_batch_size: int = 8192
-    """Batch size in tokens for building the index."""
-
-    processor_path: str = ""
-    """Path to a precomputed processor."""
-
-    skip_preconditioners: bool = False
-    """Whether to skip computing preconditioners for the gradients."""
-
-    stats_sample_size: int | None = 10_000
-    """Number of examples to use for estimating processor statistics."""
-
-    drop_columns: bool = True
-    """Only return the new dataset columns."""
-
-    loss_fn: Literal["ce", "kl"] = "ce"
-    """Loss function to use."""
-
-    loss_reduction: Literal["mean", "sum"] = "mean"
-    """Reduction method for the loss function."""
-
-    # TODO consider renaming this
-    module_wise: bool = False
-    """Whether to process the module gradients individually."""
-
-    streaming: bool = False
-    """Whether to use streaming mode for the dataset."""
-
-    stream_shard_size: int = 400_000
-    """Shard size for streaming the dataset into Dataset objects."""
-
-    revision: str | None = None
-    """Revision of the model."""
-
-    split_attention_modules: list[str] = field(default_factory=list)
-    """Modules to split into head matrices."""
-
-    attention: AttentionConfig = field(default_factory=AttentionConfig)
-    """Configuration for each attention module to be split into head matrices.
-    Used for attention modules specified in `split_attention_modules`."""
-
-    @property
-    def partial_run_path(self) -> Path:
-        """Temporary path used while writing build artifacts."""
-        return Path(self.run_path + ".part")
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -421,7 +255,7 @@ def load_data_string(
     return ds
 
 
-def load_gradients(root_dir: Path, with_structure: bool = True) -> np.memmap:
+def load_gradients(root_dir: Path, structured: bool = True) -> np.memmap:
     """Map the structured gradients stored in `root_dir` into memory."""
 
     with (root_dir / "info.json").open("r") as f:
@@ -429,7 +263,7 @@ def load_gradients(root_dir: Path, with_structure: bool = True) -> np.memmap:
 
     num_grads = info["num_grads"]
 
-    if with_structure:
+    if structured:
         dtype = info["dtype"]
         shape = (num_grads,)
     else:
@@ -445,30 +279,25 @@ def load_gradients(root_dir: Path, with_structure: bool = True) -> np.memmap:
     )
 
 
-def load_gradient_dataset(
-    root_dir: Path, concatenate_gradients: bool = False
-) -> Dataset:
+def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
 
     def load_shard(dir: Path) -> Dataset:
-        mmap = load_gradients(dir)
         ds = Dataset.load_from_disk(dir / "data.hf")
 
-        # concatenate the extracted module gradients into a single column
-        if concatenate_gradients:
-            unstructured_data = structured_to_unstructured(mmap)
-            flat = pa.array(unstructured_data.reshape(-1))
-            col_arrow = pa.FixedSizeListArray.from_arrays(
-                flat, unstructured_data.shape[1]
-            )
-
-            ds = ds.add_column("gradients", col_arrow, new_fingerprint="gradients")
-        # Add a column for each module's gradient vectors
-        else:
+        # Add gradients to HF dataset.
+        mmap = load_gradients(dir, structured=structured)
+        if structured:
             for field_name in mmap.dtype.names:
-                flat = pa.array(mmap[field_name].reshape(-1))
+                flat = pa.array(mmap[field_name].reshape(-1).copy())
                 col = pa.FixedSizeListArray.from_arrays(flat, mmap[field_name].shape[1])
                 ds = ds.add_column(field_name, col, new_fingerprint=field_name)
+        else:
+            flat = pa.array(mmap.reshape(-1).copy())
+            col_arrow = pa.FixedSizeListArray.from_arrays(flat, mmap.shape[1])
+
+            ds = ds.add_column("gradients", col_arrow, new_fingerprint="gradients")
+
         return ds
 
     if (root_dir / "data.hf").exists():

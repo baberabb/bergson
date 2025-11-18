@@ -11,7 +11,7 @@ from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 from transformers.pytorch_utils import Conv1D as HFConv1D
 
-from .data import AttentionConfig
+from .config import AttentionConfig
 from .math import reshape_to_nearest_square
 from .utils import assert_type, create_projection_matrix
 
@@ -68,14 +68,24 @@ class Normalizer(ABC):
 class AdafactorNormalizer(Normalizer):
     """
     Row and column sums of second moments of gradients for a matrix-valued parameter.
+
+    Args:
+        row: Row statistics [O]
+        col: Column statistics [I]
+        bias_avg_sq: Optional second moments for bias [O]
     """
 
     row: Tensor  # shape [O]
     col: Tensor  # shape [I]
+    bias_avg_sq: Tensor | None = None  # shape [O]
 
     def __post_init__(self):
         assert self.row.ndim == 1, f"Expected 1D tensor for row, got {self.row.ndim}D"
         assert self.col.ndim == 1, f"Expected 1D tensor for col, got {self.col.ndim}D"
+        if self.bias_avg_sq is not None:
+            assert self.bias_avg_sq.ndim == 1, (
+                f"Expected 1D tensor for bias_avg_sq, got {self.bias_avg_sq.ndim}D"
+            )
 
     @torch.compile
     def normalize_(
@@ -120,22 +130,44 @@ class AdafactorNormalizer(Normalizer):
         """
         Convert this Adafactor normalizer to an Adam normalizer by materializing the
         rank-one second moment matrix.
+
+        Preserves bias_avg_sq if present.
         """
         # Compute the second moment matrix as a square matrix of shape [O, I]
         # NOTE: We don't add the epsilon here, since the AdamNormalizer is going to
         # add it outside the square root. This could cause infs though if there are
         # any exactly zero rows or columns, so we should be careful.
         avg_sq = torch.outer(self.row, self.col) / self.row.mean()
-        return AdamNormalizer(avg_sq=avg_sq)
+        return AdamNormalizer(avg_sq=avg_sq, bias_avg_sq=self.bias_avg_sq)
+
+    def scale_by_lr(self, lr: float | Tensor) -> "AdafactorNormalizer":
+        """Scale normalizer by learning rate.
+
+        Factorized dimensions (row, col) are scaled by sqrt(lr).
+        Bias is scaled by lr.
+        """
+        lr_sqrt = lr**0.5
+        return AdafactorNormalizer(
+            row=self.row * lr_sqrt,  # shape [O]
+            col=self.col * lr_sqrt,  # shape [I]
+            bias_avg_sq=self.bias_avg_sq * lr
+            if self.bias_avg_sq is not None
+            else None,  # shape [O]
+        )
 
 
 @dataclass
 class AdamNormalizer(Normalizer):
     """
     Contains the second moments of the gradients.
+
+    Args:
+        avg_sq: Second moments for weights [O, I]
+        bias_avg_sq: Optional second moments for bias [O]
     """
 
     avg_sq: Tensor
+    bias_avg_sq: Tensor | None = None
 
     @torch.compile
     def normalize_(
@@ -153,16 +185,19 @@ class AdamNormalizer(Normalizer):
         Convert this Adam normalizer to an Adafactor normalizer, minimizing the
         I-divergence (generalized Kullback-Leibler divergence) between the original
         and the factored second moments.
+
+        Preserves bias_avg_sq if present.
         """
         # We assume avg_sq is a square matrix of shape [O, I]
-        assert (
-            self.avg_sq.ndim == 2
-        ), f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
+        assert self.avg_sq.ndim == 2, (
+            f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
+        )
 
         # Compute row and column means
         return AdafactorNormalizer(
             row=self.avg_sq.mean(dim=1),  # shape [O]
             col=self.avg_sq.mean(dim=0),  # shape [I]
+            bias_avg_sq=self.bias_avg_sq,  # Preserve bias second moments
         )
 
 
@@ -334,8 +369,8 @@ class GradientCollector(ContextDecorator):
     of the parameters, which are expected to be precomputed and passed in.
 
     We assume that the input to `model` is of shape `[N, S, I]`, where `N` is the
-    batch size, `S` is the sequence length, and `I` is the input dimension. We take the
-    mean over the sequence length to obtain a single gradient per sequence.
+    batch size, `S` is the sequence length, and `I` is the input dimension. We
+    sum over the sequence dimension to obtain a single gradient per sequence.
     """
 
     model: nn.Module
@@ -551,8 +586,22 @@ class GradientCollector(ContextDecorator):
         i = getattr(module, LayerAdapter.in_attr(module))
         o = getattr(module, LayerAdapter.out_attr(module))
 
-        # Pre-scale G by the Adafactor row statistics
+        # Handle bias gradients if needed (must be computed from raw G)
         norm = self.processor.normalizers.get(name)
+        bias_grad = None
+        if include_bias:
+            # Compute bias from raw G (before any normalization)
+            bias_grad = G.sum(dim=1)  # [N, S, O] -> [N, O]
+
+            # Normalize bias with appropriate second moments
+            if (
+                isinstance(norm, (AdamNormalizer, AdafactorNormalizer))
+                and hasattr(norm, "bias_avg_sq")
+                and norm.bias_avg_sq is not None
+            ):
+                bias_grad = bias_grad / norm.bias_avg_sq.sqrt().add_(1e-8)
+
+        # Pre-scale G by the Adafactor row statistics (for weight gradients)
         if isinstance(norm, AdafactorNormalizer):
             # Compare to the normalize_ method in AdafactorNormalizer
             r = norm.row.add(1e-30)
@@ -563,25 +612,18 @@ class GradientCollector(ContextDecorator):
         # If we are using AdamNormalizer, or including bias gradients
         # we need to materialize the full gradient and then project
         if isinstance(norm, AdamNormalizer) or include_bias:
-
             P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
-            if include_bias:
-                # Append the bias gradient to the input
-                P = torch.cat(
-                    [
-                        P,
-                        G.sum(dim=(0, 1))
-                        .unsqueeze(0)
-                        .unsqueeze(2)
-                        .expand(P.shape[0], -1, 1),
-                    ],
-                    dim=2,
-                )
-                i += 1
-
             if isinstance(norm, AdamNormalizer):
                 # Normalize the gradients using the second moment matrix
                 P /= norm.avg_sq.sqrt().add_(1e-8)
+
+            if include_bias and bias_grad is not None:
+                # Append pre-computed and normalized bias gradient
+                P = torch.cat(
+                    [P, bias_grad.unsqueeze(2)],  # [N, O, 1]
+                    dim=2,
+                )
+                i += 1
 
             if self.processor.reshape_to_square:
                 P = reshape_to_nearest_square(P)
