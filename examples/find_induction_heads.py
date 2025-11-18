@@ -24,6 +24,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 from datasets import Dataset, load_dataset, load_from_disk
 from transformers import (
     AutoConfig,
@@ -37,13 +38,13 @@ from transformers import (
 )
 from transformers.generation.utils import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.trainer_utils import EvalPrediction
 
-import wandb
 from bergson import (
+    AttentionConfig,
     Attributor,
     FaissConfig,
     GradientProcessor,
-    AttentionConfig,
     collect_gradients,
 )
 from bergson.huggingface import (
@@ -77,6 +78,7 @@ class AttnOnlyConfig(PretrainedConfig):
         use_cache=True,
         layer_norm=False,
         special_pos_embed=True,
+        use_sdpa=True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -92,30 +94,34 @@ class AttnOnlyConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.layer_norm = layer_norm
         self.special_pos_embed = special_pos_embed
+        self.use_sdpa = use_sdpa
 
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config: AttnOnlyConfig):
         super().__init__()
+        self.config = config
         assert config.hidden_size % config.num_attention_heads == 0
         self.n_head = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
-        self.c_attn = nn.Linear(config.hidden_size, 3 * config.hidden_size, bias=True)
-        self.c_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
+        self.c_attn = nn.Linear(config.hidden_size, 3 * config.hidden_size, bias=False)
+        self.c_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.attn_drop = nn.Dropout(config.attn_pdrop)
         self.resid_drop = nn.Dropout(config.resid_pdrop)
         self.special_pos_embed = config.special_pos_embed
-        self.register_buffer(
-            "mask",
-            torch.tril(
-                torch.ones(
-                    config.max_position_embeddings, config.max_position_embeddings
-                )
-            ).view(
-                1, 1, config.max_position_embeddings, config.max_position_embeddings
-            ),
-            persistent=False,
-        )
+        self.use_sdpa = config.use_sdpa
+        if not self.use_sdpa:
+            self.register_buffer(
+                "mask",
+                torch.tril(
+                    torch.ones(
+                        config.max_position_embeddings, config.max_position_embeddings
+                    )
+                ).view(
+                    1, 1, config.max_position_embeddings, config.max_position_embeddings
+                ),
+                persistent=False,
+            )
 
     def _split_heads(self, x):
         B, T, C = x.shape
@@ -152,17 +158,27 @@ class CausalSelfAttention(nn.Module):
             k = torch.cat([pk, k], dim=2)
             v = torch.cat([pv, v], dim=2)
 
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal = self.mask[:, :, :T, : k.size(-2)]
-        att = att.masked_fill(causal == 0, float("-inf"))
-        if attn_mask is not None:
-            att = att + attn_mask
-        att = F.softmax(att, dim=-1)
-        att = self.attn_drop(att)
-        y = att @ v
+        if self.use_sdpa:
+            y = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                dropout_p=self.config.attn_pdrop if self.training else 0.0,
+                is_causal=True,
+            )
+
+        else:
+            att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            causal = self.mask[:, :, :T, : k.size(-2)]
+            att = att.masked_fill(causal == 0, float("-inf"))
+            if attn_mask is not None:
+                att = att + attn_mask
+            att = F.softmax(att, dim=-1)
+            att = self.attn_drop(att)
+            y = att @ v
+
         y = self._merge_heads(y)
         y = self.resid_drop(self.c_proj(y))
-
         present = (k, v) if use_cache else None
         return y, present
 
@@ -288,10 +304,9 @@ class AttnOnlyForCausalLM(PreTrainedModel, GenerationMixin):
 
         loss = None
         if labels is not None:
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = labels[:, 1:].contiguous()
             loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+                logits[:, :-1].reshape(-1, logits.size(-1)),
+                labels[:, 1:].reshape(-1),
             )
 
         return CausalLMOutputWithPast(
@@ -425,6 +440,8 @@ def build_single_token_vocab(tokenizer, wordlist, max_words=500):
 
 
 def create_induction_head_dataset(tokenizer, seed, num_prompts=100):
+    if not tokenizer.pad_token_id:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     random.seed(seed)
 
     # Separate words into appropriate A and B categories for sensible bigrams
@@ -567,32 +584,18 @@ def setup_training(
 
     pad_id = -100
 
-    def compute_metrics(eval_preds):
+    def compute_metrics(eval_preds: EvalPrediction):
         # predictions: (B, T, V)
         # label_ids: with your collator, this equals input_ids: (B, T)
-        preds = eval_preds.predictions
-        input_ids = eval_preds.label_ids
+        preds = eval_preds.predictions[:, :-1]  # type: ignore
+        labels = eval_preds.label_ids[:, 1:]  # type: ignore
 
-        correct = 0
-        total = 0
-        # for each sequence, evaluate the final next-token prediction
-        for i in range(input_ids.shape[0]):
-            seq = input_ids[i]
-            # last non-pad index j
-            non_pad = np.where(seq != pad_id)[0]
-            if len(non_pad) == 0:
-                continue
-            j = non_pad[-1]
-            if j == 0:
-                continue  # nothing to predict
-            pred_tok = preds[i, j - 1].argmax(-1)
-            tgt_tok = seq[j]
-            correct += int(pred_tok == tgt_tok)
-            total += 1
+        mask = labels != pad_id
+        if not mask.any():  # type: ignore
+            return {"accuracy": 0.0}
 
-        # avoid div-by-zero
-        acc = (correct / total) if total > 0 else 0.0
-        return {"accuracy": acc}
+        acc = (preds.argmax(-1)[mask] == labels[mask]).mean()  # type: ignore
+        return {"accuracy": float(acc)}
 
     # def compute_metrics(eval_preds):
     #     print("compute_metrics")
@@ -652,7 +655,7 @@ def setup_training(
         output_dir=output_dir,
         overwrite_output_dir=True,
         num_train_epochs=num_train_epochs,
-        per_device_train_batch_size=8,
+        per_device_train_batch_size=64,
         per_device_eval_batch_size=128,
         gradient_accumulation_steps=1,
         warmup_steps=1000,
@@ -719,7 +722,7 @@ def mean_query_gradients(
         model=model,
         data=induction_dataset,
         processor=processor,
-        path=Path(output_dir)/"induction_gradients",
+        path=Path(output_dir) / "induction_gradients",
         skip_preconditioners=True,
         attention_cfgs=HEAD_CFGS,
     )
@@ -727,7 +730,7 @@ def mean_query_gradients(
     # Build the attributor for querying
     print("Building attributor for querying...")
     attributor = Attributor(
-        index_path=Path(output_dir)/ "induction_gradients",
+        index_path=Path(output_dir) / "induction_gradients",
         device="cuda" if torch.cuda.is_available() else "cpu",
         dtype=torch.float32,
         unit_norm=unit_norm,
@@ -1105,6 +1108,6 @@ if __name__ == "__main__":
     parser.add_argument("--small", action="store_true")
     parser.add_argument("--tag", type=str, default="")
     parser.add_argument("--analyze", action="store_true")
-    parser.add_argument("--no_special_pos_embed", action="store_false")
+    parser.add_argument("--no_special_pos_embed", action="store_true")
     args = parser.parse_args()
     main(args)
