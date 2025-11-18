@@ -191,7 +191,8 @@ class Builder:
         if reduce_cfg is not None:
             num_grads = 1
             self.in_memory_grad_buffer = torch.zeros(
-                (num_grads, sum(self.grad_sizes.values())), dtype=torch.float32
+                (num_grads, sum(self.grad_sizes.values())),
+                dtype=torch.float32,  # TODO: Is this supposed to be hardcoded?
             )
             np_dtype = np.float32
         else:

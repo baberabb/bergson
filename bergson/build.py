@@ -202,7 +202,7 @@ def new_build_worker(
             cfg=cfg,
         )
 
-        computer._compute()
+        computer._compute(desc="New worker - Collecting gradients")
 
     else:
         # Convert each shard to a Dataset then map over its gradients
@@ -237,7 +237,7 @@ def new_build_worker(
             buf.clear()
             shard_id += 1
 
-        for ex in tqdm(ds, desc="Collecting gradients"):
+        for ex in tqdm(ds, desc="New worker - Collecting gradients"):
             buf.append(ex)
             if len(buf) == cfg.stream_shard_size:
                 flush()

@@ -39,7 +39,7 @@ class TraceResult:
 class Attributor:
     def __init__(
         self,
-        index_path: Path,
+        index_path: str | Path,
         device: str = "cpu",
         dtype: torch.dtype = torch.float32,
         unit_norm: bool = False,
@@ -49,6 +49,7 @@ class Attributor:
         self.dtype = dtype
         self.unit_norm = unit_norm
         self.faiss_index = None
+        index_path = Path(index_path)
 
         # Load the gradient processor
         self.processor = GradientProcessor.load(index_path, map_location=device)

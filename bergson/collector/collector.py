@@ -63,16 +63,12 @@ class HookCollectorBase(ContextDecorator, ABC):
     processor: GradientProcessor = field(default_factory=GradientProcessor)
     """Configuration for processing and compressing gradients."""
 
-    # TODO: Understand this
-    indices: list[int] = field(default_factory=list)
-    """List of indices for the current batch."""
-
-    rank: int = dist.get_rank() if dist.is_initialized() else 0
-    world_size: int = dist.get_world_size() if dist.is_initialized() else 1
-
     def __post_init__(
         self,
     ):
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
+        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+
         self._fwd_hooks: list[RemovableHandle] = []
         self._bwd_hooks: list[RemovableHandle] = []
 
@@ -206,8 +202,6 @@ class HookCollectorBase(ContextDecorator, ABC):
 
     def __exit__(self, exc_type, exc, tb):
         """Clean up hooks and allow subclass cleanup."""
-        # Allow subclasses to save results, flush buffers, etc.
-        self.teardown()
 
         # Clean up temporary attributes
         for layer in self.model.modules():
@@ -297,12 +291,8 @@ class GradientCollector(HookCollectorBase):
 
     data: Dataset
 
-    dtype: torch.dtype = torch.float32
-    lo = torch.finfo(dtype).min
-    hi = torch.finfo(dtype).max
-
-    builder: "Builder | None" = None
-    scorer: "Scorer | None" = None
+    builder: Builder | None = None
+    scorer: Scorer | None = None
 
     def setup(self) -> None:
         """Initialize gradient storage dictionary."""
@@ -312,10 +302,17 @@ class GradientCollector(HookCollectorBase):
             "Model device is not set correctly"
         )
 
+        self.save_dtype = (
+            torch.float32 if self.model.dtype == torch.float32 else torch.float16
+        )
+
+        self.lo = torch.finfo(self.save_dtype).min
+        self.hi = torch.finfo(self.save_dtype).max
+
         self.per_doc_losses = torch.full(
             (len(self.data),),
             device=self.model.device,
-            dtype=self.dtype,
+            dtype=self.save_dtype,
             fill_value=0.0,
         )
 
@@ -328,7 +325,7 @@ class GradientCollector(HookCollectorBase):
                 self.cfg.partial_run_path,
                 self.data,
                 grad_sizes,
-                self.dtype,
+                self.save_dtype,
                 reduce_cfg=None,
             )
         else:
@@ -344,8 +341,6 @@ class GradientCollector(HookCollectorBase):
         module._inputs = a
 
     def backward_hook(self, module: nn.Module, g: torch.Tensor):
-        g = g.flatten(1).clamp_(self.lo, self.hi)
-
         a = module._inputs  # [N, S, I]
         assert isinstance(a, torch.Tensor), "Activation cache missing for module"
 
@@ -359,13 +354,16 @@ class GradientCollector(HookCollectorBase):
             g = g @ A.T  # [N, S, p]
 
         P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
+
+        P = P.flatten(1).clamp_(self.lo, self.hi)
+
         if self.builder is not None:
             # Asynchronously move the gradient to CPU and convert to the final dtype
             self.mod_grads[name] = P.to(
-                device="cpu", dtype=self.dtype, non_blocking=True
+                device="cpu", dtype=self.save_dtype, non_blocking=True
             )
         else:
-            self.mod_grads[name] = P.to(dtype=self.dtype)
+            self.mod_grads[name] = P.to(dtype=self.save_dtype)
 
     def process_batch(self, indices: list[int], **kwargs):
         """Process collected gradients for a batch and update losses."""
@@ -395,7 +393,11 @@ class GradientCollector(HookCollectorBase):
             data = self.data.add_column(
                 "loss",
                 self.per_doc_losses.cpu().numpy(),
-                feature=Value("float16" if self.dtype == torch.float16 else "float32"),
+                feature=Value(
+                    "float16"
+                    if self.save_dtype == torch.float16
+                    else "float32"  # TODO: This is not robust
+                ),
                 new_fingerprint="loss",
             )
 
@@ -421,7 +423,6 @@ class CollectorComputer:
         # Model
         self.model = model
         self.device = model.device
-        self.dtype = model.dtype
 
         # Data
         self.data = data
@@ -506,8 +507,9 @@ class CollectorComputer:
 
                 self.collector.process_batch(indices, losses=losses)
 
-            if dist.is_initialized():
-                dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
+        self.collector.teardown()
+        if dist.is_initialized():
+            dist.all_reduce(total_processed, op=dist.ReduceOp.SUM)
         self.logger.info(f"Total processed: {total_processed.item()}")
 
 
