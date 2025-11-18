@@ -121,7 +121,7 @@ class IndexConfig:
     Used for attention modules specified in `split_attention_modules`."""
 
     profile: bool = False
-    """Whether to enable profiling during gradient collection. 
+    """Whether to enable profiling during gradient collection.
     If true, by default the first 4 steps will be profiled."""
 
     debug: bool = False

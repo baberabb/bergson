@@ -298,9 +298,9 @@ class GradientCollector(HookCollectorBase):
         """Initialize gradient storage dictionary."""
         self.mod_grads = {}
 
-        assert isinstance(self.model.device, torch.device), (
-            "Model device is not set correctly"
-        )
+        assert isinstance(
+            self.model.device, torch.device
+        ), "Model device is not set correctly"
 
         self.save_dtype = (
             torch.float32 if self.model.dtype == torch.float32 else torch.float16
