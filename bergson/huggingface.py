@@ -351,7 +351,23 @@ class GradientCollectorCallback(TrainerCallback):
         proc.normalizers = normalizers
 
     def on_prediction_step(self, args, state, control, **kwargs):
-        dataset_name = kwargs["inputs"]["dataset_name"]
+        # If there's only one eval dataset, use it directly
+        if len(self.eval_grad_buffers) == 1:
+            dataset_name = next(iter(self.eval_grad_buffers.keys()))
+        elif (
+            "inputs" in kwargs
+            and isinstance(kwargs["inputs"], dict)
+            and "dataset_name" in kwargs["inputs"]
+        ):
+            dataset_name = kwargs["inputs"]["dataset_name"]
+        else:
+            raise RuntimeError(
+                f"Cannot determine eval dataset name. Found {len(self.eval_grad_buffers)} "
+                f"eval datasets but 'dataset_name' field not found in batch inputs. "
+                f"When using multiple eval datasets with gradient collection, each example "
+                f"must include a 'dataset_name' field."
+            )
+
         self.write_grads(self.eval_grad_buffers[dataset_name])
 
     def on_train_end(
