@@ -808,14 +808,29 @@ def main(args):
     num_train_epochs = 1
 
     unit_norm = args.unit_norm
-    tag = args.tag
-
     projection_dim = args.projection_dim
     seed = args.seed
     train = args.train
     analyze = args.analyze
+    output_dir = args.output_dir
 
-    output_dir = f"examples/runs/transformer_2_layer{'_' + tag if tag else ''}"
+    # Check if output directory exists
+    output_path = Path(output_dir)
+    if train and output_path.exists():
+        # Check if gradient files exist (indicates previous training)
+        grad_path = output_path / "gradients" / "train" / "epoch_0" / "gradients.bin"
+        if grad_path.exists():
+            if not args.resume_from:
+                raise FileExistsError(
+                    f"Output directory {output_dir} already exists with training data. "
+                    f"Use --resume_from to continue training, or choose a different output directory."
+                )
+            else:
+                print(f"Resuming training from checkpoint: {output_dir}")
+        else:
+            print(f"Using existing output directory: {output_dir}")
+    else:
+        print(f"Creating new output directory: {output_dir}")
 
     print(
         "Starting 2-layer transformer pretraining with Bergson gradient collection..."
@@ -851,7 +866,12 @@ def main(args):
             num_train_epochs=num_train_epochs,
         )
 
-        trainer.train()  # resume_from_checkpoint=True)
+        # Resume from checkpoint if specified
+        if args.resume_from:
+            trainer.train(resume_from_checkpoint=True)
+        else:
+            trainer.train()
+
         trainer.save_model(output_dir)
         tokenizer.save_pretrained(output_dir)
 
@@ -879,6 +899,9 @@ def main(args):
 
     # Analyze data
     os.makedirs("figures", exist_ok=True)
+
+    # Use output directory basename for figure names
+    run_name = Path(output_dir).name
 
     # Calculate the mean query gradients' inner products with the training gradients
     data = []
@@ -938,7 +961,7 @@ def main(args):
         f"({'Normalized' if unit_norm else 'Unnormalized'})"
     )
     plt.grid(True, alpha=0.3)
-    fig_name = f"figures/scores_{tag}{'_norm' if unit_norm else ''}.pdf"
+    fig_name = f"figures/scores_{run_name}{'_norm' if unit_norm else ''}.pdf"
     plt.savefig(
         fig_name,
         format="pdf",
@@ -949,7 +972,7 @@ def main(args):
     exit()
 
     # Produce the same plot but split out by module (i.e. key in the grads mmap)
-    df_path = f"figures/module_scores_{tag}{'_norm' if unit_norm else ''}.csv"
+    df_path = f"figures/module_scores_{run_name}{'_norm' if unit_norm else ''}.csv"
     if os.path.exists(df_path):
         df = pd.read_csv(df_path)
         print(f"Loaded module scores from {df_path}")
@@ -1023,7 +1046,7 @@ def main(args):
         plt.legend()
         plt.grid(True, alpha=0.3)
         fig_name = (
-            f"figures/module_scores_{tag}{'_norm' if unit_norm else ''}_{name}.pdf"
+            f"figures/module_scores_{run_name}{'_norm' if unit_norm else ''}_{name}.pdf"
         )
         plt.savefig(
             fig_name,
@@ -1048,10 +1071,7 @@ def main(args):
         plt.title(f"Sum of Gradients for {name}")
         plt.legend()
         plt.grid(True, alpha=0.3)
-        fig_name = (
-            f"figures/sum{'_' + tag if tag else ''}"
-            f"{'_norm' if unit_norm else ''}_{name}.pdf"
-        )
+        fig_name = f"figures/sum_{run_name}{'_norm' if unit_norm else ''}_{name}.pdf"
         plt.savefig(
             fig_name,
             format="pdf",
@@ -1082,7 +1102,9 @@ def main(args):
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    fig.savefig(f"figures/all_heads_scores_{tag}{'_norm' if unit_norm else ''}.pdf")
+    fig.savefig(
+        f"figures/all_heads_scores_{run_name}{'_norm' if unit_norm else ''}.pdf"
+    )
     plt.close(fig)
 
     # Single figure with each attention modules' sum-of-scores over steps
@@ -1100,7 +1122,9 @@ def main(args):
     ax.legend().remove()
 
     plt.tight_layout()
-    fig.savefig(f"figures/all_heads_sum_scores_{tag}{'_norm' if unit_norm else ''}.pdf")
+    fig.savefig(
+        f"figures/all_heads_sum_scores_{run_name}{'_norm' if unit_norm else ''}.pdf"
+    )
     plt.close(fig)
 
     # Single figure with each attention modules' sum-of-scores summed over steps
@@ -1116,7 +1140,7 @@ def main(args):
 
     plt.tight_layout()
     fig.savefig(
-        f"figures/all_heads_sum_scores_bar_{tag}{'_norm' if unit_norm else ''}.pdf"
+        f"figures/all_heads_sum_scores_bar_{run_name}{'_norm' if unit_norm else ''}.pdf"
     )
     plt.close(fig)
 
@@ -1141,13 +1165,23 @@ if __name__ == "__main__":
     from argparse import ArgumentParser
 
     parser = ArgumentParser()
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        required=True,
+        help="Output directory for model checkpoints and gradients",
+    )
     parser.add_argument("--projection_dim", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--unit_norm", action="store_true")
     parser.add_argument("--small", action="store_true")
-    parser.add_argument("--tag", type=str, default="")
     parser.add_argument("--analyze", action="store_true")
     parser.add_argument("--no_special_pos_embed", action="store_true")
+    parser.add_argument(
+        "--resume_from",
+        action="store_true",
+        help="Resume training from existing checkpoint in output_dir",
+    )
     args = parser.parse_args()
     main(args)
