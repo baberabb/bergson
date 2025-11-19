@@ -45,6 +45,7 @@ from bergson import (
     Attributor,
     FaissConfig,
     GradientProcessor,
+    IndexConfig,
     collect_gradients,
 )
 from bergson.huggingface import (
@@ -439,6 +440,48 @@ def build_single_token_vocab(tokenizer, wordlist, max_words=500):
     return singles
 
 
+def label_repeating_bigrams(input_ids, pad_token_id):
+    """
+    Label all positions where a bigram repeats for induction head evaluation.
+
+    For sequence [A][B]...[A][B], when we see the second [A], we should predict [B].
+    This function finds all such cases and creates labels accordingly.
+
+    Args:
+        input_ids: List of token IDs
+        pad_token_id: Token ID to ignore (padding)
+
+    Returns:
+        labels: List where labels[i] = token to predict at position i, or -100 if not labeled
+    """
+    labels = [-100] * len(input_ids)
+
+    # Find all bigrams and their positions
+    bigrams = {}  # (tok_i, tok_i+1) -> [list of positions where bigram starts]
+    for i in range(len(input_ids) - 1):
+        # Skip padding tokens
+        if input_ids[i] == pad_token_id or input_ids[i + 1] == pad_token_id:
+            continue
+
+        bigram = (input_ids[i], input_ids[i + 1])
+        if bigram not in bigrams:
+            bigrams[bigram] = []
+        bigrams[bigram].append(i)
+
+    # For any bigram that appears multiple times, label the repetitions
+    for bigram, positions in bigrams.items():
+        if len(positions) >= 2:  # Bigram repeats!
+            # Label all repetitions (skip first occurrence - that's what we learn from)
+            for pos in positions[1:]:
+                # At position pos, we see first element of bigram
+                # We should predict second element at pos+1
+                tok1, tok2 = bigram
+                if pos + 1 < len(input_ids):
+                    labels[pos + 1] = tok2
+
+    return labels
+
+
 def create_induction_head_dataset(tokenizer, seed, num_prompts=100):
     if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -525,13 +568,7 @@ def create_induction_head_dataset(tokenizer, seed, num_prompts=100):
             max_length=16,
         )
         input_ids = toks["input_ids"]
-        labels = [-100] * len(input_ids)
-
-        # Set the last non-padding token as the target
-        for i in range(len(input_ids) - 1, -1, -1):
-            if input_ids[i] != tokenizer.pad_token_id:
-                labels[i] = input_ids[i]
-                break
+        labels = label_repeating_bigrams(input_ids, tokenizer.pad_token_id)
 
         dataset.append(
             {
@@ -722,8 +759,11 @@ def mean_query_gradients(
         model=model,
         data=induction_dataset,
         processor=processor,
-        path=Path(output_dir) / "induction_gradients",
-        skip_preconditioners=True,
+        cfg=IndexConfig(
+            run_path=str(Path(output_dir) / "induction_gradients"),
+            skip_preconditioners=True,
+            skip_index=False,
+        ),
         attention_cfgs=HEAD_CFGS,
     )
 
