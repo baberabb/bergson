@@ -576,6 +576,7 @@ def create_induction_head_dataset(tokenizer, seed, num_prompts=100):
                 "attention_mask": toks["attention_mask"],
                 "labels": labels,
                 "text": text,
+                "dataset_name": "eval",
             }
         )
     return Dataset.from_list(dataset)
