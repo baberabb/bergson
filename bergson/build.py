@@ -187,6 +187,8 @@ def new_build_worker(
     model, target_modules = setup_model_and_peft(cfg, rank)
     processor = create_processor(cfg, rank)
 
+    attention_cfgs = {module: cfg.attention for module in cfg.split_attention_modules}
+
     if isinstance(ds, Dataset):
         batches = allocate_batches(ds["length"], cfg.token_batch_size)
 
@@ -196,7 +198,7 @@ def new_build_worker(
             processor=processor,
             target_modules=target_modules,
             data=ds,
-            scorer=None,
+            attention_cfgs=attention_cfgs,
         )
 
         computer = CollectorComputer(

@@ -2,7 +2,7 @@ import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import ContextDecorator, nullcontext
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass, field
 from typing import Callable, Literal, Mapping, Optional
 
 import torch
@@ -25,7 +25,7 @@ from transformers import PreTrainedModel
 
 from bergson.collection import Builder
 from bergson.collector.logger import get_logger
-from bergson.config import IndexConfig
+from bergson.config import AttentionConfig, IndexConfig
 from bergson.data import pad_and_tensor
 from bergson.gradients import GradientProcessor, LayerAdapter
 from bergson.peft import set_peft_enabled
@@ -62,6 +62,8 @@ class HookCollectorBase(ContextDecorator, ABC):
 
     processor: GradientProcessor = field(default_factory=GradientProcessor)
     """Configuration for processing and compressing gradients."""
+
+    attention_cfgs: dict[str, AttentionConfig] = field(default_factory=dict)
 
     def __post_init__(
         self,
@@ -135,13 +137,37 @@ class HookCollectorBase(ContextDecorator, ABC):
         for name, (_, target_shape, has_bias) in self.target_info.items():
             include_bias = has_bias and self.cfg.include_bias
 
-            if proj_shape:
-                shapes[name] = proj_shape
+            if name in self.attention_cfgs:
+                attention_cfg = self.attention_cfgs[name]
+                if proj_shape:
+                    head_shape = proj_shape
+                else:
+                    # Mutate the attention module's shape to get the attention
+                    # head shape
+                    attention_shape = list(target_shape)
+                    # - 2 because we're excluding the batch and sequence activation
+                    # dimensions
+                    attention_shape[attention_cfg.head_dim - 2] = (
+                        attention_cfg.head_size
+                    )
+                    if include_bias:
+                        attention_shape[-1] += 1
+                    head_shape = torch.Size(attention_shape)
+
+                shapes.update(
+                    {
+                        self.get_head_name(name, h): head_shape
+                        for h in range(attention_cfg.num_heads)
+                    }
+                )
             else:
-                grad_shape = list(target_shape)
-                if include_bias:
-                    grad_shape[-1] += 1
-                shapes[name] = torch.Size(grad_shape)
+                if proj_shape:
+                    shapes[name] = proj_shape
+                else:
+                    grad_shape = list(target_shape)
+                    if include_bias:
+                        grad_shape[-1] += 1
+                    shapes[name] = torch.Size(grad_shape)
 
         return shapes
 
@@ -345,6 +371,38 @@ class GradientCollector(HookCollectorBase):
         assert isinstance(a, torch.Tensor), "Activation cache missing for module"
 
         name = assert_type(str, module._name)
+
+        if name in self.attention_cfgs:
+            # Recurse into heads with module mutation and restoration
+            num_heads, head_size, head_dim = astuple(self.attention_cfgs[name])
+
+            module_name, module_inputs, module_out_features = (
+                module._name,
+                module._inputs,
+                getattr(module, LayerAdapter.out_attr(module)),
+            )
+            setattr(module, LayerAdapter.out_attr(module), head_size)
+            for h in range(num_heads):
+                module._name = GradientCollector.get_head_name(name, h)  # type: ignore
+                module._inputs = module_inputs
+
+                try:
+                    head_G = torch.narrow(g, head_dim, h * head_size, head_size)
+                except Exception as e:
+                    print(
+                        f"Error processing gradient of shape {g.shape} for head {h}"
+                        f" in module {name}. Provided head config may be incorrect. "
+                        f"Head config: head dim {head_dim}, head size {head_size},"
+                        f" num heads {num_heads}."
+                    )
+                    raise e
+
+                self._process_grad(module, None, (head_G,))
+            module._name, module._inputs = (module_name, module_inputs)
+            setattr(module, LayerAdapter.out_attr(module), module_out_features)
+
+            return
+
         p = self.processor.projection_dim
         i = getattr(module, LayerAdapter.in_attr(module))
         o = getattr(module, LayerAdapter.out_attr(module))
