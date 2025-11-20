@@ -10,7 +10,6 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset, Value
-from simple_parsing import field
 from torch import Tensor
 from torch.profiler import (
     ProfilerActivity,
@@ -36,12 +35,15 @@ from bergson.utils import assert_type, create_projection_matrix
 @dataclass
 class HookCollectorBase(ContextDecorator, ABC):
     """
-    Abstract base class for collectors that attach forward and backward hooks to model layers.
+    Abstract base class for collectors that attach forward and backward hooks to model
+    layers.
 
-    Automatically discovers nn.Linear layers in the model, registers hooks during context entry,
-    and provides lifecycle methods (setup/teardown) for subclasses to implement custom logic.
+    Automatically discovers nn.Linear layers in the model, registers hooks during
+    context entry, and provides lifecycle methods (setup/teardown) for subclasses to
+    implement custom logic.
 
-    Assumes model input shape is [N, S, I] where N=batch size, S=sequence length, I=input dimension.
+    Assumes model input shape is [N, S, I] where N=batch size, S=sequence length,
+    I=input dimension.
 
     Subclasses must implement:
         - setup(): Initialize state (buffers, dicts, etc.)
@@ -92,14 +94,16 @@ class HookCollectorBase(ContextDecorator, ABC):
 
         Args:
             model: The model to scan for Linear layers
-            target_modules: Optional set of module names to filter. If None, all Linear layers are included.
+            target_modules: Optional set of module names to filter. If None, all Linear
+            layers are included.
 
         Returns:
             Dictionary mapping module names to (device, weight_shape) tuples
 
         Example:
             >>> target_info = HookCollectorBase.discover_targets(model, target_modules)
-            >>> allocate_buffers(target_info)  # Use target_info before creating collector
+            >>> allocate_buffers(target_info)  # Use target_info before creating
+            collector
             >>> collector = CovarianceCollector(model=model, ...)
         """
         target_info = {}
