@@ -5,6 +5,7 @@ from contextlib import ContextDecorator, nullcontext
 from dataclasses import astuple, dataclass, field
 from typing import Callable, Literal, Mapping, Optional
 
+import debugpy
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -421,6 +422,9 @@ class GradientCollector(HookCollectorBase):
         p = self.processor.projection_dim
         i = getattr(module, LayerAdapter.in_attr(module))
         o = getattr(module, LayerAdapter.out_attr(module))
+
+        if name == "h.1.mlp.c_fc":
+            debugpy.breakpoint()
 
         if p is not None:
             A = self.projection(name, p, o, "left", g.device, g.dtype)

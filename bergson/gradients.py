@@ -5,6 +5,7 @@ from dataclasses import asdict, astuple, dataclass, field
 from pathlib import Path
 from typing import Callable, Literal, Mapping
 
+import debugpy
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -471,7 +472,6 @@ class GradientCollector(ContextDecorator):
             # register backward hook to compute P = sum(U @ V^T)
             bwd_hook = layer.register_full_backward_hook(self._process_grad)
             self._bwd_hooks.append(bwd_hook)
-
         return self
 
     def _save_input(self, module: nn.Module, inp: tuple, _):
@@ -512,7 +512,11 @@ class GradientCollector(ContextDecorator):
         G = grad_out[0]  # [N, S, O]
         I = module._inputs  # [N, S, I/q]
 
+
         name = assert_type(str, module._name)
+        if name== "h.1.mlp.c_fc":
+            debugpy.breakpoint()
+
         # different way of checking for bias as above
         module_has_bias = getattr(module, "bias", None) is not None
         include_bias = module_has_bias and self.processor.include_bias
