@@ -10,6 +10,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset, Value
+from jaxtyping import Float
 from torch import Tensor
 from torch.profiler import (
     ProfilerActivity,
@@ -77,14 +78,18 @@ class HookCollectorBase(ContextDecorator, ABC):
         self._bwd_hooks: list[RemovableHandle] = []
 
         # Discover target Linear modules using the static method
-        self.target_info = self.discover_targets(self.model, self.target_modules)
+        self.target_info = self.discover_targets(
+            self.model, self.target_modules, self.processor.include_bias
+        )
 
         # Allow subclasses to perform custom initialization
         self.setup()
 
     @staticmethod
     def discover_targets(
-        model: nn.Module, target_modules: set[str] | None = None
+        model: nn.Module,
+        target_modules: set[str] | None = None,
+        include_bias: bool = False,
     ) -> dict[str, tuple[torch.device, torch.Size, bool]]:
         """
         Discover target Linear modules without instantiating a collector.
@@ -114,7 +119,7 @@ class HookCollectorBase(ContextDecorator, ABC):
             if target_modules is not None and name not in target_modules:
                 continue
 
-            has_bias = getattr(layer, "bias", None) is not None
+            has_bias = getattr(layer, "bias", None) is not None and include_bias
 
             target_info[name] = (
                 layer.weight.device,
@@ -139,8 +144,6 @@ class HookCollectorBase(ContextDecorator, ABC):
 
         shapes = {}
         for name, (_, target_shape, has_bias) in self.target_info.items():
-            include_bias = has_bias and self.cfg.include_bias
-
             if name in self.attention_cfgs:
                 attention_cfg = self.attention_cfgs[name]
                 if proj_shape:
@@ -154,7 +157,7 @@ class HookCollectorBase(ContextDecorator, ABC):
                     attention_shape[attention_cfg.head_dim - 2] = (
                         attention_cfg.head_size
                     )
-                    if include_bias:
+                    if has_bias:
                         attention_shape[-1] += 1
                     head_shape = torch.Size(attention_shape)
 
@@ -169,7 +172,7 @@ class HookCollectorBase(ContextDecorator, ABC):
                     shapes[name] = proj_shape
                 else:
                     grad_shape = list(target_shape)
-                    if include_bias:
+                    if has_bias:
                         grad_shape[-1] += 1
                     shapes[name] = torch.Size(grad_shape)
 
@@ -204,6 +207,7 @@ class HookCollectorBase(ContextDecorator, ABC):
 
             # Store module name for use in hook callbacks
             layer._name = name  # type: ignore[attr-defined]
+            layer._has_bias = self.target_info[name][2]  # type: ignore[attr-defined]
 
             # Register hooks
             fwd_hook = layer.register_forward_hook(self._process_input)
@@ -274,7 +278,7 @@ class HookCollectorBase(ContextDecorator, ABC):
         pass
 
     @abstractmethod
-    def forward_hook(self, module: nn.Module, a: torch.Tensor) -> None:
+    def forward_hook(self, module: nn.Module, a: Float[Tensor, "N S I"]) -> None:
         """
         Process activations during the forward pass.
 
@@ -285,7 +289,7 @@ class HookCollectorBase(ContextDecorator, ABC):
         pass
 
     @abstractmethod
-    def backward_hook(self, module: nn.Module, g: torch.Tensor) -> None:
+    def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S I"]) -> None:
         """
         Process gradients during the backward pass.
 
@@ -328,9 +332,9 @@ class GradientCollector(HookCollectorBase):
         """Initialize gradient storage dictionary."""
         self.mod_grads = {}
 
-        assert isinstance(
-            self.model.device, torch.device
-        ), "Model device is not set correctly"
+        assert isinstance(self.model.device, torch.device), (
+            "Model device is not set correctly"
+        )
 
         self.save_dtype = (
             torch.float32 if self.model.dtype == torch.float32 else torch.float16
@@ -361,17 +365,24 @@ class GradientCollector(HookCollectorBase):
         else:
             self.builder = None
 
-    def forward_hook(self, module: nn.Module, a: torch.Tensor):
+    def forward_hook(self, module: nn.Module, a: Float[Tensor, "N S I"]) -> None:
         p = self.processor.projection_dim
         name = assert_type(str, module._name)
+        i = getattr(module, LayerAdapter.in_attr(module))
+
+        if module._has_bias:
+            # Append ones to activation for bias term
+            ones = torch.ones(a.size(0), a.size(1), 1, device=a.device, dtype=a.dtype)
+            a = torch.cat([a, ones], dim=-1)
+            i = i + 1
+            setattr(module, LayerAdapter.in_attr(module), i)
         if p is not None:
-            i = getattr(module, LayerAdapter.in_attr(module))
             a = a @ self.projection(name, p, i, "right", a.device, a.dtype).T  # type: ignore
 
         module._inputs = a
 
-    def backward_hook(self, module: nn.Module, g: torch.Tensor):
-        a = module._inputs  # [N, S, I]
+    def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]):
+        a = module._inputs  # [N, S, I/q]
         assert isinstance(a, torch.Tensor), "Activation cache missing for module"
 
         name = assert_type(str, module._name)
@@ -426,6 +437,8 @@ class GradientCollector(HookCollectorBase):
             )
         else:
             self.mod_grads[name] = P.to(dtype=self.save_dtype)
+
+        del module._inputs
 
     def process_batch(self, indices: list[int], **kwargs):
         """Process collected gradients for a batch and update losses."""
