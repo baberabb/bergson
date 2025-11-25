@@ -6,6 +6,8 @@ from typing import Generator
 import torch
 from torch import Tensor, nn
 
+from bergson.collector.collector import TraceCollector
+from bergson.config import IndexConfig
 from bergson.data import load_gradients
 from bergson.gradients import GradientProcessor
 from bergson.query.faiss_index import FaissConfig, FaissIndex
@@ -168,21 +170,16 @@ class Attributor:
         mod_grads = defaultdict(list)
         result = TraceResult()
 
-        def callback(name: str, g: Tensor):
-            g = g.flatten(1)
-
-            # Precondition the gradient using Cholesky solve
-            if precondition:
-                eigval, eigvec = self.processor.preconditioners_eigen[name]
-                eigval_inverse_sqrt = 1.0 / (eigval).sqrt()
-                P = eigvec * eigval_inverse_sqrt @ eigvec.mT
-                g = g.type_as(P)
-                g = g @ P
-
-            # Store the gradient for later use
-            mod_grads[name].append(g.to(self.device, self.dtype, non_blocking=True))
-
-        with GradientCollector(module, callback, self.processor, modules):
+        collector = TraceCollector(
+            model=module,
+            processor=self.processor,
+            precondition=precondition,
+            cfg=IndexConfig(),
+            target_modules=modules,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        with collector:
             yield result
 
         if not mod_grads:

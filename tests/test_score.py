@@ -78,7 +78,10 @@ def test_score(tmp_path: Path, model, dataset):
 
     processor = GradientProcessor(projection_dim=16)
     collector = GradientCollector(
-        model.base_model, data=dataset, cfg=IndexConfig(run_path=str(tmp_path))
+        model.base_model,
+        data=dataset,
+        cfg=IndexConfig(run_path=str(tmp_path)),
+        processor=processor,
     )
     shapes = collector.shapes()
 

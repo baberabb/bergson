@@ -131,10 +131,9 @@ class HookCollectorBase(ContextDecorator, ABC):
         """Return the shapes of the gradients collected by this collector."""
         proj_shape = (
             torch.Size((p_dim, p_dim))
-            if (p_dim := self.cfg.projection_dim) is not None
+            if (p_dim := self.processor.projection_dim) is not None
             else None
         )
-        print(proj_shape, "proj shape")
 
         shapes = {}
         for name, (_, target_shape, has_bias) in self.target_info.items():
@@ -321,8 +320,6 @@ class GradientCollector(HookCollectorBase):
 
     mod_grads: dict = field(default_factory=dict)
 
-    activation_cache: dict[str, torch.Tensor] = field(default_factory=dict)
-
     data: Dataset
 
     reduce_cfg: ReduceConfig | None = None
@@ -332,7 +329,6 @@ class GradientCollector(HookCollectorBase):
 
     def setup(self) -> None:
         """Initialize gradient storage dictionary."""
-        self.mod_grads = {}
 
         assert isinstance(self.model.device, torch.device), (
             "Model device is not set correctly"
@@ -482,6 +478,108 @@ class GradientCollector(HookCollectorBase):
         if self.builder is not None:
             self.builder.flush()
             self.builder.dist_reduce()
+
+
+@dataclass(kw_only=True)
+class TraceCollector(HookCollectorBase):
+    """
+    Collects gradients for each Linear layer in the model.
+
+    Stores gradients in a dictionary mapping module names to gradient tensors.
+    """
+
+    mod_grads: dict = field(default_factory=dict)
+
+    precondition: bool = False
+
+    device: torch.device | str
+
+    dtype: torch.dtype
+
+    def setup(self) -> None:
+        return
+
+    def forward_hook(self, module: nn.Module, a: Float[Tensor, "N S I"]) -> None:
+        p = self.processor.projection_dim
+        name = assert_type(str, module._name)
+        i = getattr(module, LayerAdapter.in_attr(module))
+
+        if module._has_bias:
+            # Append ones to activation for bias term
+            ones = torch.ones(a.size(0), a.size(1), 1, device=a.device, dtype=a.dtype)
+            a = torch.cat([a, ones], dim=-1)
+            i = i + 1
+            setattr(module, LayerAdapter.in_attr(module), i)
+        if p is not None:
+            a = a @ self.projection(name, p, i, "right", a.device, a.dtype).T  # type: ignore
+
+        module._inputs = a
+
+    def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]):
+        a = module._inputs  # [N, S, I/q]
+        assert isinstance(a, torch.Tensor), "Activation cache missing for module"
+
+        name = assert_type(str, module._name)
+
+        if name in self.attention_cfgs:
+            # Recurse into heads with module mutation and restoration
+            num_heads, head_size, head_dim = astuple(self.attention_cfgs[name])
+
+            module_name, module_inputs, module_out_features = (
+                module._name,
+                module._inputs,
+                getattr(module, LayerAdapter.out_attr(module)),
+            )
+            setattr(module, LayerAdapter.out_attr(module), head_size)
+            for h in range(num_heads):
+                module._name = GradientCollector.get_head_name(name, h)  # type: ignore
+                module._inputs = module_inputs
+
+                try:
+                    head_G = torch.narrow(g, head_dim, h * head_size, head_size)
+                except Exception as e:
+                    print(
+                        f"Error processing gradient of shape {g.shape} for head {h}"
+                        f" in module {name}. Provided head config may be incorrect. "
+                        f"Head config: head dim {head_dim}, head size {head_size},"
+                        f" num heads {num_heads}."
+                    )
+                    raise e
+
+                self._process_grad(module, None, (head_G,))
+            module._name, module._inputs = (module_name, module_inputs)
+            setattr(module, LayerAdapter.out_attr(module), module_out_features)
+
+            return
+
+        p = self.processor.projection_dim
+        i = getattr(module, LayerAdapter.in_attr(module))
+        o = getattr(module, LayerAdapter.out_attr(module))
+
+        if p is not None:
+            A = self.projection(name, p, o, "left", g.device, g.dtype)
+            g = g @ A.T  # [N, S, p]
+
+        P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
+
+        g = g.flatten(1)
+
+        # Precondition the gradient using Cholesky solve
+        if self.precondition:
+            eigval, eigvec = self.processor.preconditioners_eigen[name]
+            eigval_inverse_sqrt = 1.0 / (eigval).sqrt()
+            P = eigvec * eigval_inverse_sqrt @ eigvec.mT
+            g = g.type_as(P)
+            g = g @ P
+
+        # Store the gradient for later use
+        self.mod_grads[name].append(g.to(self.device, self.dtype, non_blocking=True))
+
+    def process_batch(self, indices: list[int], **kwargs):
+        return
+
+    def teardown(self):
+        return
 
 
 class CollectorComputer:

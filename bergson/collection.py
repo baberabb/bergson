@@ -11,7 +11,7 @@ from bergson.gradients import GradientProcessor
 from bergson.score.scorer import Scorer
 
 
-def collect_gradients_new(
+def collect_gradients(
     model: PreTrainedModel,
     data: Dataset,
     processor: GradientProcessor,
@@ -23,6 +23,9 @@ def collect_gradients_new(
     scorer: Scorer | None = None,
     reduce_cfg: ReduceConfig | None = None,
 ):
+    """
+    Compute projected gradients using a subset of the dataset.
+    """
     collector = GradientCollector(
         model=model.base_model,  # type: ignore
         cfg=cfg,
@@ -42,67 +45,6 @@ def collect_gradients_new(
         cfg=cfg,
     )
     computer._compute(desc="New worker - Collecting gradients")
-
-
-def collect_gradients(
-    model: PreTrainedModel,
-    data: Dataset,
-    processor: GradientProcessor,
-    cfg: IndexConfig,
-    *,
-    batches: list[list[int]] | None = None,
-    target_modules: set[str] | None = None,
-    attention_cfgs: dict[str, AttentionConfig] | None = None,
-    scorer: Scorer | None = None,
-    reduce_cfg: ReduceConfig | None = None,
-):
-    """
-    Compute projected gradients using a subset of the dataset.
-    """
-    if True:
-        collect_gradients_new(
-            model,
-            data,
-            processor,
-            cfg,
-            batches=batches,
-            target_modules=target_modules,
-            attention_cfgs=attention_cfgs or {},
-            scorer=scorer,
-            reduce_cfg=reduce_cfg,
-        )
-        return
-    # else:
-    #     preconditioners = processor.preconditioners
-
-    #     def callback(name: str, g: torch.Tensor):
-    #         # Compute the outer product of the flattened gradient
-    #         if not cfg.skip_preconditioners:
-    #             g = g.float()
-    #             preconditioner = preconditioners.get(name, None)
-    #             if preconditioner is None:
-    #                 preconditioners[name] = g.mT @ g
-    #             else:
-    #                 preconditioner.addmm_(g.mT, g)
-
-    #     for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
-    #         if cfg.loss_fn == "kl":
-    #             with torch.inference_mode():
-    #                 set_peft_enabled(model, False)
-    #                 ref_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
-    #                 set_peft_enabled(model, True)
-
-    #             with collector:
-    #                 ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
-
-    #                 # Compute average KL across all unmasked tokens
-    #                 kls = torch.sum(ft_lps.exp() * (ft_lps - ref_lps), dim=-1)
-    #                 losses = torch.sum(kls * masks, dim=-1) / denoms
-
-    #                 losses.mean().backward()
-
-    #     process_preconditioners(processor, preconditioners, len(data))
-    #     return
 
 
 def process_preconditioners(
