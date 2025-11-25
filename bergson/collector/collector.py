@@ -102,13 +102,7 @@ class HookCollectorBase(ContextDecorator, ABC):
             layers are included.
 
         Returns:
-            Dictionary mapping module names to (device, weight_shape) tuples
-
-        Example:
-            >>> target_info = HookCollectorBase.discover_targets(model, target_modules)
-            >>> allocate_buffers(target_info)  # Use target_info before creating
-            collector
-            >>> collector = CovarianceCollector(model=model, ...)
+            Dictionary mapping module names to (device, weight_shape) tuples.
         """
         target_info = {}
         for name, layer in model.named_modules():
@@ -175,7 +169,7 @@ class HookCollectorBase(ContextDecorator, ABC):
                     if has_bias:
                         grad_shape[-1] += 1
                     shapes[name] = torch.Size(grad_shape)
-        print(shapes)
+
         return shapes
 
     def projection(
@@ -228,6 +222,11 @@ class HookCollectorBase(ContextDecorator, ABC):
 
     def _process_grad(self, module: nn.Module, _, grad_out):
         """Internal backward hook that extracts gradient and delegates to subclass."""
+        # Sanity checks
+        assert isinstance(module, LayerAdapter.supported_modules), (
+            f"Expected a module of type {LayerAdapter.supported_modules}, "
+            f"got {type(module)}"
+        )
 
         g = grad_out[0].detach()  # [N, S, O]
 
@@ -238,6 +237,8 @@ class HookCollectorBase(ContextDecorator, ABC):
 
         # Clean up temporary attributes
         for layer in self.model.modules():
+            if hasattr(layer, "_inputs"):
+                del layer._inputs
             if hasattr(layer, "_name"):
                 del layer._name
 
@@ -337,6 +338,7 @@ class GradientCollector(HookCollectorBase):
             "Model device is not set correctly"
         )
 
+        # TODO: handle more elegantly?
         self.save_dtype = (
             torch.float32 if self.model.dtype == torch.float32 else torch.float16
         )
@@ -352,9 +354,9 @@ class GradientCollector(HookCollectorBase):
         )
 
         # Compute whether we need to save the index
-        save_index = self.scorer is None and not self.cfg.skip_index
+        self.save_index = self.scorer is None and not self.cfg.skip_index
 
-        if save_index:
+        if self.save_index:
             grad_sizes = {name: math.prod(s) for name, s in self.shapes().items()}
             self.builder = Builder(
                 self.cfg.partial_run_path,
@@ -431,7 +433,7 @@ class GradientCollector(HookCollectorBase):
 
         P = P.flatten(1).clamp_(self.lo, self.hi)
 
-        if self.builder is not None:
+        if self.save_index:
             # Asynchronously move the gradient to CPU and convert to the final dtype
             self.mod_grads[name] = P.to(
                 device="cpu", dtype=self.save_dtype, non_blocking=True
@@ -454,11 +456,6 @@ class GradientCollector(HookCollectorBase):
         self.per_doc_losses[indices] = losses.detach().type_as(self.per_doc_losses)
 
     def teardown(self):
-        # Flush and reduce builder if it exists
-        if self.builder is not None:
-            self.builder.flush()
-            self.builder.dist_reduce()
-
         if dist.is_initialized():
             dist.reduce(self.per_doc_losses, dst=0)
 
@@ -480,6 +477,11 @@ class GradientCollector(HookCollectorBase):
             data.save_to_disk(self.cfg.partial_run_path / "data.hf")
 
             self.processor.save(self.cfg.partial_run_path)
+
+        # Flush and reduce builder if it exists
+        if self.builder is not None:
+            self.builder.flush()
+            self.builder.dist_reduce()
 
 
 class CollectorComputer:
@@ -573,8 +575,9 @@ class CollectorComputer:
                     losses = self.loss_fn(self.model, batch)
                     losses.mean().backward()
 
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
+                    self.model.zero_grad()
+                    # TODO: currently builder also calls torch.cuda.synchronize
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
 
                 if self.cfg.profile:
                     assert isinstance(prof, profile), "Profiler is not set up correctly"

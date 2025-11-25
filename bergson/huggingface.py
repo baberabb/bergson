@@ -17,7 +17,7 @@ from transformers.trainer import Trainer
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
 
-from bergson import AttentionConfig, GradientCollector, GradientProcessor
+from bergson import AttentionConfig, GradientProcessor
 from bergson.data import create_index
 from bergson.gradients import AdafactorNormalizer, AdamNormalizer
 from bergson.peft import detect_peft_modules
@@ -243,9 +243,9 @@ class GradientCollectorCallback(TrainerCallback):
 
         # Record training order if enabled
         if self.order is not None:
-            assert (
-                self.batch_indices is not None
-            ), "Batch indices are not available for training order tracking"
+            assert self.batch_indices is not None, (
+                "Batch indices are not available for training order tracking"
+            )
 
             epoch = int(state.epoch or 0)
             global_step = state.global_step

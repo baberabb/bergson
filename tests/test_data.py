@@ -6,8 +6,9 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
+from bergson.collector.collector import GradientCollector
+from bergson.config import IndexConfig
 from bergson.data import create_index, load_gradients
-from bergson.gradients import GradientCollector
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -17,7 +18,9 @@ def test_large_gradients_build(tmp_path: Path, dataset):
         "EleutherAI/pythia-1.4b", trust_remote_code=True
     )
     model = AutoModelForCausalLM.from_config(config)
-    collector = GradientCollector(model, lambda x: x)
+    collector = GradientCollector(
+        model=model.base_model, data=dataset, cfg=IndexConfig(run_path=str(tmp_path))
+    )
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
     create_index(

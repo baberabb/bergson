@@ -1,18 +1,47 @@
-import math
-
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
-from datasets import Dataset, Value
-from tqdm.auto import tqdm
+from datasets import Dataset
 from transformers import PreTrainedModel
 
+from bergson.collector.collector import CollectorComputer, GradientCollector
 from bergson.config import AttentionConfig, IndexConfig, ReduceConfig
-from bergson.data import Builder, pad_and_tensor
-from bergson.gradients import GradientCollector, GradientProcessor
-from bergson.peft import set_peft_enabled
-from bergson.placeholder import collect_gradients_new
+from bergson.gradients import GradientProcessor
+
+# from bergson.placeholder import collect_gradients_new
 from bergson.score.scorer import Scorer
+
+
+def collect_gradients_new(
+    model: PreTrainedModel,
+    data: Dataset,
+    processor: GradientProcessor,
+    cfg: IndexConfig,
+    *,
+    batches: list[list[int]] | None = None,
+    target_modules: set[str] | None = None,
+    attention_cfgs: dict[str, AttentionConfig] = {},
+    scorer: Scorer | None = None,
+    reduce_cfg: ReduceConfig | None = None,
+):
+    collector = GradientCollector(
+        model=model.base_model,  # type: ignore
+        cfg=cfg,
+        processor=processor,
+        target_modules=target_modules,
+        data=data,
+        attention_cfgs=attention_cfgs,
+        scorer=scorer,
+        reduce_cfg=reduce_cfg,
+    )
+
+    computer = CollectorComputer(
+        model=model,  # type: ignore
+        data=data,
+        collector=collector,
+        batches=batches,
+        cfg=cfg,
+    )
+    computer._compute(desc="New worker - Collecting gradients")
 
 
 def collect_gradients(
@@ -43,141 +72,37 @@ def collect_gradients(
             reduce_cfg=reduce_cfg,
         )
         return
+    # else:
+    #     preconditioners = processor.preconditioners
 
-    rank = dist.get_rank() if dist.is_initialized() else 0
+    #     def callback(name: str, g: torch.Tensor):
+    #         # Compute the outer product of the flattened gradient
+    #         if not cfg.skip_preconditioners:
+    #             g = g.float()
+    #             preconditioner = preconditioners.get(name, None)
+    #             if preconditioner is None:
+    #                 preconditioners[name] = g.mT @ g
+    #             else:
+    #                 preconditioner.addmm_(g.mT, g)
 
-    score = scorer is not None
-    save_index = not score and not cfg.skip_index
+    #     for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
+    #         if cfg.loss_fn == "kl":
+    #             with torch.inference_mode():
+    #                 set_peft_enabled(model, False)
+    #                 ref_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
+    #                 set_peft_enabled(model, True)
 
-    # Batch size of one by default
-    if batches is None:
-        batches = [[idx] for idx in range(len(data))]
+    #             with collector:
+    #                 ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
 
-    # Mutable state for the GradientCollector callback
-    mod_grads = {}
-    preconditioners = processor.preconditioners
+    #                 # Compute average KL across all unmasked tokens
+    #                 kls = torch.sum(ft_lps.exp() * (ft_lps - ref_lps), dim=-1)
+    #                 losses = torch.sum(kls * masks, dim=-1) / denoms
 
-    # TODO: Handle this more elegantly
-    dtype = torch.float32 if model.dtype == torch.float32 else torch.float16
-    lo = torch.finfo(dtype).min
-    hi = torch.finfo(dtype).max
+    #                 losses.mean().backward()
 
-    def callback(name: str, g: torch.Tensor):
-        g = g.flatten(1).clamp_(lo, hi)
-        if save_index:
-            # Asynchronously move the gradient to CPU and convert to the final dtype
-            mod_grads[name] = g.to(device="cpu", dtype=dtype, non_blocking=True)
-        else:
-            mod_grads[name] = g.to(dtype=dtype)
-
-        # Compute the outer product of the flattened gradient
-        if not cfg.skip_preconditioners:
-            g = g.float()
-            preconditioner = preconditioners.get(name, None)
-            if preconditioner is None:
-                preconditioners[name] = g.mT @ g
-            else:
-                preconditioner.addmm_(g.mT, g)
-
-    collector = GradientCollector(
-        model.base_model,
-        callback,
-        processor,
-        target_modules=target_modules,
-        attention_cfgs=attention_cfgs or {},
-    )
-
-    # Allocate space ahead of time for the gradients
-    grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
-    builder = (
-        Builder(cfg.partial_run_path, data, grad_sizes, dtype, reduce_cfg)
-        if save_index
-        else None
-    )
-
-    per_doc_losses = torch.full(
-        (len(data),),
-        device=model.device,
-        dtype=dtype,
-        fill_value=0.0,
-    )
-
-    for indices in tqdm(batches, disable=rank != 0, desc="Building index"):
-        batch = data[indices]
-        x, y = pad_and_tensor(
-            batch["input_ids"],  # type: ignore
-            labels=batch.get("labels"),  # type: ignore
-            device=model.device,
-        )
-        masks = y[:, 1:] != -100
-        denoms = masks.sum(dim=1, dtype=dtype) if cfg.loss_reduction == "mean" else 1.0
-
-        if cfg.loss_fn == "kl":
-            with torch.inference_mode():
-                set_peft_enabled(model, False)
-                ref_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
-                set_peft_enabled(model, True)
-
-            with collector:
-                ft_lps = torch.log_softmax(model(x).logits[:, :-1], dim=-1)
-
-                # Compute average KL across all unmasked tokens
-                kls = torch.sum(ft_lps.exp() * (ft_lps - ref_lps), dim=-1)
-                losses = torch.sum(kls * masks, dim=-1) / denoms
-                if "advantage" in batch:
-                    losses *= torch.tensor(batch["advantage"], device=losses.device)
-
-                losses.mean().backward()
-        else:
-            with collector:
-                logits = model(x).logits[:, :-1]
-
-                losses = F.cross_entropy(
-                    logits.reshape(-1, logits.size(-1)),
-                    y[:, 1:].flatten(),
-                    reduction="none",
-                ).reshape_as(y[:, 1:])
-                losses = losses.sum(1) / denoms
-                if "advantage" in batch:
-                    losses *= torch.tensor(batch["advantage"], device=losses.device)
-
-                losses.mean().backward()
-
-        model.zero_grad()
-
-        if builder is not None:
-            builder(indices, mod_grads)
-
-        if score:
-            scorer(indices, mod_grads)
-
-        mod_grads.clear()
-        per_doc_losses[indices] = losses.detach().type_as(per_doc_losses)
-
-    process_preconditioners(processor, preconditioners, len(data))
-
-    if dist.is_initialized():
-        dist.reduce(per_doc_losses, dst=0)
-
-    if rank == 0:
-        if cfg.drop_columns:
-            data = data.remove_columns(["input_ids"])
-
-        data = data.add_column(
-            "loss",
-            per_doc_losses.cpu().numpy(),
-            feature=Value("float16" if dtype == torch.float16 else "float32"),
-            new_fingerprint="loss",
-        )
-
-        data.save_to_disk(cfg.partial_run_path / "data.hf")
-
-        processor.save(cfg.partial_run_path)
-
-    # Make sure the gradients are written to disk
-    if builder is not None:
-        builder.flush()
-        builder.dist_reduce()
+    #     process_preconditioners(processor, preconditioners, len(data))
+    #     return
 
 
 def process_preconditioners(

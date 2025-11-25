@@ -113,6 +113,7 @@ def build(index_cfg: IndexConfig):
     """
     if index_cfg.debug:
         setup_reproducibility()
+    # TODO: This should be the case for all builds
     index_cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
     with (index_cfg.partial_run_path / "index_config.json").open("w") as f:
         json.dump(asdict(index_cfg), f, indent=2)

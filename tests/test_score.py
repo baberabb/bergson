@@ -8,10 +8,10 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from bergson import (
-    GradientCollector,
     GradientProcessor,
     collect_gradients,
 )
+from bergson.collector.collector import GradientCollector
 from bergson.config import IndexConfig, ScoreConfig
 from bergson.data import create_index
 from bergson.score.scorer import Scorer
@@ -24,7 +24,10 @@ def test_large_gradients_query(tmp_path: Path, dataset):
         "EleutherAI/pythia-1.4b", trust_remote_code=True
     )
     model = AutoModelForCausalLM.from_config(config)
-    collector = GradientCollector(model.base_model, lambda x: x)
+
+    collector = GradientCollector(
+        model.base_model, data=dataset, cfg=IndexConfig(run_path=str(tmp_path))
+    )
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
     dataset.save_to_disk(tmp_path / "query_ds" / "data.hf")
@@ -64,9 +67,9 @@ def test_large_gradients_query(tmp_path: Path, dataset):
     )
 
     assert result.returncode == 0
-    assert (
-        "error" not in result.stderr.lower()
-    ), f"Error found in stderr: {result.stderr}"
+    assert "error" not in result.stderr.lower(), (
+        f"Error found in stderr: {result.stderr}"
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -74,7 +77,10 @@ def test_score(tmp_path: Path, model, dataset):
     cfg = IndexConfig(run_path=str(tmp_path))
 
     processor = GradientProcessor(projection_dim=16)
-    shapes = GradientCollector(model.base_model, lambda x: x, processor).shapes()
+    collector = GradientCollector(
+        model.base_model, data=dataset, cfg=IndexConfig(run_path=str(tmp_path))
+    )
+    shapes = collector.shapes()
 
     query_grads = {
         module: torch.randn(1, shape.numel()) for module, shape in shapes.items()

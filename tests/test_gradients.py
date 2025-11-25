@@ -7,7 +7,6 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from bergson.gradients import (
     AdafactorNormalizer,
     AdamNormalizer,
-    GradientCollector,
     GradientProcessor,
     LayerAdapter,
 )

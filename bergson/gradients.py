@@ -1,19 +1,13 @@
 import json
 from abc import ABC, abstractmethod
-from contextlib import ContextDecorator
-from dataclasses import asdict, astuple, dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Literal, Mapping
+from typing import Literal, Mapping
 
 import torch
 import torch.nn as nn
 from torch import Tensor
-from torch.utils.hooks import RemovableHandle
 from transformers.pytorch_utils import Conv1D as HFConv1D
-
-from .config import AttentionConfig
-from .math import reshape_to_nearest_square
-from .utils import assert_type, create_projection_matrix
 
 NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
 
@@ -324,305 +318,89 @@ class LayerAdapter:
                 raise ValueError(f"Unsupported layer type: {type(layer)}")
 
 
-@dataclass
-class GradientCollector(ContextDecorator):
-    """
-    Adds forward and backward hooks to `model` that efficiently collect per-sequence
-    gradients for all the matrix-valued parameters, randomly projecting them using a
-    fixed seed to compress them into lower-dimensional blocks of shape [p×q]. We use
-    a dictionary of `AdafactorNormalizer` to scale the gradients by the second moments
-    of the parameters, which are expected to be precomputed and passed in.
+# @dataclass
+# class GradientCollector(ContextDecorator):
+#     """
+#     Adds forward and backward hooks to `model` that efficiently collect per-sequence
+#     gradients for all the matrix-valued parameters, randomly projecting them using a
+#     fixed seed to compress them into lower-dimensional blocks of shape [p×q]. We use
+#     a dictionary of `AdafactorNormalizer` to scale the gradients by the second moments
+#     of the parameters, which are expected to be precomputed and passed in.
 
-    We assume that the input to `model` is of shape `[N, S, I]`, where `N` is the
-    batch size, `S` is the sequence length, and `I` is the input dimension. We take the
-    mean over the sequence length to obtain a single gradient per sequence.
-    """
+#     We assume that the input to `model` is of shape `[N, S, I]`, where `N` is the
+#     batch size, `S` is the sequence length, and `I` is the input dimension. We take the
+#     mean over the sequence length to obtain a single gradient per sequence.
+#     """
 
-    model: nn.Module
+#     model: nn.Module
 
-    closure: Callable
-    """Closure to call on the gradient as it is collected."""
+#     closure: Callable
+#     """Closure to call on the gradient as it is collected."""
 
-    processor: GradientProcessor = field(default_factory=GradientProcessor)
-    """Configuration for processing and compressing gradients."""
+#     processor: GradientProcessor = field(default_factory=GradientProcessor)
+#     """Configuration for processing and compressing gradients."""
 
-    target_modules: set[str] | None = None
-    """
-    List of parameter names to collect gradients for. Should consist only of weight
-    matrices in modules supported by LayerAdapter. If `None`, the gradients for all
-    weight matrices will be collected.
-    """
+#     target_modules: set[str] | None = None
+#     """
+#     List of parameter names to collect gradients for. Should consist only of weight
+#     matrices in modules supported by LayerAdapter. If `None`, the gradients for all
+#     weight matrices will be collected.
+#     """
 
-    attention_cfgs: dict[str, AttentionConfig] = field(default_factory=dict)
-    """
-    Dictionary of head configurations for each module to be split into head matrices.
-    """
+#     attention_cfgs: dict[str, AttentionConfig] = field(default_factory=dict)
+#     """
+#     Dictionary of head configurations for each module to be split into head matrices.
+#     """
 
-    indices: list[int] = field(default_factory=list)
-    """List of indices for the current batch."""
+#     def _save_input(self, module: nn.Module, inp: tuple, _):
+#         """Save the input to the module for later use in the backward pass."""
 
-    def __post_init__(self):
-        self._fwd_hooks: list[RemovableHandle] = []
-        self._bwd_hooks: list[RemovableHandle] = []
+#         # Pre-scale the input by the Adafactor column stats
 
-        self.target_info: dict[str, tuple[torch.device, torch.Size, bool]] = {}
+#         norm = self.processor.normalizers.get(name)
+#         if isinstance(norm, AdafactorNormalizer):
+#             b = norm.col.add(1e-30)
+#             b.rsqrt_()
 
-        # Before we add any hooks, we need to peek at what modules we need to track.
-        for name, layer in self.model.named_modules():
-            if not isinstance(layer, LayerAdapter.supported_modules):
-                continue
+#             x = x * b.type_as(x)  # [N, S, I] * [I] → [N, S, I]
 
-            if self.target_modules is not None and name not in self.target_modules:
-                continue
+#         # If we're not using AdamNormalizer and are not including bias gradients,
+#         # we can randomly project the input here to save memory,
+#         # rather than waiting until the backward pass.
+#         p = self.processor.projection_dim
+#         if p is not None and not isinstance(norm, AdamNormalizer):
+#             i = getattr(module, LayerAdapter.in_attr(module))
+#             x = x @ self.projection(name, p, i, "right", x.device, x.dtype).T  # type: ignore
 
-            # Users of this class really like to know ahead of time what the shapes are
-            has_bias = getattr(layer, "bias", None) is not None
-            self.target_info[name] = (
-                layer.weight.device,
-                layer.weight.shape,
-                has_bias,
-            )
+#         module._inputs = x
 
-    def shapes(self) -> Mapping[str, torch.Size]:
-        """Return the shapes of the gradients collected by this collector."""
-        proj_shape = (
-            torch.Size((p_dim, p_dim))
-            if (p_dim := self.processor.projection_dim) is not None
-            else None
-        )
-        print(proj_shape, "proj shape")
-        shapes = {}
-        for name, (_, target_shape, has_bias) in self.target_info.items():
-            include_bias = has_bias and self.processor.include_bias
-            if name in self.attention_cfgs:
-                attention_cfg = self.attention_cfgs[name]
-                if proj_shape:
-                    head_shape = proj_shape
-                else:
-                    # Mutate the attention module's shape to get the attention
-                    # head shape
-                    attention_shape = list(target_shape)
-                    # - 2 because we're excluding the batch and sequence activation
-                    # dimensions
-                    attention_shape[attention_cfg.head_dim - 2] = (
-                        attention_cfg.head_size
-                    )
-                    if include_bias:
-                        attention_shape[-1] += 1
-                    head_shape = torch.Size(attention_shape)
+#     def _process_grad(self, module: nn.Module, _, grad_out):
+#         """Process the incoming gradient wrt the output of the module."""
 
-                shapes.update(
-                    {
-                        self.get_head_name(name, h): head_shape
-                        for h in range(attention_cfg.num_heads)
-                    }
-                )
-            else:
-                if proj_shape:
-                    shapes[name] = proj_shape
-                else:
-                    grad_shape = list(target_shape)
-                    if include_bias:
-                        grad_shape[-1] += 1
-                    shapes[name] = torch.Size(grad_shape)
-        print(shapes)
-        return shapes
+#         # Pre-scale G by the Adafactor row statistics
+#         norm = self.processor.normalizers.get(name)
+#         if isinstance(norm, AdafactorNormalizer):
+#             # Compare to the normalize_ method in AdafactorNormalizer
+#             r = norm.row.add(1e-30)
+#             a = r.mean().sqrt() * r.rsqrt_()
 
-    def projection(
-        self,
-        name: str,
-        m: int,
-        n: int,
-        side: Literal["left", "right"],
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> Tensor:
-        """Return the `side` projection matrix for parameter `name` of shape [m, n]."""
-        key = (name, side, device)
-        if key in self.processor._projection_matrices:
-            return self.processor._projection_matrices[key]
+#             G = G * a.type_as(G)  # [N, S, O] * [O] → [N, S, O]
 
-        identifier = f"{name}/{side}"
+#         # If we are using AdamNormalizer, or including bias gradients
+#         # we need to materialize the full gradient and then project
+#         if isinstance(norm, AdamNormalizer):
+#             P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
 
-        A = create_projection_matrix(
-            identifier, m, n, dtype, device, self.processor.projection_type
-        )
-        self.processor._projection_matrices[key] = A
-        return A
+#             if isinstance(norm, AdamNormalizer):
+#                 # Normalize the gradients using the second moment matrix
+#                 P /= norm.avg_sq.sqrt().add_(1e-8)
 
-    @staticmethod
-    def get_head_name(name: str, head_idx: int) -> str:
-        """Get the name of an attention head with index `head_idx` in a
-        module with name `name`."""
-        return f"{name}.head_{head_idx}"
+#             if self.processor.reshape_to_square:
+#                 P = reshape_to_nearest_square(P)
+#                 o, i = P.shape[-2:]
 
-    def __enter__(self):
-        # Install a hook on every Linear
-        for name in self.target_info:
-            layer = self.model.get_submodule(name)
-
-            # Save the name of the layer for later use
-            layer._name = name  # type: ignore[attr-defined]
-
-            # register forward hook to save V = X @ B^T
-            fwd_hook = layer.register_forward_hook(self._save_input)
-            self._fwd_hooks.append(fwd_hook)
-
-            # register backward hook to compute P = sum(U @ V^T)
-            bwd_hook = layer.register_full_backward_hook(self._process_grad)
-            self._bwd_hooks.append(bwd_hook)
-        return self
-
-    def _save_input(self, module: nn.Module, inp: tuple, _):
-        """Save the input to the module for later use in the backward pass."""
-        x = inp[0].detach()
-        assert x.ndim == 3, f"Expected input of shape [N, S, I], got {x.shape}"
-
-        # Pre-scale the input by the Adafactor column stats
-        name = assert_type(str, module._name)
-        norm = self.processor.normalizers.get(name)
-        if isinstance(norm, AdafactorNormalizer):
-            b = norm.col.add(1e-30)
-            b.rsqrt_()
-
-            x = x * b.type_as(x)  # [N, S, I] * [I] → [N, S, I]
-
-        include_bias = (
-            self.processor.include_bias and getattr(module, "bias", None) is not None
-        )
-
-        # If we're not using AdamNormalizer and are not including bias gradients,
-        # we can randomly project the input here to save memory,
-        # rather than waiting until the backward pass.
-        p = self.processor.projection_dim
-        if p is not None and not isinstance(norm, AdamNormalizer) and not include_bias:
-            i = getattr(module, LayerAdapter.in_attr(module))
-            x = x @ self.projection(name, p, i, "right", x.device, x.dtype).T  # type: ignore
-
-        module._inputs = x
-
-    def _process_grad(self, module: nn.Module, _, grad_out):
-        """Process the incoming gradient wrt the output of the module."""
-        # Sanity checks
-        assert isinstance(module, LayerAdapter.supported_modules), (
-            f"Expected a module of type {LayerAdapter.supported_modules}, "
-            f"got {type(module)}"
-        )
-        G = grad_out[0]  # [N, S, O]
-        I = module._inputs  # [N, S, I/q]
-
-        name = assert_type(str, module._name)
-
-        # different way of checking for bias as above
-        module_has_bias = getattr(module, "bias", None) is not None
-        include_bias = module_has_bias and self.processor.include_bias
-
-        if name in self.attention_cfgs:
-            # Recurse into heads with module mutation and restoration
-            num_heads, head_size, head_dim = astuple(self.attention_cfgs[name])
-
-            module_name, module_inputs, module_out_features = (
-                module._name,
-                module._inputs,
-                getattr(module, LayerAdapter.out_attr(module)),
-            )
-            setattr(module, LayerAdapter.out_attr(module), head_size)
-            for h in range(num_heads):
-                module._name = GradientCollector.get_head_name(name, h)  # type: ignore
-                module._inputs = module_inputs
-
-                try:
-                    head_G = torch.narrow(G, head_dim, h * head_size, head_size)
-                except Exception as e:
-                    print(
-                        f"Error processing gradient of shape {G.shape} for head {h}"
-                        f" in module {name}. Provided head config may be incorrect. "
-                        f"Head config: head dim {head_dim}, head size {head_size},"
-                        f" num heads {num_heads}."
-                    )
-                    raise e
-
-                self._process_grad(module, None, (head_G,))
-            module._name, module._inputs = (module_name, module_inputs)
-            setattr(module, LayerAdapter.out_attr(module), module_out_features)
-
-            return
-
-        p = self.processor.projection_dim
-        i = getattr(module, LayerAdapter.in_attr(module))
-        o = getattr(module, LayerAdapter.out_attr(module))
-
-        # Pre-scale G by the Adafactor row statistics
-        norm = self.processor.normalizers.get(name)
-        if isinstance(norm, AdafactorNormalizer):
-            # Compare to the normalize_ method in AdafactorNormalizer
-            r = norm.row.add(1e-30)
-            a = r.mean().sqrt() * r.rsqrt_()
-
-            G = G * a.type_as(G)  # [N, S, O] * [O] → [N, S, O]
-
-        # If we are using AdamNormalizer, or including bias gradients
-        # we need to materialize the full gradient and then project
-        if isinstance(norm, AdamNormalizer) or include_bias:
-            P = G.mT @ I  # [N, O, S] @ [N, S, I] → [N, O, I]
-            if include_bias:
-                # Append the bias gradient to the input
-                P = torch.cat(
-                    [
-                        P,
-                        G.sum(dim=(0, 1))
-                        .unsqueeze(0)
-                        .unsqueeze(2)
-                        .expand(P.shape[0], -1, 1),
-                    ],
-                    dim=2,
-                )
-                i += 1
-
-            if isinstance(norm, AdamNormalizer):
-                # Normalize the gradients using the second moment matrix
-                P /= norm.avg_sq.sqrt().add_(1e-8)
-
-            if self.processor.reshape_to_square:
-                P = reshape_to_nearest_square(P)
-                o, i = P.shape[-2:]
-
-            # Project the gradients to the lower-dimensional space
-            if p is not None:
-                A = self.projection(name, p, o, "left", P.device, G.dtype)
-                B = self.projection(name, p, i, "right", P.device, G.dtype)
-                P = A @ P @ B.T  # [N, p, q]
-
-        # Both Adafactor and no normalizer, we can project G first
-        else:
-            if p is not None:
-                A = self.projection(name, p, o, "left", G.device, G.dtype)
-                G = G @ A.T  # [N, S, p]
-
-            P = G.mT @ I  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
-
-        if self.indices:
-            self.closure(name, P, self.indices)
-        else:
-            self.closure(name, P)
-
-        # Save memory ASAP
-        del module._inputs
-
-    def __exit__(self, exc_type, exc, tb):
-        # clean up secret attributes
-        for layer in self.model.modules():
-            if hasattr(layer, "_inputs"):
-                del layer._inputs
-            if hasattr(layer, "_name"):
-                del layer._name
-
-        # clean up hooks
-        for h in self._fwd_hooks:
-            h.remove()
-        for h in self._bwd_hooks:
-            h.remove()
-        self._fwd_hooks.clear()
-        self._bwd_hooks.clear()
-
-        return False
+#             # Project the gradients to the lower-dimensional space
+#             if p is not None:
+#                 A = self.projection(name, p, o, "left", P.device, G.dtype)
+#                 B = self.projection(name, p, i, "right", P.device, G.dtype)
+#                 P = A @ P @ B.T  # [N, p, q]

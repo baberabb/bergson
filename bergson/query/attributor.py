@@ -7,7 +7,7 @@ import torch
 from torch import Tensor, nn
 
 from bergson.data import load_gradients
-from bergson.gradients import GradientCollector, GradientProcessor
+from bergson.gradients import GradientProcessor
 from bergson.query.faiss_index import FaissConfig, FaissIndex
 
 
