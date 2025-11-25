@@ -182,8 +182,6 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
             else:
                 raise e
 
-    ds = ds.select(range(256))
-    print("Warning: l.186 worker_utils.py is selecting only 256 samples for testing.")
     # In many cases the token_batch_size may be smaller than the max length allowed by
     # the model. If cfg.data.truncation is True, we use the tokenizer to truncate
     tokenizer = AutoTokenizer.from_pretrained(cfg.model)

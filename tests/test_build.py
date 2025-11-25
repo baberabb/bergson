@@ -45,7 +45,7 @@ def test_build_consistency(tmp_path: Path, model, dataset):
     collect_gradients(
         model=model,
         data=dataset,
-        processor=GradientProcessor(),
+        processor=GradientProcessor(projection_dim=cfg.projection_dim),
         cfg=cfg,
     )
 
@@ -53,7 +53,7 @@ def test_build_consistency(tmp_path: Path, model, dataset):
 
     cache_path = Path("runs/test_build_cache.npy")
     if not cache_path.exists():
-        # Regenerate cache
+        # Regenerate cache, TODO: We shouldn't do this, maybe use dvc
         np.save(cache_path, index[index.dtype.names[0]][0])
 
     cached_item_grad = np.load(cache_path)
@@ -80,9 +80,9 @@ def test_split_attention_build(tmp_path: Path, model, dataset):
         attention_cfgs=attention_cfgs,
     )
 
-    assert any(
-        Path(cfg.partial_run_path).iterdir()
-    ), "Expected artifacts in the temp run_path"
+    assert any(Path(cfg.partial_run_path).iterdir()), (
+        "Expected artifacts in the temp run_path"
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -107,9 +107,9 @@ def test_conv1d_build(tmp_path: Path, dataset):
         cfg=cfg,
     )
 
-    assert any(
-        Path(cfg.partial_run_path).iterdir()
-    ), "Expected artifacts in the run path"
+    assert any(Path(cfg.partial_run_path).iterdir()), (
+        "Expected artifacts in the run path"
+    )
 
     index = load_gradients(cfg.partial_run_path)
 

@@ -5,7 +5,6 @@ from contextlib import ContextDecorator, nullcontext
 from dataclasses import astuple, dataclass, field
 from typing import Callable, Literal, Mapping, Optional
 
-import debugpy
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -24,10 +23,9 @@ from torch.utils.hooks import RemovableHandle
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
-from bergson.collection import Builder
 from bergson.collector.logger import get_logger
-from bergson.config import AttentionConfig, IndexConfig
-from bergson.data import pad_and_tensor
+from bergson.config import AttentionConfig, IndexConfig, ReduceConfig
+from bergson.data import Builder, pad_and_tensor
 from bergson.gradients import GradientProcessor, LayerAdapter
 from bergson.peft import set_peft_enabled
 from bergson.score.scorer import Scorer
@@ -142,6 +140,7 @@ class HookCollectorBase(ContextDecorator, ABC):
             if (p_dim := self.cfg.projection_dim) is not None
             else None
         )
+        print(proj_shape, "proj shape")
 
         shapes = {}
         for name, (_, target_shape, has_bias) in self.target_info.items():
@@ -176,7 +175,7 @@ class HookCollectorBase(ContextDecorator, ABC):
                     if has_bias:
                         grad_shape[-1] += 1
                     shapes[name] = torch.Size(grad_shape)
-
+        print(shapes)
         return shapes
 
     def projection(
@@ -229,7 +228,6 @@ class HookCollectorBase(ContextDecorator, ABC):
 
     def _process_grad(self, module: nn.Module, _, grad_out):
         """Internal backward hook that extracts gradient and delegates to subclass."""
-        assert isinstance(module, nn.Linear), "Expected a Linear module"
 
         g = grad_out[0].detach()  # [N, S, O]
 
@@ -326,6 +324,8 @@ class GradientCollector(HookCollectorBase):
 
     data: Dataset
 
+    reduce_cfg: ReduceConfig | None = None
+
     builder: Builder | None = None
     scorer: Scorer | None = None
 
@@ -361,7 +361,7 @@ class GradientCollector(HookCollectorBase):
                 self.data,
                 grad_sizes,
                 self.save_dtype,
-                reduce_cfg=None,
+                self.reduce_cfg,
             )
         else:
             self.builder = None
@@ -422,9 +422,6 @@ class GradientCollector(HookCollectorBase):
         p = self.processor.projection_dim
         i = getattr(module, LayerAdapter.in_attr(module))
         o = getattr(module, LayerAdapter.out_attr(module))
-
-        if name == "h.1.mlp.c_fc":
-            debugpy.breakpoint()
 
         if p is not None:
             A = self.projection(name, p, o, "left", g.device, g.dtype)

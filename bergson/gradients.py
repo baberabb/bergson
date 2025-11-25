@@ -5,7 +5,6 @@ from dataclasses import asdict, astuple, dataclass, field
 from pathlib import Path
 from typing import Callable, Literal, Mapping
 
-import debugpy
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -156,9 +155,9 @@ class AdamNormalizer(Normalizer):
         and the factored second moments.
         """
         # We assume avg_sq is a square matrix of shape [O, I]
-        assert (
-            self.avg_sq.ndim == 2
-        ), f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
+        assert self.avg_sq.ndim == 2, (
+            f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
+        )
 
         # Compute row and column means
         return AdafactorNormalizer(
@@ -391,7 +390,7 @@ class GradientCollector(ContextDecorator):
             if (p_dim := self.processor.projection_dim) is not None
             else None
         )
-
+        print(proj_shape, "proj shape")
         shapes = {}
         for name, (_, target_shape, has_bias) in self.target_info.items():
             include_bias = has_bias and self.processor.include_bias
@@ -426,7 +425,7 @@ class GradientCollector(ContextDecorator):
                     if include_bias:
                         grad_shape[-1] += 1
                     shapes[name] = torch.Size(grad_shape)
-
+        print(shapes)
         return shapes
 
     def projection(
@@ -512,10 +511,7 @@ class GradientCollector(ContextDecorator):
         G = grad_out[0]  # [N, S, O]
         I = module._inputs  # [N, S, I/q]
 
-
         name = assert_type(str, module._name)
-        if name== "h.1.mlp.c_fc":
-            debugpy.breakpoint()
 
         # different way of checking for bias as above
         module_has_bias = getattr(module, "bias", None) is not None
