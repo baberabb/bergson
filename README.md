@@ -162,3 +162,7 @@ pytest
 ```
 
 We use [conventional commits](https://www.conventionalcommits.org/en/v1.0.0/) for releases.
+
+# Support
+
+If you have suggestions, questions, or would like to collaborate, please email lucia@eleuther.ai or drop us a line in the #data-attribution channel of the EleutherAI Discord!
