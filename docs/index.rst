@@ -59,6 +59,6 @@ Content Index
 * :ref:`genindex`
 
 
-Authored by Lucia Quirke, Nora Belrose, Louis Jaburi, Baber Abbasi, William Li, and Stella Biderman.
+Documentation by Lucia Quirke.
 
 If you have suggestions, questions, or would like to collaborate, please email lucia@eleuther.ai or drop us a line in the #data-attribution channel of the EleutherAI Discord!
