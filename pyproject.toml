@@ -20,6 +20,7 @@ dependencies = [
     "simple-parsing",
     "torch",
     "transformers",
+    "click",
 ]
 version = "0.2.0"
 [project.optional-dependencies]
