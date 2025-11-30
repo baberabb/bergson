@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
@@ -733,8 +734,19 @@ def setup_training(
         compute_metrics=compute_metrics,
     )
 
-    # Prepare for gradient collection
-    trainer = prepare_for_gradient_collection(trainer)
+    # Prepare for gradient collection - only main process adds _idx, others load from cache
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    is_main_process = local_rank <= 0
+
+    if is_main_process:
+        trainer = prepare_for_gradient_collection(trainer)
+
+    # Wait for main process to finish dataset preparation
+    if dist.is_initialized():
+        dist.barrier()
+
+    if not is_main_process:
+        trainer = prepare_for_gradient_collection(trainer)
 
     return trainer
 
@@ -804,6 +816,10 @@ def upload_to_hub(model, tokenizer, model_name="2layer-transformer-tinystories")
 def main(args):
     check_logins()
 
+    # Get local rank for distributed training
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    is_main_process = local_rank <= 0
+
     dataset_name = "EleutherAI/SmolLM2-135M-10B"
     # dataset_name = "RonenEldan/TinyStories"
     num_train_epochs = 1
@@ -846,16 +862,34 @@ def main(args):
 
     # # Create induction head dataset
     # test_induction_head_labels(tokenizer) # Outdated
-    induction_dataset = create_induction_head_dataset(
-        tokenizer, seed=seed, num_prompts=100
-    )
+    # Main process loads/creates datasets first, then others load from cache
+    if is_main_process:
+        induction_dataset = create_induction_head_dataset(
+            tokenizer, seed=seed, num_prompts=100
+        )
+        if train:
+            if args.small:
+                train_dataset, _ = load_data(tokenizer, name=dataset_name, N=0.4)
+            else:
+                train_dataset, _ = load_data(tokenizer, name=dataset_name)
 
+    # Wait for main process to finish dataset creation
+    if dist.is_initialized():
+        dist.barrier()
+
+    # Other processes load from cache
+    if not is_main_process:
+        induction_dataset = create_induction_head_dataset(
+            tokenizer, seed=seed, num_prompts=100
+        )
+        if train:
+            if args.small:
+                train_dataset, _ = load_data(tokenizer, name=dataset_name, N=0.4)
+            else:
+                train_dataset, _ = load_data(tokenizer, name=dataset_name)
+
+    # All processes now have datasets, proceed with training
     if train:
-        if args.small:
-            train_dataset, _ = load_data(tokenizer, name=dataset_name, N=0.4)
-        else:
-            train_dataset, _ = load_data(tokenizer, name=dataset_name)
-
         trainer = setup_training(
             model,
             tokenizer,
