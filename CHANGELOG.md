@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.3.0 (2025-12-03)
+
+### Features
+
+- Release bergson
+  ([`64b5baf`](https://github.com/EleutherAI/bergson/commit/64b5baf4aa998c4e7573e24dcda939e74185c5f4))
+
+
 ## v0.2.0 (2025-11-13)
 
 ### Features
