@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.4.0 (2025-12-03)
+
+### Features
+
+- Enable specifying a custom tokenizer
+  ([`9781a55`](https://github.com/EleutherAI/bergson/commit/9781a5538491aae3bf53af8247ae2509fe801b59))
+
+
 ## v0.3.0 (2025-12-03)
 
 ### Features
