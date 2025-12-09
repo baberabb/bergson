@@ -18,6 +18,7 @@ from transformers.trainer_callback import TrainerCallback, TrainerControl, Train
 from transformers.training_args import TrainingArguments
 
 from bergson import AttentionConfig, GradientProcessor
+from bergson.collector.collector import StreamingGradientCollector
 from bergson.data import create_index
 from bergson.gradients import AdafactorNormalizer, AdamNormalizer
 from bergson.peft import detect_peft_modules
@@ -57,7 +58,7 @@ class GradientCollectorCallback(TrainerCallback):
         super().__init__()
 
         # Initialized in on_train_begin when we learn what the model is
-        self.collector = None
+        self.collector: StreamingGradientCollector
         self.grad_sizes = {}
 
         self.attention_cfgs = attention_cfgs
@@ -80,12 +81,11 @@ class GradientCollectorCallback(TrainerCallback):
         self.torch_dtype = torch.float32 if self.dtype == np.float32 else torch.float16
 
     def write_grads(self, grad_buffer: np.memmap):
-        # Ensure the nonblocking copies are all finished
         torch.cuda.synchronize()
-        for layer_name, g in self.mod_grads.items():
+        for layer_name, g in self.collector.mod_grads.items():
             grad_buffer[layer_name][self.batch_indices, :] = g.numpy()
 
-        self.mod_grads.clear()
+        self.collector.mod_grads.clear()
 
     def on_train_begin(
         self,
@@ -109,9 +109,8 @@ class GradientCollectorCallback(TrainerCallback):
             reshape_to_square = False
             target_modules = None
 
-        self.collector = GradientCollector(
+        self.collector = StreamingGradientCollector(
             model=getattr(model, "base_model", model),
-            closure=self.on_module_backward,
             processor=GradientProcessor(
                 {},
                 projection_dim=self.projection_dim or None,
@@ -120,6 +119,7 @@ class GradientCollectorCallback(TrainerCallback):
             ),
             target_modules=target_modules,
             attention_cfgs=self.attention_cfgs,
+            save_dtype=self.torch_dtype,
         )
         self.grad_sizes = {
             name: math.prod(s) for name, s in self.collector.shapes().items()

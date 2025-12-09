@@ -1,6 +1,8 @@
+import functools
 import math
 import os
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from contextlib import ContextDecorator, nullcontext
 from dataclasses import astuple, dataclass, field
 from typing import Callable, Literal, Mapping, Optional
@@ -54,7 +56,7 @@ class HookCollectorBase(ContextDecorator, ABC):
 
     model: nn.Module
 
-    cfg: IndexConfig
+    cfg: IndexConfig | None = None
 
     target_modules: set[str] | None = None
     """
@@ -126,6 +128,45 @@ class HookCollectorBase(ContextDecorator, ABC):
         """Get the name of an attention head with index `head_idx` in a
         module with name `name`."""
         return f"{name}.head_{head_idx}"
+
+    @staticmethod
+    def split_attention_heads(fn):
+        """Decorator that splits attention module calls into per-head calls."""
+
+        @functools.wraps(fn)
+        def wrapper(self, module, g):
+            name = module._name
+
+            if name not in self.attention_cfgs:
+                return fn(self, module, g)
+
+            num_heads, head_size, head_dim = astuple(self.attention_cfgs[name])
+
+            # Save state
+            orig_name = module._name
+            orig_out = getattr(module, LayerAdapter.out_attr(module))
+
+            setattr(module, LayerAdapter.out_attr(module), head_size)
+
+            for h in range(num_heads):
+                module._name = self.get_head_name(name, h)
+                try:
+                    head_g = torch.narrow(g, head_dim, h * head_size, head_size)
+                except Exception as e:
+                    print(
+                        f"Error processing gradient of shape {g.shape} for head {h}"
+                        f" in module {name}. Provided head config may be incorrect. "
+                        f"Head config: head dim {head_dim}, head size {head_size},"
+                        f" num heads {num_heads}."
+                    )
+                    raise e
+                fn(self, module, head_g)
+
+            # Restore
+            module._name = orig_name
+            setattr(module, LayerAdapter.out_attr(module), orig_out)
+
+        return wrapper
 
     def shapes(self) -> Mapping[str, torch.Size]:
         """Return the shapes of the gradients collected by this collector."""
@@ -329,7 +370,7 @@ class GradientCollector(HookCollectorBase):
 
     def setup(self) -> None:
         """Initialize gradient storage dictionary."""
-
+        assert self.cfg is not None, "cfg is required for GradientCollector"
         assert isinstance(
             self.model.device, torch.device
         ), "Model device is not set correctly"
@@ -380,45 +421,14 @@ class GradientCollector(HookCollectorBase):
 
         module._inputs = a
 
+    @HookCollectorBase.split_attention_heads
     def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]):
         a = module._inputs  # [N, S, I/q]
         assert isinstance(a, torch.Tensor), "Activation cache missing for module"
 
         name = assert_type(str, module._name)
 
-        if name in self.attention_cfgs:
-            # Recurse into heads with module mutation and restoration
-            num_heads, head_size, head_dim = astuple(self.attention_cfgs[name])
-
-            module_name, module_inputs, module_out_features = (
-                module._name,
-                module._inputs,
-                getattr(module, LayerAdapter.out_attr(module)),
-            )
-            setattr(module, LayerAdapter.out_attr(module), head_size)
-            for h in range(num_heads):
-                module._name = GradientCollector.get_head_name(name, h)  # type: ignore
-                module._inputs = module_inputs
-
-                try:
-                    head_G = torch.narrow(g, head_dim, h * head_size, head_size)
-                except Exception as e:
-                    print(
-                        f"Error processing gradient of shape {g.shape} for head {h}"
-                        f" in module {name}. Provided head config may be incorrect. "
-                        f"Head config: head dim {head_dim}, head size {head_size},"
-                        f" num heads {num_heads}."
-                    )
-                    raise e
-
-                self._process_grad(module, None, (head_G,))
-            module._name, module._inputs = (module_name, module_inputs)
-            setattr(module, LayerAdapter.out_attr(module), module_out_features)
-
-            return
-
         p = self.processor.projection_dim
-        i = getattr(module, LayerAdapter.in_attr(module))
         o = getattr(module, LayerAdapter.out_attr(module))
 
         if p is not None:
@@ -452,6 +462,9 @@ class GradientCollector(HookCollectorBase):
         self.per_doc_losses[indices] = losses.detach().type_as(self.per_doc_losses)
 
     def teardown(self):
+        assert (
+            self.cfg is not None
+        ), "cfg is required for GradientCollector"  # pleasing type checker
         if dist.is_initialized():
             dist.reduce(self.per_doc_losses, dst=0)
 
@@ -488,7 +501,7 @@ class TraceCollector(HookCollectorBase):
     Stores gradients in a dictionary mapping module names to gradient tensors.
     """
 
-    mod_grads: dict = field(default_factory=dict)
+    mod_grads: dict = field(default_factory=lambda: defaultdict(list))
 
     precondition: bool = False
 
@@ -515,45 +528,15 @@ class TraceCollector(HookCollectorBase):
 
         module._inputs = a
 
+    @HookCollectorBase.split_attention_heads
     def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]):
         a = module._inputs  # [N, S, I/q]
         assert isinstance(a, torch.Tensor), "Activation cache missing for module"
 
         name = assert_type(str, module._name)
 
-        if name in self.attention_cfgs:
-            # Recurse into heads with module mutation and restoration
-            num_heads, head_size, head_dim = astuple(self.attention_cfgs[name])
-
-            module_name, module_inputs, module_out_features = (
-                module._name,
-                module._inputs,
-                getattr(module, LayerAdapter.out_attr(module)),
-            )
-            setattr(module, LayerAdapter.out_attr(module), head_size)
-            for h in range(num_heads):
-                module._name = GradientCollector.get_head_name(name, h)  # type: ignore
-                module._inputs = module_inputs
-
-                try:
-                    head_G = torch.narrow(g, head_dim, h * head_size, head_size)
-                except Exception as e:
-                    print(
-                        f"Error processing gradient of shape {g.shape} for head {h}"
-                        f" in module {name}. Provided head config may be incorrect. "
-                        f"Head config: head dim {head_dim}, head size {head_size},"
-                        f" num heads {num_heads}."
-                    )
-                    raise e
-
-                self._process_grad(module, None, (head_G,))
-            module._name, module._inputs = (module_name, module_inputs)
-            setattr(module, LayerAdapter.out_attr(module), module_out_features)
-
-            return
-
         p = self.processor.projection_dim
-        i = getattr(module, LayerAdapter.in_attr(module))
+
         o = getattr(module, LayerAdapter.out_attr(module))
 
         if p is not None:
@@ -562,24 +545,87 @@ class TraceCollector(HookCollectorBase):
 
         P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
 
-        g = g.flatten(1)
+        P = P.flatten(1)
 
         # Precondition the gradient using Cholesky solve
+        # TODO: Should damp here?
         if self.precondition:
             eigval, eigvec = self.processor.preconditioners_eigen[name]
             eigval_inverse_sqrt = 1.0 / (eigval).sqrt()
-            P = eigvec * eigval_inverse_sqrt @ eigvec.mT
-            g = g.type_as(P)
-            g = g @ P
+            prec = eigvec * eigval_inverse_sqrt @ eigvec.mT
+            P = P.type_as(prec) @ prec  # <- apply to P
 
         # Store the gradient for later use
-        self.mod_grads[name].append(g.to(self.device, self.dtype, non_blocking=True))
+        self.mod_grads[name].append(P.to(self.device, self.dtype, non_blocking=True))
 
     def process_batch(self, indices: list[int], **kwargs):
         return
 
     def teardown(self):
         return
+
+
+@dataclass
+class StreamingGradientCollector(HookCollectorBase):
+    """
+    Lightweight collector for streaming gradient collection during training.
+
+    Stores per-sample gradients in `mod_grads` dict for external consumers
+    (e.g., callbacks) to process. Does not manage file I/O internally.
+    """
+
+    mod_grads: dict = field(default_factory=dict)
+
+    save_dtype: torch.dtype = torch.float16
+
+    def setup(self) -> None:
+        self.lo = torch.finfo(self.save_dtype).min
+        self.hi = torch.finfo(self.save_dtype).max
+
+    def teardown(self) -> None:
+        pass
+
+    def process_batch(self, indices: list[int], **kwargs) -> None:
+        pass
+
+    def forward_hook(self, module: nn.Module, a: Float[Tensor, "N S I"]) -> None:
+        p = self.processor.projection_dim
+        name = assert_type(str, module._name)
+        i = getattr(module, LayerAdapter.in_attr(module))
+
+        if module._has_bias:
+            ones = torch.ones(a.size(0), a.size(1), 1, device=a.device, dtype=a.dtype)
+            a = torch.cat([a, ones], dim=-1)
+            i = i + 1
+            setattr(module, LayerAdapter.in_attr(module), i)
+
+        if p is not None:
+            a = a @ self.projection(name, p, i, "right", a.device, a.dtype).T
+
+        module._inputs = a
+
+    @HookCollectorBase.split_attention_heads
+    def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]) -> None:
+        a = module._inputs
+        assert isinstance(a, torch.Tensor), "Activation cache missing for module"
+
+        name = assert_type(str, module._name)
+
+        p = self.processor.projection_dim
+        o = getattr(module, LayerAdapter.out_attr(module))
+
+        if p is not None:
+            A = self.projection(name, p, o, "left", g.device, g.dtype)
+            g = g @ A.T
+
+        P = g.mT @ a
+        P = P.flatten(1).clamp_(self.lo, self.hi)
+
+        self.mod_grads[name] = P.to(
+            device="cpu", dtype=self.save_dtype, non_blocking=True
+        )
+
+        del module._inputs
 
 
 class CollectorComputer:
