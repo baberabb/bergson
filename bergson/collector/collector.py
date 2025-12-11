@@ -40,11 +40,11 @@ class HookCollectorBase(ContextDecorator, ABC):
     Abstract base class for collectors that attach forward and backward hooks to model
     layers.
 
-    Automatically discovers nn.Linear layers in the model, registers hooks during
+    Automatically discovers supported modules in the model, registers hooks during
     context entry, and provides lifecycle methods (setup/teardown) for subclasses to
     implement custom logic.
 
-    Assumes model input shape is [N, S, I] where N=batch size, S=sequence length,
+    Assumes module input shape is [N, S, I] where N=batch size, S=sequence length,
     I=input dimension.
 
     Subclasses must implement:
@@ -60,7 +60,7 @@ class HookCollectorBase(ContextDecorator, ABC):
 
     target_modules: set[str] | None = None
     """
-    Set of module names to attach hooks to. Should consist only of nn.Linear modules.
+    Set of module names to attach hooks to. Should consist only of supported modules.
     If None, hooks are attached to all Linear layers in the model.
     """
 
@@ -371,9 +371,9 @@ class GradientCollector(HookCollectorBase):
     def setup(self) -> None:
         """Initialize gradient storage dictionary."""
         assert self.cfg is not None, "cfg is required for GradientCollector"
-        assert isinstance(
-            self.model.device, torch.device
-        ), "Model device is not set correctly"
+        assert isinstance(self.model.device, torch.device), (
+            "Model device is not set correctly"
+        )
 
         # TODO: handle more elegantly?
         self.save_dtype = (
@@ -462,9 +462,9 @@ class GradientCollector(HookCollectorBase):
         self.per_doc_losses[indices] = losses.detach().type_as(self.per_doc_losses)
 
     def teardown(self):
-        assert (
-            self.cfg is not None
-        ), "cfg is required for GradientCollector"  # pleasing type checker
+        assert self.cfg is not None, (
+            "cfg is required for GradientCollector"
+        )  # pleasing type checker
         if dist.is_initialized():
             dist.reduce(self.per_doc_losses, dst=0)
 
@@ -638,7 +638,6 @@ class CollectorComputer:
         *,
         collector: HookCollectorBase,
         batches: list[list[int]] | None = None,
-        target_modules: set[str] | None = None,
         cfg: IndexConfig,
         **kwargs,
     ):

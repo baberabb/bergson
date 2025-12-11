@@ -19,13 +19,15 @@ def collect_gradients(
     *,
     batches: list[list[int]] | None = None,
     target_modules: set[str] | None = None,
-    attention_cfgs: dict[str, AttentionConfig] = {},
+    attention_cfgs: dict[str, AttentionConfig] | None = None,
     scorer: Scorer | None = None,
     reduce_cfg: ReduceConfig | None = None,
 ):
     """
     Compute projected gradients using a subset of the dataset.
     """
+    if attention_cfgs is None:
+        attention_cfgs = {}
     collector = GradientCollector(
         model=model.base_model,  # type: ignore
         cfg=cfg,
