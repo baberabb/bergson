@@ -1,3 +1,4 @@
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,12 @@ from .score.score import score_dataset
 
 def validate_run_path(index_cfg: IndexConfig):
     """Validate the run path."""
+    start_rank = int(os.environ.get("START_RANK", 0))
+    rank = start_rank + int(os.environ.get("RANK", 0))
+
+    if rank != 0:
+        return
+
     for path in [Path(index_cfg.run_path), Path(index_cfg.partial_run_path)]:
         if not path.exists():
             continue
