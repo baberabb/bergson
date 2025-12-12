@@ -141,6 +141,9 @@ class IndexConfig:
     """If provided, a glob pattern to filter out modules from gradient collection.
     For example, "transformer.h.*.mlp.*" will exclude all MLP layers in a
     standard transformer architecture."""
+    
+    overwrite: bool = False
+    """Whether to overwrite an existing index without asking for confirmation."""
 
     overwrite: bool = False
     """Whether to overwrite any existing index in the run path."""
