@@ -26,9 +26,7 @@ def test_GPTNeoX():
     inputs = dict(input_ids=tokens, labels=tokens)
     data = Dataset.from_dict({"input_ids": tokens.tolist()})
 
-    cfg = IndexConfig(
-        run_path=str(temp_dir / "run"), skip_index=True, include_bias=True
-    )
+    cfg = IndexConfig(run_path=str(temp_dir / "run"), skip_index=True)
 
     # Test with 16 x 16 random projection as well as with no projection
     for p in (16, None):
