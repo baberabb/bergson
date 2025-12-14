@@ -377,7 +377,7 @@ class GradientCollector(ContextDecorator):
             if not isinstance(layer, LayerAdapter.supported_modules):
                 continue
 
-            if self.cfg is not None and fnmatchcase(name, self.cfg.filter_modules):
+            if self.cfg is not None and self.cfg.filter_modules is not None and fnmatchcase(name, self.cfg.filter_modules):
                 continue
 
             if self.target_modules is not None and name not in self.target_modules:
