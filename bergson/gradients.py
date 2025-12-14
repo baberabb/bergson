@@ -1,3 +1,4 @@
+from fnmatch import fnmatchcase
 import json
 from abc import ABC, abstractmethod
 from contextlib import ContextDecorator
@@ -11,7 +12,7 @@ from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 from transformers.pytorch_utils import Conv1D as HFConv1D
 
-from .config import AttentionConfig
+from .config import AttentionConfig, IndexConfig
 from .math import reshape_to_nearest_square
 from .utils import assert_type, create_projection_matrix
 
@@ -361,6 +362,9 @@ class GradientCollector(ContextDecorator):
     indices: list[int] = field(default_factory=list)
     """List of indices for the current batch."""
 
+    cfg: IndexConfig | None = None
+    """Configuration for building the gradient index. Used for filtering modules."""
+
     def __post_init__(self):
         self._fwd_hooks: list[RemovableHandle] = []
         self._bwd_hooks: list[RemovableHandle] = []
@@ -369,7 +373,11 @@ class GradientCollector(ContextDecorator):
 
         # Before we add any hooks, we need to peek at what modules we need to track.
         for name, layer in self.model.named_modules():
+            
             if not isinstance(layer, LayerAdapter.supported_modules):
+                continue
+
+            if self.cfg is not None and fnmatchcase(name, self.cfg.filter_modules):
                 continue
 
             if self.target_modules is not None and name not in self.target_modules:

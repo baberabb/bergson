@@ -1,4 +1,3 @@
-from fnmatch import fnmatchcase
 import math
 from pathlib import Path
 
@@ -73,10 +72,11 @@ def collect_gradients(
         processor,
         target_modules=target_modules,
         attention_cfgs=attention_cfgs or {},
+        cfg=cfg,
     )
 
     # Allocate space ahead of time for the gradients
-    grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items() if cfg.filter_modules is None or not fnmatchcase(name, cfg.filter_modules)}
+    grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
     builder = (
         Builder(cfg.partial_run_path, data, grad_sizes, dtype, reduce_cfg)
         if save_index
