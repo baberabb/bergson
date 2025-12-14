@@ -72,6 +72,7 @@ def collect_gradients(
         processor,
         target_modules=target_modules,
         attention_cfgs=attention_cfgs or {},
+        cfg=cfg,
     )
 
     # Allocate space ahead of time for the gradients

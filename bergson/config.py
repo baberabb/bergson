@@ -123,6 +123,11 @@ class IndexConfig:
     """Configuration for each attention module to be split into head matrices.
     Used for attention modules specified in `split_attention_modules`."""
 
+    filter_modules: str | None = None
+    """If provided, a glob pattern to filter out modules from gradient collection.
+    For example, "transformer.h.*.mlp.*" will exclude all MLP layers in a
+    standard transformer architecture."""
+
     @property
     def partial_run_path(self) -> Path:
         """Temporary path to use while writing build artifacts."""
