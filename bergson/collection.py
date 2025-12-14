@@ -1,5 +1,4 @@
 import math
-from fnmatch import fnmatchcase
 from pathlib import Path
 
 import numpy as np
