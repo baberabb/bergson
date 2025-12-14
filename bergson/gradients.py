@@ -1,8 +1,8 @@
-from fnmatch import fnmatchcase
 import json
 from abc import ABC, abstractmethod
 from contextlib import ContextDecorator
 from dataclasses import asdict, astuple, dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Callable, Literal, Mapping
 
@@ -373,7 +373,7 @@ class GradientCollector(ContextDecorator):
 
         # Before we add any hooks, we need to peek at what modules we need to track.
         for name, layer in self.model.named_modules():
-            
+
             if not isinstance(layer, LayerAdapter.supported_modules):
                 continue
 
