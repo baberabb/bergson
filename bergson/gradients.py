@@ -213,13 +213,14 @@ class GradientProcessor:
     @classmethod
     def load(
         cls,
-        path: Path,
+        path: Path | str,
         *,
         map_location: str | torch.device | None = None,
     ) -> "GradientProcessor":
         """
         Load the normalizers and preconditioners from a file.
         """
+        path = Path(path)
         cfg_path = path / "processor_config.json"
         norm_path = path / "normalizers.pth"
         precond_path = path / "preconditioners.pth"
