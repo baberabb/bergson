@@ -13,10 +13,10 @@ from bergson.collection import collect_gradients
 from bergson.config import IndexConfig, ReduceConfig
 from bergson.data import allocate_batches
 from bergson.utils import assert_type
-from bergson.worker_utils import setup_model_and_peft
+from bergson.utils.worker_utils import setup_model_and_peft
 
 from .distributed import launch_distributed_run
-from .worker_utils import create_processor, setup_data_pipeline
+from .utils.worker_utils import create_processor, setup_data_pipeline
 
 
 def reduce_worker(

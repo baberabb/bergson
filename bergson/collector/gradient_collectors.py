@@ -1,0 +1,327 @@
+import math
+from collections import defaultdict
+from dataclasses import dataclass, field
+
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+from datasets import Dataset, Value
+from jaxtyping import Float
+from torch import Tensor
+
+from bergson.collector.collector import HookCollectorBase
+from bergson.config import ReduceConfig
+from bergson.data import Builder
+from bergson.gradients import (
+    AdafactorNormalizer,
+    AdamNormalizer,
+    LayerAdapter,
+)
+from bergson.score.scorer import Scorer
+from bergson.utils import assert_type
+
+
+@dataclass(kw_only=True)
+class GradientCollector(HookCollectorBase):
+    """
+    Collects gradients for each Linear layer in the model.
+
+    Stores gradients in a dictionary mapping module names to gradient tensors.
+    """
+
+    mod_grads: dict = field(default_factory=dict)
+
+    data: Dataset
+
+    reduce_cfg: ReduceConfig | None = None
+
+    builder: Builder | None = None
+    scorer: Scorer | None = None
+
+    def setup(self) -> None:
+        """Initialize gradient storage dictionary."""
+        assert self.cfg is not None, "cfg is required for GradientCollector"
+        assert isinstance(
+            self.model.device, torch.device
+        ), "Model device is not set correctly"
+        if self.cfg.include_bias and self.processor.normalizers is not None:
+            raise NotImplementedError(
+                "Bias with normalizers not supported yet, "
+                "consider disabling bias inclusion for now."
+            )
+
+        # TODO: handle more elegantly?
+        self.save_dtype = (
+            torch.float32 if self.model.dtype == torch.float32 else torch.float16
+        )
+
+        self.lo = torch.finfo(self.save_dtype).min
+        self.hi = torch.finfo(self.save_dtype).max
+
+        self.per_doc_losses = torch.full(
+            (len(self.data),),
+            device=self.model.device,
+            dtype=self.save_dtype,
+            fill_value=0.0,
+        )
+
+        # Compute whether we need to save the index
+        self.save_index = self.scorer is None and not self.cfg.skip_index
+
+        if self.save_index:
+            grad_sizes = {name: math.prod(s) for name, s in self.shapes().items()}
+            self.builder = Builder(
+                self.cfg.partial_run_path,
+                self.data,
+                grad_sizes,
+                self.save_dtype,
+                self.reduce_cfg,
+            )
+        else:
+            self.builder = None
+
+    def forward_hook(self, module: nn.Module, a: Float[Tensor, "N S I"]) -> None:
+        p = self.processor.projection_dim
+        name = assert_type(str, module._name)
+        i = getattr(module, LayerAdapter.in_attr(module))
+        normalizer = self.processor.normalizers.get(name)
+
+        if isinstance(normalizer, AdamNormalizer):
+            module._inputs = a
+            return
+        if isinstance(normalizer, AdafactorNormalizer):
+            a_factor = normalizer.col.add(1e-30)
+            a_factor = a_factor.rsqrt()
+            a = a * a_factor.type_as(a)  # [N, S, I] * [I] → [N, S, I]
+
+        if module._has_bias:
+            # Append ones to activation for bias term
+            ones = torch.ones(a.size(0), a.size(1), 1, device=a.device, dtype=a.dtype)
+            a = torch.cat([a, ones], dim=-1)
+            i = i + 1
+            setattr(module, LayerAdapter.in_attr(module), i)
+        if p is not None:
+            a_projection = self.projection(name, p, i, "right", a.device, a.dtype).T
+            a = a @ a_projection  # type: ignore
+        # set module._inputs to a
+        module._inputs = a
+
+    @HookCollectorBase.split_attention_heads
+    def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]):
+        a = module._inputs  # [N, S, I/q]
+
+        assert isinstance(a, torch.Tensor), "Activation cache missing for module"
+        name = assert_type(str, module._name)
+        p = self.processor.projection_dim
+        i = getattr(module, LayerAdapter.in_attr(module))
+        o = getattr(module, LayerAdapter.out_attr(module))
+        normalizer = self.processor.normalizers.get(name)
+
+        if isinstance(normalizer, AdamNormalizer):
+            full_gradient = g.mT @ a  # [N, O, S] @ [N, S, I] → [N, O, I]
+            P = normalizer.normalize_(full_gradient)
+            if p is not None:
+                g_projection = self.projection(name, p, o, "left", g.device, g.dtype)
+                a_projection = self.projection(name, p, i, "right", g.device, g.dtype).T
+                P = g_projection @ P @ a_projection
+        else:
+            if isinstance(normalizer, AdafactorNormalizer):
+                g_factor = normalizer.row.add(1e-30)
+                g_factor = g_factor.mean().sqrt() * g_factor.rsqrt()
+                g = g * g_factor.type_as(g)  # [N, S, O] * [O] → [N, S, O]
+
+            if p is not None:
+                g_projection = self.projection(name, p, o, "left", g.device, g.dtype)
+                g = g @ g_projection.T  # [N, S, p]
+
+            P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
+
+        P = P.flatten(1).clamp_(self.lo, self.hi)
+
+        if self.save_index:
+            # Asynchronously move the gradient to CPU and convert to the final dtype
+            self.mod_grads[name] = P.to(
+                device="cpu", dtype=self.save_dtype, non_blocking=True
+            )
+        else:
+            self.mod_grads[name] = P.to(dtype=self.save_dtype)
+
+        del module._inputs
+
+    def process_batch(self, indices: list[int], **kwargs):
+        """Process collected gradients for a batch and update losses."""
+        losses = kwargs.get("losses")
+        assert losses is not None, "losses must be provided in kwargs"
+
+        if self.builder:
+            self.builder(indices, self.mod_grads)
+        if self.scorer:
+            self.scorer(indices, self.mod_grads)
+        self.mod_grads.clear()
+        self.per_doc_losses[indices] = losses.detach().type_as(self.per_doc_losses)
+
+    def teardown(self):
+        assert (
+            self.cfg is not None
+        ), "cfg is required for GradientCollector"  # pleasing type checker
+        if dist.is_initialized():
+            dist.reduce(self.per_doc_losses, dst=0)
+
+        if self.rank == 0:
+            if self.cfg.drop_columns:
+                data = self.data.remove_columns(["input_ids"])
+
+            data = self.data.add_column(
+                "loss",
+                self.per_doc_losses.cpu().numpy(),
+                feature=Value(
+                    "float16"
+                    if self.save_dtype == torch.float16
+                    else "float32"  # TODO: This is not robust
+                ),
+                new_fingerprint="loss",
+            )
+
+            data.save_to_disk(self.cfg.partial_run_path / "data.hf")
+
+            self.processor.save(self.cfg.partial_run_path)
+
+        # Flush and reduce builder if it exists
+        if self.builder is not None:
+            self.builder.flush()
+            self.builder.dist_reduce()
+
+
+@dataclass(kw_only=True)
+class TraceCollector(HookCollectorBase):
+    """
+    Collects gradients for each Linear layer in the model.
+
+    Stores gradients in a dictionary mapping module names to gradient tensors.
+    """
+
+    mod_grads: dict = field(default_factory=lambda: defaultdict(list))
+
+    precondition: bool = False
+
+    device: torch.device | str
+
+    dtype: torch.dtype
+
+    def setup(self) -> None:
+        return
+
+    def forward_hook(self, module: nn.Module, a: Float[Tensor, "N S I"]) -> None:
+        p = self.processor.projection_dim
+        name = assert_type(str, module._name)
+        i = getattr(module, LayerAdapter.in_attr(module))
+
+        if module._has_bias:
+            # Append ones to activation for bias term
+            ones = torch.ones(a.size(0), a.size(1), 1, device=a.device, dtype=a.dtype)
+            a = torch.cat([a, ones], dim=-1)
+            i = i + 1
+            setattr(module, LayerAdapter.in_attr(module), i)
+        if p is not None:
+            a = a @ self.projection(name, p, i, "right", a.device, a.dtype).T  # type: ignore
+
+        module._inputs = a
+
+    @HookCollectorBase.split_attention_heads
+    def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]):
+        a = module._inputs  # [N, S, I/q]
+        assert isinstance(a, torch.Tensor), "Activation cache missing for module"
+
+        name = assert_type(str, module._name)
+
+        p = self.processor.projection_dim
+
+        o = getattr(module, LayerAdapter.out_attr(module))
+
+        if p is not None:
+            A = self.projection(name, p, o, "left", g.device, g.dtype)
+            g = g @ A.T  # [N, S, p]
+
+        P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
+
+        P = P.flatten(1)
+
+        # Precondition the gradient using Cholesky solve
+        # TODO: Should damp here?
+        if self.precondition:
+            eigval, eigvec = self.processor.preconditioners_eigen[name]
+            eigval_inverse_sqrt = 1.0 / (eigval).sqrt()
+            prec = eigvec * eigval_inverse_sqrt @ eigvec.mT
+            P = P.type_as(prec) @ prec  # <- apply to P
+
+        # Store the gradient for later use
+        self.mod_grads[name].append(P.to(self.device, self.dtype, non_blocking=True))
+
+    def process_batch(self, indices: list[int], **kwargs):
+        return
+
+    def teardown(self):
+        return
+
+
+@dataclass
+class StreamingGradientCollector(HookCollectorBase):
+    """
+    Lightweight collector for streaming gradient collection during training.
+
+    Stores per-sample gradients in `mod_grads` dict for external consumers
+    (e.g., callbacks) to process. Does not manage file I/O internally.
+    """
+
+    mod_grads: dict = field(default_factory=dict)
+
+    save_dtype: torch.dtype = torch.float16
+
+    def setup(self) -> None:
+        self.lo = torch.finfo(self.save_dtype).min
+        self.hi = torch.finfo(self.save_dtype).max
+
+    def teardown(self) -> None:
+        pass
+
+    def process_batch(self, indices: list[int], **kwargs) -> None:
+        pass
+
+    def forward_hook(self, module: nn.Module, a: Float[Tensor, "N S I"]) -> None:
+        p = self.processor.projection_dim
+        name = assert_type(str, module._name)
+        i = getattr(module, LayerAdapter.in_attr(module))
+
+        if module._has_bias:
+            ones = torch.ones(a.size(0), a.size(1), 1, device=a.device, dtype=a.dtype)
+            a = torch.cat([a, ones], dim=-1)
+            i = i + 1
+            setattr(module, LayerAdapter.in_attr(module), i)
+
+        if p is not None:
+            a = a @ self.projection(name, p, i, "right", a.device, a.dtype).T
+
+        module._inputs = a
+
+    @HookCollectorBase.split_attention_heads
+    def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]) -> None:
+        a = module._inputs
+        assert isinstance(a, torch.Tensor), "Activation cache missing for module"
+
+        name = assert_type(str, module._name)
+
+        p = self.processor.projection_dim
+        o = getattr(module, LayerAdapter.out_attr(module))
+
+        if p is not None:
+            A = self.projection(name, p, o, "left", g.device, g.dtype)
+            g = g @ A.T
+
+        P = g.mT @ a
+        P = P.flatten(1).clamp_(self.lo, self.hi)
+
+        self.mod_grads[name] = P.to(
+            device="cpu", dtype=self.save_dtype, non_blocking=True
+        )
+
+        del module._inputs

@@ -6,7 +6,7 @@ from typing import Generator
 import torch
 from torch import Tensor, nn
 
-from bergson.collector.collector import TraceCollector
+from bergson.collector.gradient_collectors import TraceCollector
 from bergson.config import IndexConfig
 from bergson.data import load_gradients
 from bergson.gradients import GradientProcessor
@@ -78,7 +78,7 @@ class Attributor:
 
         # Load the gradients into memory
         mmap = load_gradients(index_path)
-
+        assert mmap.dtype.names is not None
         # Copy gradients into device memory
         self.grads = {
             name: torch.tensor(mmap[name], device=device, dtype=dtype)
@@ -152,7 +152,7 @@ class Attributor:
             [q[name] @ self.grads[name].mT for name in modules], dim=-1
         ).sum(-1)
 
-        return torch.topk(scores, k)
+        return torch.topk(scores, k)  # type: ignore
 
     @contextmanager
     def trace(

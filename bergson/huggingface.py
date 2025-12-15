@@ -21,7 +21,7 @@ from bergson import AttentionConfig, GradientProcessor
 from bergson.collector.collector import StreamingGradientCollector
 from bergson.data import create_index
 from bergson.gradients import AdafactorNormalizer, AdamNormalizer
-from bergson.peft import detect_peft_modules
+from bergson.utils.peft import detect_peft_modules
 
 
 class GradientCollectorCallback(TrainerCallback):

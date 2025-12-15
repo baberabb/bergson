@@ -6,8 +6,6 @@ from transformers import PreTrainedModel
 from bergson.collector.collector import CollectorComputer, GradientCollector
 from bergson.config import AttentionConfig, IndexConfig, ReduceConfig
 from bergson.gradients import GradientProcessor
-
-# from bergson.placeholder import collect_gradients_new
 from bergson.score.scorer import Scorer
 
 

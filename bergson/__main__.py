@@ -3,7 +3,7 @@ from typing import Optional, Union
 
 from simple_parsing import ArgumentParser, ConflictResolution
 
-from .build import build, new_build
+from .build import build
 from .config import IndexConfig, QueryConfig, ReduceConfig, ScoreConfig
 from .query.query_index import query
 from .reduce import reduce
@@ -22,20 +22,6 @@ class Build:
             raise ValueError("Either skip_index or skip_preconditioners must be False")
 
         build(self.index_cfg)
-
-
-@dataclass
-class NewBuild:
-    """Build a gradient index."""
-
-    index_cfg: IndexConfig
-
-    def execute(self):
-        """Build the gradient index."""
-        if self.index_cfg.skip_index and self.index_cfg.skip_preconditioners:
-            raise ValueError("Either skip_index or skip_preconditioners must be False")
-
-        new_build(self.index_cfg)
 
 
 @dataclass
@@ -92,7 +78,7 @@ class Query:
 class Main:
     """Routes to the subcommands."""
 
-    command: Union[Build, Query, Reduce, Score, NewBuild]
+    command: Union[Build, Query, Reduce, Score]
 
     def execute(self):
         """Run the script."""
