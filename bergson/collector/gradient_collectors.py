@@ -10,7 +10,7 @@ from jaxtyping import Float
 from torch import Tensor
 
 from bergson.collector.collector import HookCollectorBase
-from bergson.config import ReduceConfig
+from bergson.config import IndexConfig, ReduceConfig
 from bergson.data import Builder
 from bergson.gradients import (
     AdafactorNormalizer,
@@ -24,22 +24,36 @@ from bergson.utils.utils import assert_type
 @dataclass(kw_only=True)
 class GradientCollector(HookCollectorBase):
     """
-    Collects gradients for each Linear layer in the model.
+    Collects per-sample gradients from model layers and writes them to disk.
 
-    Stores gradients in a dictionary mapping module names to gradient tensors.
+    - For each forward/backward hook, we compute the the gradient or a low-rank
+    approximation via random projections, if cfg.projection_dim is set.
+    - Supports also normalization via Adam or Adafactor normalizers.
+    - Uses Builder for index construction and gradient saving.
+    - Also supports Scorer for on-the-fly scoring of gradients.
     """
 
     mod_grads: dict = field(default_factory=dict)
+    """Temporary storage for gradients during a batch, keyed by module name."""
 
     data: Dataset
+    """The dataset being processed."""
 
     reduce_cfg: ReduceConfig | None = None
+    """Configuration for in-run gradient reduction."""
 
     builder: Builder | None = None
+    """Handles writing gradients to disk. Created in setup() if save_index is True."""
+
     scorer: Scorer | None = None
+    """Optional scorer for computing scores instead of building an index."""
 
     def setup(self) -> None:
-        """Initialize gradient storage dictionary."""
+        """
+        Initialize collector state.
+
+        Sets up a Builder for gradient storage if not using a Scorer.
+        """
         assert self.cfg is not None, "cfg is required for GradientCollector"
         assert isinstance(
             self.model.device, torch.device
@@ -81,6 +95,11 @@ class GradientCollector(HookCollectorBase):
             self.builder = None
 
     def forward_hook(self, module: nn.Module, a: Float[Tensor, "N S I"]) -> None:
+        """
+        Cache activations for gradient computation with normalizer preprocessing
+        and compress via random projection if configured.
+        Stores result in module._inputs for use in backward_hook.
+        """
         p = self.processor.projection_dim
         name = assert_type(str, module._name)
         i = getattr(module, LayerAdapter.in_attr(module))
@@ -108,6 +127,12 @@ class GradientCollector(HookCollectorBase):
 
     @HookCollectorBase.split_attention_heads
     def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]):
+        """
+        Compute per-sample gradient and store in mod_grads.
+
+        Computes gradient as outer product g.T @ a (again with optional projection and
+        normalization).
+        """
         a = module._inputs  # [N, S, I/q]
 
         assert isinstance(a, torch.Tensor), "Activation cache missing for module"
@@ -161,8 +186,11 @@ class GradientCollector(HookCollectorBase):
         self.per_doc_losses[indices] = losses.detach().type_as(self.per_doc_losses)
 
     def teardown(self):
-        assert (
-            self.cfg is not None
+        """
+        Finalize gradient collection, save results and flush/reduce the Builder.
+        """
+        assert isinstance(
+            self.cfg, IndexConfig
         ), "cfg is required for GradientCollector"  # pleasing type checker
         if dist.is_initialized():
             dist.reduce(self.per_doc_losses, dst=0)
@@ -195,25 +223,33 @@ class GradientCollector(HookCollectorBase):
 @dataclass(kw_only=True)
 class TraceCollector(HookCollectorBase):
     """
-    Collects gradients for each Linear layer in the model.
+    Collects gradient traces for influence function computation.
 
-    Stores gradients in a dictionary mapping module names to gradient tensors.
+    Accumulates per-sample gradients across batches in memory (as lists per module).
+    Optionally applies preconditioning using eigendecomposition of the gradient
+    covariance. Designed for query-time gradient collection rather than index building.
     """
 
     mod_grads: dict = field(default_factory=lambda: defaultdict(list))
+    """Accumulated grads per module. Maps module name to list of gradient tensors."""
 
     eps: float = 1e-6
+    """Epsilon for numerical stability in preconditioning."""
 
     precondition: bool = False
+    """Whether to apply preconditioning via autocorrelation Hessian approximation."""
 
     device: torch.device | str
+    """Device to store collected gradients on."""
 
     dtype: torch.dtype
+    """Dtype for stored gradients."""
 
     def setup(self) -> None:
         return
 
     def forward_hook(self, module: nn.Module, a: Float[Tensor, "N S I"]) -> None:
+        """Cache activations, applying bias and projection if configured."""
         p = self.processor.projection_dim
         name = assert_type(str, module._name)
         i = getattr(module, LayerAdapter.in_attr(module))
@@ -231,6 +267,12 @@ class TraceCollector(HookCollectorBase):
 
     @HookCollectorBase.split_attention_heads
     def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]):
+        """
+        Compute gradient and append to accumulated list.
+
+        Computes outer product, optionally applies preconditioning, and appends
+        to mod_grads[name] list for later aggregation.
+        """
         a = module._inputs  # [N, S, I/q]
         assert isinstance(a, torch.Tensor), "Activation cache missing for module"
 
@@ -272,7 +314,7 @@ class StreamingGradientCollector(HookCollectorBase):
     Lightweight collector for streaming gradient collection during training.
 
     Stores per-sample gradients in `mod_grads` dict for external consumers
-    (e.g., callbacks) to process. Does not manage file I/O internally.
+    (e.g., callbacks) to process. Used for callback in huggingface.py
     """
 
     mod_grads: dict = field(default_factory=dict)

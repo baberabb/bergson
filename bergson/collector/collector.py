@@ -45,8 +45,8 @@ class HookCollectorBase(ContextDecorator, ABC):
     context entry, and provides lifecycle methods (setup/teardown) for subclasses to
     implement custom logic.
 
-    Assumes module input shape is [N, S, I] where N=batch size, S=sequence length,
-    I=input dimension.
+    Assumes module activation shape is [N, S, I] and activation gradient shape [N,S,O]
+    where N=batch size, S=sequence length, I=input dimension, O=output dimension.
 
     Subclasses must implement:
         - setup(): Initialize state (buffers, dicts, etc.)
@@ -56,30 +56,38 @@ class HookCollectorBase(ContextDecorator, ABC):
     """
 
     model: nn.Module
+    """ The model to attach forward and backward hooks to. """
 
     cfg: IndexConfig | None = None
+    """ Config with all hyperparameters. Optional for some collectors. """
 
     target_modules: set[str] | None = None
     """
-    Set of module names to attach hooks to. Should consist only of supported modules.
-    If None, hooks are attached to all Linear layers in the model.
+    Set of module names to attach hooks to. Should consist only of supported modules
+    (see LayerAdapter.supported_modules). If None, hooks are attached to all supported
+    layers in the model.
     """
 
     processor: GradientProcessor = field(default_factory=GradientProcessor)
     """Configuration for processing and compressing gradients."""
 
     attention_cfgs: dict[str, AttentionConfig] = field(default_factory=dict)
+    """
+    Optional configuration specifying how to split up the attention module gradients
+    into per-head gradients. See also bergson.config.AttentionConfig.
+    """
 
     def __post_init__(
         self,
     ):
+        """Init, discover target modules, and call setup()."""
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
 
         self._fwd_hooks: list[RemovableHandle] = []
         self._bwd_hooks: list[RemovableHandle] = []
 
-        # Discover target Linear modules using the static method
+        # Discover target modules using the static method
         self.target_info = self.discover_targets(
             self.model,
             self.target_modules,
@@ -98,18 +106,22 @@ class HookCollectorBase(ContextDecorator, ABC):
         filter_modules: str | None = None,
     ) -> dict[str, tuple[torch.device, torch.Size, bool]]:
         """
-        Discover target Linear modules without instantiating a collector.
+        Discover target modules without instantiating a collector.
 
         This is useful when you need target_info early (e.g., to allocate buffers)
         before creating the actual collector instance.
 
         Args:
-            model: The model to scan for Linear layers
-            target_modules: Optional set of module names to filter. If None, all Linear
-            layers are included.
+            model: The model to scan for supported layers, see
+            LayerAdapter.supported_modules.
+            target_modules: Optional set of module names to filter. If None, all
+            supported layers are included.
+            include_bias: Whether to track bias parameters for modules that have them.
+            filter_modules: Optional glob pattern to exclude modules by name
+            (e.g., "*.lm_head").
 
         Returns:
-            Dictionary mapping module names to (device, weight_shape) tuples.
+            Dictionary mapping module names to (device, weight_shape, has_bias) tuples.
         """
         target_info = {}
         for name, layer in model.named_modules():
@@ -331,26 +343,31 @@ class HookCollectorBase(ContextDecorator, ABC):
         Process activations during the forward pass.
 
         Args:
-            name: Name of the module
-            a: Input activations of shape [N, S, I]
+            module: The module whose forward pass triggered this hook. The module name
+                is available via module._name.
+            a: Input activations of shape [N, S, I] where N=batch size, S=sequence
+                length, I=input dimension.
         """
         pass
 
     @abstractmethod
-    def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S I"]) -> None:
+    def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]) -> None:
         """
         Process gradients during the backward pass.
 
         Args:
-            name: Name of the module
-            g: Gradient with respect to module output, shape [N, S, O]
+            module: The module whose backward pass triggered this hook. The module name
+                is available via module._name.
+            g: Gradient with respect to module output, shape [N, S, O] where N=batch
+                size, S=sequence length, O=output dimension.
         """
         pass
 
     @abstractmethod
     def process_batch(self, indices: list[int], **kwargs) -> None:
         """
-        Process collected data for a batch.
+        Process collected data for a batch. This is called after each
+        forward/backward pass. See also CollectorComputer._compute.
 
         Args:
             indices: List of data indices in the current batch
@@ -360,7 +377,13 @@ class HookCollectorBase(ContextDecorator, ABC):
 
 
 class CollectorComputer:
-    """Generic Computer that computes collectors."""
+    """
+    Orchestrates gradient collection by running forward/backward passes over a dataset.
+
+    Iterates through batches of data, computes losses, triggers backpropagation, and
+    delegates gradient processing to the provided collector. Supports distributed
+    training and optional profiling via PyTorch profiler via cfg.profile flag.
+    """
 
     def __init__(
         self,
@@ -370,8 +393,19 @@ class CollectorComputer:
         collector: HookCollectorBase,
         batches: list[list[int]] | None = None,
         cfg: IndexConfig,
-        **kwargs,
     ):
+        """
+        Initialize the CollectorComputer.
+
+        Args:
+            model: The model to collect gradients from.
+            data: HuggingFace Dataset containing input_ids and optionally labels.
+            collector: A HookCollectorBase instance that will process the gradients
+            via hooks.
+            batches: List of index lists defining how to batch the data. If None,
+                defaults to batch size 1 (each sample processed individually).
+            cfg: IndexConfig controlling all other hyperparameters.
+        """
         # Model
         self.model = model
         self.device = model.device
@@ -428,6 +462,16 @@ class CollectorComputer:
         self,
         desc: Optional[str] = None,
     ):
+        """
+        Run the main computation loop over all batches.
+
+        For each batch: computes forward pass, calculates loss, triggers backward pass
+        (which invokes collector hooks), then calls collector.process_batch(). After
+        all batches are processed, calls collector.teardown().
+
+        Args:
+            desc: Optional description string for the tqdm progress bar.
+        """
         total_processed = torch.tensor(0, device=self.model.device)
         prof = self._setup_profiler()
         step = 0
@@ -467,7 +511,21 @@ class CollectorComputer:
 
 
 def loss_fn_factory(cfg: IndexConfig) -> Callable:
-    """Factory to create loss functions based on type."""
+    """
+    Create a loss function based on the configuration.
+
+    Args:
+        cfg: IndexConfig that specifies:
+            - cfg.loss_fn: Either "kl" for KL divergence (requires PEFT model) or
+              any other value for cross-entropy loss.
+            - cfg.loss_reduction: Either "mean" to average over tokens, or "sum" for
+              summed loss.
+
+    Returns:
+        A callable loss_fn(model, batch) -> Tensor that computes per-sample losses.
+        The batch must contain "input_ids" and optionally "labels" and "advantage".
+        Returns a tensor of shape [batch_size] with one loss value per sample.
+    """
 
     def loss_fn(model, batch):
         x, y = pad_and_tensor(
