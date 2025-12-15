@@ -33,9 +33,9 @@ def collect_gradients(
         processor=processor,
         target_modules=target_modules,
         data=data,
-        attention_cfgs=attention_cfgs,
         scorer=scorer,
         reduce_cfg=reduce_cfg,
+        attention_cfgs=attention_cfgs or {},
     )
 
     computer = CollectorComputer(

@@ -116,3 +116,22 @@ def test_conv1d_build(tmp_path: Path, dataset):
     assert len(modules := index.dtype.names) != 0
     assert len(index[modules[0]]) == len(dataset)
     assert index[modules[0]][0].sum().item() != 0.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_tokenizer_build(tmp_path: Path, model, dataset):
+    cfg = IndexConfig(
+        run_path=str(tmp_path),
+        # Use a different tokenizer than the model
+        tokenizer="openai-community/gpt2",
+    )
+
+    collect_gradients(
+        model=model,
+        data=dataset,
+        processor=GradientProcessor(projection_dim=16),
+        cfg=cfg,
+    )
+    assert any(
+        Path(cfg.partial_run_path).iterdir()
+    ), "Expected artifacts in the run path"

@@ -20,7 +20,7 @@ def test_attributor(tmp_path: Path, model, dataset):
         cfg=cfg,
     )
 
-    attr = Attributor(tmp_path, device="cpu", unit_norm=True)
+    attr = Attributor(cfg.partial_run_path, device="cpu", unit_norm=True)
 
     x = torch.tensor(dataset[0]["input_ids"]).unsqueeze(0)
 
@@ -49,7 +49,7 @@ def test_faiss(tmp_path: Path, model, dataset):
     )
 
     attr = Attributor(
-        tmp_path,
+        cfg.partial_run_path,
         device="cuda",
         unit_norm=True,
         faiss_cfg=FaissConfig(),

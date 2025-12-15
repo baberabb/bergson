@@ -23,10 +23,6 @@ class Index(Protocol):
     def search(self, x: NDArray, k: int) -> tuple[NDArray, NDArray]: ...
     @property
     def ntotal(self) -> int: ...
-    @property
-    def nprobe(self) -> int: ...
-    @nprobe.setter
-    def nprobe(self, value: int) -> None: ...
     def train(self, x: NDArray) -> None: ...
     def add(self, x: NDArray) -> None: ...
 
@@ -342,7 +338,9 @@ class FaissIndex:
         offset = 0
 
         for shard in self.shards:
-            shard.nprobe = self.faiss_cfg.nprobe
+            if hasattr(shard, "nprobe"):
+                shard.nprobe = self.faiss_cfg.nprobe  # type: ignore
+
             distances, indices = shard.search(q, k or shard.ntotal)
 
             indices += offset
@@ -368,9 +366,10 @@ class FaissIndex:
 
     @property
     def nprobe(self) -> int:
-        return self.shards[0].nprobe
+        return self.faiss_cfg.nprobe
 
     @nprobe.setter
     def nprobe(self, value: int) -> None:
         for shard in self.shards:
-            shard.nprobe = value
+            if hasattr(shard, "nprobe"):
+                shard.nprobe = value  # type: ignore

@@ -1,6 +1,22 @@
 # CHANGELOG
 
 
+## v0.4.0 (2025-12-03)
+
+### Features
+
+- Enable specifying a custom tokenizer
+  ([`9781a55`](https://github.com/EleutherAI/bergson/commit/9781a5538491aae3bf53af8247ae2509fe801b59))
+
+
+## v0.3.0 (2025-12-03)
+
+### Features
+
+- Release bergson
+  ([`64b5baf`](https://github.com/EleutherAI/bergson/commit/64b5baf4aa998c4e7573e24dcda939e74185c5f4))
+
+
 ## v0.2.0 (2025-11-13)
 
 ### Features

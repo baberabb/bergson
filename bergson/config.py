@@ -64,6 +64,9 @@ class IndexConfig:
     model: str = "EleutherAI/pythia-160m"
     """Name of the model to load."""
 
+    tokenizer: str = ""
+    """Name of the tokenizer to use. If not set the model tokenizer is used."""
+
     fsdp: bool = False
     """Whether to use Fully Sharded Data Parallel (FSDP) for collecting gradients."""
 
@@ -126,6 +129,10 @@ class IndexConfig:
 
     debug: bool = False
     """Whether to enable debug mode with additional logging."""
+    filter_modules: str | None = None
+    """If provided, a glob pattern to filter out modules from gradient collection.
+    For example, "transformer.h.*.mlp.*" will exclude all MLP layers in a
+    standard transformer architecture."""
 
     @property
     def partial_run_path(self) -> Path:
