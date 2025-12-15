@@ -169,9 +169,9 @@ class GradientCollector(HookCollectorBase):
 
         if self.rank == 0:
             if self.cfg.drop_columns:
-                data = self.data.remove_columns(["input_ids"])
+                self.data = self.data.remove_columns(["input_ids"])
 
-            data = self.data.add_column(
+            self.data = self.data.add_column(
                 "loss",
                 self.per_doc_losses.cpu().numpy(),
                 feature=Value(
@@ -182,7 +182,7 @@ class GradientCollector(HookCollectorBase):
                 new_fingerprint="loss",
             )
 
-            data.save_to_disk(self.cfg.partial_run_path / "data.hf")
+            self.data.save_to_disk(self.cfg.partial_run_path / "data.hf")
 
             self.processor.save(self.cfg.partial_run_path)
 
@@ -201,6 +201,8 @@ class TraceCollector(HookCollectorBase):
     """
 
     mod_grads: dict = field(default_factory=lambda: defaultdict(list))
+
+    eps: float = 1e-6
 
     precondition: bool = False
 
@@ -250,7 +252,7 @@ class TraceCollector(HookCollectorBase):
         # TODO: Should damp here?
         if self.precondition:
             eigval, eigvec = self.processor.preconditioners_eigen[name]
-            eigval_inverse_sqrt = 1.0 / (eigval).sqrt()
+            eigval_inverse_sqrt = 1.0 / (eigval + self.eps).sqrt()
             prec = eigvec * eigval_inverse_sqrt @ eigvec.mT
             P = P.type_as(prec) @ prec  # <- apply to P
 

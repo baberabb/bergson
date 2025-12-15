@@ -1,4 +1,3 @@
-from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
@@ -7,7 +6,6 @@ import torch
 from torch import Tensor, nn
 
 from bergson.collector.gradient_collectors import TraceCollector
-from bergson.config import IndexConfig
 from bergson.data import load_gradients
 from bergson.gradients import GradientProcessor
 from bergson.query.faiss_index import FaissConfig, FaissIndex
@@ -167,18 +165,18 @@ class Attributor:
         Context manager to trace the gradients of a module and return the
         corresponding Attributor instance.
         """
-        mod_grads = defaultdict(list)
+
         result = TraceResult()
 
         collector = TraceCollector(
             model=module,
             processor=self.processor,
             precondition=precondition,
-            cfg=IndexConfig(),
             target_modules=modules,
             device=self.device,
             dtype=self.dtype,
         )
+        mod_grads = collector.mod_grads
         with collector:
             yield result
 

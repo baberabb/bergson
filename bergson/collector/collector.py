@@ -3,6 +3,7 @@ import os
 from abc import ABC, abstractmethod
 from contextlib import ContextDecorator, nullcontext
 from dataclasses import astuple, dataclass, field
+from fnmatch import fnmatchcase
 from typing import Callable, Literal, Mapping, Optional
 
 import torch
@@ -80,7 +81,10 @@ class HookCollectorBase(ContextDecorator, ABC):
 
         # Discover target Linear modules using the static method
         self.target_info = self.discover_targets(
-            self.model, self.target_modules, self.processor.include_bias
+            self.model,
+            self.target_modules,
+            self.processor.include_bias,
+            filter_modules=self.cfg.filter_modules if self.cfg else None,
         )
 
         # Allow subclasses to perform custom initialization
@@ -91,6 +95,7 @@ class HookCollectorBase(ContextDecorator, ABC):
         model: nn.Module,
         target_modules: set[str] | None = None,
         include_bias: bool = False,
+        filter_modules: str | None = None,
     ) -> dict[str, tuple[torch.device, torch.Size, bool]]:
         """
         Discover target Linear modules without instantiating a collector.
@@ -112,6 +117,9 @@ class HookCollectorBase(ContextDecorator, ABC):
                 continue
 
             if target_modules is not None and name not in target_modules:
+                continue
+
+            if filter_modules and fnmatchcase(name, filter_modules):
                 continue
 
             has_bias = getattr(layer, "bias", None) is not None and include_bias
@@ -307,7 +315,7 @@ class HookCollectorBase(ContextDecorator, ABC):
     @abstractmethod
     def teardown(self) -> None:
         """
-        Called at the start of __exit__, before hooks are removed.
+        Called at the end.
 
         Override to perform custom cleanup such as:
         - Saving results to disk
