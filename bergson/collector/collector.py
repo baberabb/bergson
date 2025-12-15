@@ -29,9 +29,9 @@ from bergson.gradients import (
     GradientProcessor,
     LayerAdapter,
 )
-from bergson.utils import create_projection_matrix
 from bergson.utils.logger import get_logger
 from bergson.utils.peft import set_peft_enabled
+from bergson.utils.utils import create_projection_matrix
 
 
 @dataclass

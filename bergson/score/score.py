@@ -18,7 +18,7 @@ from bergson.data import allocate_batches, load_gradient_dataset, load_gradients
 from bergson.distributed import launch_distributed_run
 from bergson.gradients import GradientProcessor
 from bergson.score.scorer import Scorer
-from bergson.utils import assert_type
+from bergson.utils.utils import assert_type
 from bergson.utils.worker_utils import (
     create_processor,
     setup_data_pipeline,

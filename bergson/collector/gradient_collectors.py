@@ -18,7 +18,7 @@ from bergson.gradients import (
     LayerAdapter,
 )
 from bergson.score.scorer import Scorer
-from bergson.utils import assert_type
+from bergson.utils.utils import assert_type
 
 
 @dataclass(kw_only=True)

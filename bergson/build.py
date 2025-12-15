@@ -12,7 +12,7 @@ from tqdm.auto import tqdm
 from bergson.collection import collect_gradients
 from bergson.config import IndexConfig
 from bergson.data import allocate_batches
-from bergson.utils import assert_type, setup_reproducibility
+from bergson.utils.utils import assert_type, setup_reproducibility
 from bergson.utils.worker_utils import setup_model_and_peft
 
 from .distributed import launch_distributed_run

@@ -7,7 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from bergson import Attributor, FaissConfig
 from bergson.config import QueryConfig
-from bergson.utils import assert_type
+from bergson.utils.utils import assert_type
 
 
 def query(query_cfg: QueryConfig):

@@ -20,7 +20,7 @@ from datasets import (
 from numpy.typing import DTypeLike
 
 from .config import DataConfig, ReduceConfig
-from .utils import assert_type
+from .utils.utils import assert_type
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -287,6 +287,7 @@ def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
 
         # Add gradients to HF dataset.
         mmap = load_gradients(dir, structured=structured)
+        assert mmap.dtype.names is not None, "Expected structured gradients."
         if structured:
             for field_name in mmap.dtype.names:
                 flat = pa.array(mmap[field_name].reshape(-1).copy())
