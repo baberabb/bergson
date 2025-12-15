@@ -5,7 +5,7 @@ import torch
 from datasets import Dataset
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from bergson.collector.collector import GradientCollector
+from bergson.collector.gradient_collectors import GradientCollector
 from bergson.config import IndexConfig
 from bergson.gradients import (
     AdafactorNormalizer,

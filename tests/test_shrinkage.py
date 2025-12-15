@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from bergson.math import optimal_linear_shrinkage
+from bergson.utils.math import optimal_linear_shrinkage
 
 
 @pytest.mark.parametrize(

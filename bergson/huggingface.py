@@ -18,7 +18,7 @@ from transformers.trainer_callback import TrainerCallback, TrainerControl, Train
 from transformers.training_args import TrainingArguments
 
 from bergson import AttentionConfig, GradientProcessor
-from bergson.collector.collector import StreamingGradientCollector
+from bergson.collector.gradient_collectors import StreamingGradientCollector
 from bergson.data import create_index
 from bergson.gradients import AdafactorNormalizer, AdamNormalizer
 from bergson.utils.peft import detect_peft_modules

@@ -3,7 +3,8 @@ import torch.distributed as dist
 from datasets import Dataset
 from transformers import PreTrainedModel
 
-from bergson.collector.collector import CollectorComputer, GradientCollector
+from bergson.collector.collector import CollectorComputer
+from bergson.collector.gradient_collectors import GradientCollector
 from bergson.config import AttentionConfig, IndexConfig, ReduceConfig
 from bergson.gradients import GradientProcessor
 from bergson.score.scorer import Scorer
