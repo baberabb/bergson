@@ -185,5 +185,6 @@ figures/
 results/
 prototype/
 influence_results/
+tmp/
 .idea/
 uv.lock

@@ -123,6 +123,12 @@ class IndexConfig:
     """Configuration for each attention module to be split into head matrices.
     Used for attention modules specified in `split_attention_modules`."""
 
+    profile: bool = False
+    """Whether to enable profiling during gradient collection.
+    If true, by default the first 4 steps will be profiled."""
+
+    debug: bool = False
+    """Whether to enable debug mode with additional logging."""
     filter_modules: str | None = None
     """If provided, a glob pattern to filter out modules from gradient collection.
     For example, "transformer.h.*.mlp.*" will exclude all MLP layers in a

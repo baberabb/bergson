@@ -45,7 +45,7 @@ def test_build_consistency(tmp_path: Path, model, dataset):
     collect_gradients(
         model=model,
         data=dataset,
-        processor=GradientProcessor(),
+        processor=GradientProcessor(projection_dim=cfg.projection_dim),
         cfg=cfg,
     )
 
@@ -53,7 +53,7 @@ def test_build_consistency(tmp_path: Path, model, dataset):
 
     cache_path = Path("runs/test_build_cache.npy")
     if not cache_path.exists():
-        # Regenerate cache
+        # Regenerate cache, TODO: We shouldn't do this, maybe use dvc
         np.save(cache_path, index[index.dtype.names[0]][0])
 
     cached_item_grad = np.load(cache_path)

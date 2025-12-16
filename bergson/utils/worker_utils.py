@@ -16,7 +16,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from bergson.config import DataConfig, IndexConfig
 from bergson.data import tokenize
 from bergson.gradients import GradientProcessor
-from bergson.utils import assert_type, get_layer_list
+from bergson.utils.utils import assert_type, get_layer_list
 
 
 def create_processor(

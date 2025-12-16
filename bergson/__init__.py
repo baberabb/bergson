@@ -10,11 +10,11 @@ from .config import (
     ScoreConfig,
 )
 from .data import load_gradients
-from .gradcheck import FiniteDiff
-from .gradients import GradientCollector, GradientProcessor
+from .gradients import GradientProcessor
 from .query.attributor import Attributor
 from .query.faiss_index import FaissConfig
 from .score.scorer import Scorer
+from .utils.gradcheck import FiniteDiff
 
 __all__ = [
     "collect_gradients",
@@ -22,7 +22,6 @@ __all__ = [
     "Attributor",
     "FaissConfig",
     "FiniteDiff",
-    "GradientCollector",
     "GradientProcessor",
     "IndexConfig",
     "DataConfig",
