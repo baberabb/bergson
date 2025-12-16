@@ -192,7 +192,7 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
     ds = ds.map(
         tokenize,
         batched=True,
-        fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),     
+        fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
     )
     if cfg.data.reward_column:
         assert isinstance(ds, Dataset), "Dataset required for advantage estimation"
