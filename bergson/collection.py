@@ -23,7 +23,7 @@ def collect_gradients(
     reduce_cfg: ReduceConfig | None = None,
 ):
     """
-    Compute projected gradients using a subset of the dataset.
+    Compute gradients using the hooks specified in the GradientCollector.
     """
     if attention_cfgs is None:
         attention_cfgs = {}
