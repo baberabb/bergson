@@ -45,7 +45,7 @@ def collect_gradients(
         batches=batches,
         cfg=cfg,
     )
-    computer._compute(desc="New worker - Collecting gradients")
+    computer.run_with_collector_hooks(desc="New worker - Collecting gradients")
 
 
 def process_preconditioners(

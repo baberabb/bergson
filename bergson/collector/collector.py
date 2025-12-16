@@ -367,7 +367,7 @@ class HookCollectorBase(ContextDecorator, ABC):
     def process_batch(self, indices: list[int], **kwargs) -> None:
         """
         Process collected data for a batch. This is called after each
-        forward/backward pass. See also CollectorComputer._compute.
+        forward/backward pass. See also CollectorComputer.run_with_collector_hooks.
 
         Args:
             indices: List of data indices in the current batch
@@ -458,7 +458,7 @@ class CollectorComputer:
 
         return prof
 
-    def _compute(
+    def run_with_collector_hooks(
         self,
         desc: Optional[str] = None,
     ):
