@@ -246,13 +246,32 @@ class TraceCollector(HookCollectorBase):
     """Dtype for stored gradients."""
 
     def setup(self) -> None:
-        return
+        # TODO: handle more elegantly?
+        self.save_dtype = (
+            torch.float32 if self.model.dtype == torch.float32 else torch.float16
+        )
+
+        self.lo = torch.finfo(self.save_dtype).min
+        self.hi = torch.finfo(self.save_dtype).max
 
     def forward_hook(self, module: nn.Module, a: Float[Tensor, "N S I"]) -> None:
-        """Cache activations, applying bias and projection if configured."""
+        """
+        Cache activations for gradient computation with normalizer preprocessing
+        and compress via random projection if configured.
+        Stores result in module._inputs for use in backward_hook.
+        """
         p = self.processor.projection_dim
         name = assert_type(str, module._name)
         i = getattr(module, LayerAdapter.in_attr(module))
+        normalizer = self.processor.normalizers.get(name)
+
+        if isinstance(normalizer, AdamNormalizer):
+            module._inputs = a
+            return
+        if isinstance(normalizer, AdafactorNormalizer):
+            a_factor = normalizer.col.add(1e-30)
+            a_factor = a_factor.rsqrt()
+            a = a * a_factor.type_as(a)  # [N, S, I] * [I] → [N, S, I]
 
         if module._has_bias:
             # Append ones to activation for bias term
@@ -261,34 +280,48 @@ class TraceCollector(HookCollectorBase):
             i = i + 1
             setattr(module, LayerAdapter.in_attr(module), i)
         if p is not None:
-            a = a @ self.projection(name, p, i, "right", a.device, a.dtype).T  # type: ignore
-
+            a_projection = self.projection(name, p, i, "right", a.device, a.dtype).T
+            a = a @ a_projection  # type: ignore
+        # set module._inputs to a
         module._inputs = a
 
     @HookCollectorBase.split_attention_heads
     def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]):
         """
-        Compute gradient and append to accumulated list.
+        Compute per-sample gradient for the Attributor trace.
 
-        Computes outer product, optionally applies preconditioning, and appends
-        to mod_grads[name] list for later aggregation.
+        Computes gradient as outer product g.T @ a (again with optional projection and
+        normalization).
         """
         a = module._inputs  # [N, S, I/q]
+
         assert isinstance(a, torch.Tensor), "Activation cache missing for module"
-
         name = assert_type(str, module._name)
-
         p = self.processor.projection_dim
-
+        i = getattr(module, LayerAdapter.in_attr(module))
         o = getattr(module, LayerAdapter.out_attr(module))
+        normalizer = self.processor.normalizers.get(name)
 
-        if p is not None:
-            A = self.projection(name, p, o, "left", g.device, g.dtype)
-            g = g @ A.T  # [N, S, p]
+        if isinstance(normalizer, AdamNormalizer):
+            full_gradient = g.mT @ a  # [N, O, S] @ [N, S, I] → [N, O, I]
+            P = normalizer.normalize_(full_gradient)
+            if p is not None:
+                g_projection = self.projection(name, p, o, "left", g.device, g.dtype)
+                a_projection = self.projection(name, p, i, "right", g.device, g.dtype).T
+                P = g_projection @ P @ a_projection
+        else:
+            if isinstance(normalizer, AdafactorNormalizer):
+                g_factor = normalizer.row.add(1e-30)
+                g_factor = g_factor.mean().sqrt() * g_factor.rsqrt()
+                g = g * g_factor.type_as(g)  # [N, S, O] * [O] → [N, S, O]
 
-        P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
+            if p is not None:
+                g_projection = self.projection(name, p, o, "left", g.device, g.dtype)
+                g = g @ g_projection.T  # [N, S, p]
 
-        P = P.flatten(1)
+            P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
+
+        P = P.flatten(1).clamp_(self.lo, self.hi)
 
         # Precondition the gradient using Cholesky solve
         # TODO: Should damp here?
@@ -308,7 +341,7 @@ class TraceCollector(HookCollectorBase):
         return
 
 
-@dataclass
+@dataclass(kw_only=True)
 class StreamingGradientCollector(HookCollectorBase):
     """
     Lightweight collector for streaming gradient collection during training.
@@ -319,9 +352,15 @@ class StreamingGradientCollector(HookCollectorBase):
 
     mod_grads: dict = field(default_factory=dict)
 
-    save_dtype: torch.dtype = torch.float16
+    dtype: torch.dtype
+    """Dtype for stored gradients."""
 
     def setup(self) -> None:
+        # TODO: handle more elegantly?
+        self.save_dtype = (
+            torch.float32 if self.model.dtype == torch.float32 else torch.float16
+        )
+
         self.lo = torch.finfo(self.save_dtype).min
         self.hi = torch.finfo(self.save_dtype).max
 
@@ -332,36 +371,72 @@ class StreamingGradientCollector(HookCollectorBase):
         pass
 
     def forward_hook(self, module: nn.Module, a: Float[Tensor, "N S I"]) -> None:
+        """
+        Cache activations for gradient computation with normalizer preprocessing
+        and compress via random projection if configured.
+        Stores result in module._inputs for use in backward_hook.
+        """
         p = self.processor.projection_dim
         name = assert_type(str, module._name)
         i = getattr(module, LayerAdapter.in_attr(module))
+        normalizer = self.processor.normalizers.get(name)
+
+        if isinstance(normalizer, AdamNormalizer):
+            module._inputs = a
+            return
+        if isinstance(normalizer, AdafactorNormalizer):
+            a_factor = normalizer.col.add(1e-30)
+            a_factor = a_factor.rsqrt()
+            a = a * a_factor.type_as(a)  # [N, S, I] * [I] → [N, S, I]
 
         if module._has_bias:
+            # Append ones to activation for bias term
             ones = torch.ones(a.size(0), a.size(1), 1, device=a.device, dtype=a.dtype)
             a = torch.cat([a, ones], dim=-1)
             i = i + 1
             setattr(module, LayerAdapter.in_attr(module), i)
-
         if p is not None:
-            a = a @ self.projection(name, p, i, "right", a.device, a.dtype).T
-
+            a_projection = self.projection(name, p, i, "right", a.device, a.dtype).T
+            a = a @ a_projection  # type: ignore
+        # set module._inputs to a
         module._inputs = a
 
     @HookCollectorBase.split_attention_heads
-    def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]) -> None:
-        a = module._inputs
+    def backward_hook(self, module: nn.Module, g: Float[Tensor, "N S O"]):
+        """
+        Compute per-sample gradient for the hf callback.
+
+        Computes gradient as outer product g.T @ a (again with optional projection and
+        normalization).
+        """
+        a = module._inputs  # [N, S, I/q]
+
         assert isinstance(a, torch.Tensor), "Activation cache missing for module"
-
         name = assert_type(str, module._name)
-
         p = self.processor.projection_dim
+        i = getattr(module, LayerAdapter.in_attr(module))
         o = getattr(module, LayerAdapter.out_attr(module))
+        normalizer = self.processor.normalizers.get(name)
 
-        if p is not None:
-            A = self.projection(name, p, o, "left", g.device, g.dtype)
-            g = g @ A.T
+        if isinstance(normalizer, AdamNormalizer):
+            full_gradient = g.mT @ a  # [N, O, S] @ [N, S, I] → [N, O, I]
+            P = normalizer.normalize_(full_gradient)
+            if p is not None:
+                g_projection = self.projection(name, p, o, "left", g.device, g.dtype)
+                a_projection = self.projection(name, p, i, "right", g.device, g.dtype).T
+                P = g_projection @ P @ a_projection
+        else:
+            if isinstance(normalizer, AdafactorNormalizer):
+                g_factor = normalizer.row.add(1e-30)
+                g_factor = g_factor.mean().sqrt() * g_factor.rsqrt()
+                g = g * g_factor.type_as(g)  # [N, S, O] * [O] → [N, S, O]
 
-        P = g.mT @ a
+            if p is not None:
+                g_projection = self.projection(name, p, o, "left", g.device, g.dtype)
+                g = g @ g_projection.T  # [N, S, p]
+
+            P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
+
         P = P.flatten(1).clamp_(self.lo, self.hi)
 
         self.mod_grads[name] = P.to(

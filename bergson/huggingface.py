@@ -119,7 +119,7 @@ class GradientCollectorCallback(TrainerCallback):
             ),
             target_modules=target_modules,
             attention_cfgs=self.attention_cfgs,
-            save_dtype=self.torch_dtype,
+            dtype=self.torch_dtype,
         )
         self.grad_sizes = {
             name: math.prod(s) for name, s in self.collector.shapes().items()
