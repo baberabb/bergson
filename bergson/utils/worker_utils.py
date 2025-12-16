@@ -192,10 +192,8 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
     ds = ds.map(
         tokenize,
         batched=True,
-        fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
-        remove_columns=remove_columns,
+        fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),     
     )
-
     if cfg.data.reward_column:
         assert isinstance(ds, Dataset), "Dataset required for advantage estimation"
         ds = ds.add_column(
@@ -203,5 +201,7 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
             estimate_advantage(ds, cfg.data),
             new_fingerprint="advantage",  # type: ignore
         )
+    if remove_columns is not None:
+        ds = ds.remove_columns(remove_columns)
 
     return ds
