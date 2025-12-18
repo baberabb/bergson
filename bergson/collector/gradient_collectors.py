@@ -81,6 +81,7 @@ class GradientCollector(HookCollectorBase):
 
         # Compute whether we need to save the index
         self.save_index = self.scorer is None and not self.cfg.skip_index
+        self.skip_preconditioners = self.cfg.skip_preconditioners
 
         if self.save_index:
             grad_sizes = {name: math.prod(s) for name, s in self.shapes().items()}
@@ -162,6 +163,13 @@ class GradientCollector(HookCollectorBase):
             P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
 
         P = P.flatten(1).clamp_(self.lo, self.hi)
+
+        if not self.skip_preconditioners:
+            P = P.float()
+            if name in self.processor.preconditioners:
+                self.processor.preconditioners[name].addmm_(P.mT, P)
+            else:
+                self.processor.preconditioners[name] = P.mT @ P
 
         if self.save_index:
             # Asynchronously move the gradient to CPU and convert to the final dtype
