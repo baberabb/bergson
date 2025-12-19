@@ -33,11 +33,14 @@ class GradientCollector(HookCollectorBase):
     - Also supports Scorer for on-the-fly scoring of gradients.
     """
 
-    mod_grads: dict = field(default_factory=dict)
-    """Temporary storage for gradients during a batch, keyed by module name."""
-
     data: Dataset
     """The dataset being processed."""
+
+    cfg: IndexConfig
+    """Configuration for gradient index."""
+
+    mod_grads: dict = field(default_factory=dict)
+    """Temporary storage for gradients during a batch, keyed by module name."""
 
     reduce_cfg: ReduceConfig | None = None
     """Configuration for in-run gradient reduction."""
@@ -48,13 +51,30 @@ class GradientCollector(HookCollectorBase):
     scorer: Scorer | None = None
     """Optional scorer for computing scores instead of building an index."""
 
+    def __init__(self, *args, **kwargs):
+        self.data = assert_type(Dataset, kwargs['data'])
+        self.cfg = assert_type(IndexConfig, kwargs['cfg'])
+
+        self.reduce_cfg = kwargs.get('reduce_cfg', None)
+        self.builder = kwargs.get('builder', None)
+        self.scorer = kwargs.get('scorer', None)
+        self.mod_grads = {}
+        
+        # Extract parent class arguments
+        parent_kwargs = {
+            k: v for k, v in kwargs.items()
+            if k in {'model', 'filter_modules', 'target_modules', 'processor', 'attention_cfgs'}
+        }
+        parent_kwargs['filter_modules'] = self.cfg.filter_modules
+
+        super().__init__(*args, **parent_kwargs)
+
     def setup(self) -> None:
         """
         Initialize collector state.
 
         Sets up a Builder for gradient storage if not using a Scorer.
         """
-        assert self.cfg is not None, "cfg is required for GradientCollector"
         assert isinstance(
             self.model.device, torch.device
         ), "Model device is not set correctly"
