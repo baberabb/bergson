@@ -4,7 +4,7 @@ from pathlib import Path
 from torch import nn
 
 from bergson import GradientProcessor
-from bergson.gradients import AdafactorNormalizer
+from bergson.gradients import AdafactorNormalizer, AdamNormalizer
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["WANDB_MODE"] = "disabled"
@@ -342,38 +342,26 @@ class TestGradientCollectorCallback:
             layer = model.get_submodule(layer_name)
             norm = normalizers[layer_name]
 
-            # Check normalizer type
-            assert isinstance(norm, AdafactorNormalizer)
-
             # Get raw state from optimizer
             weight_state = optimizer.state[layer.weight]
             lr = optimizer.param_groups[0]["lr"]
-            lr_sqrt = lr**0.5
 
             if optimizer_name == "adam":
+                # Check normalizer type
+                assert isinstance(norm, AdamNormalizer)
+
                 # Ground truth: Adam stores full exp_avg_sq
                 raw_exp_avg_sq = weight_state["exp_avg_sq"]
+                expected_avg_sq = raw_exp_avg_sq * lr
 
-                # NOTE: We convert Adam's full second moments to Adafactor's factorized
-                # form (row + col vectors) for memory efficiency. This is a lossy
-                # rank-1 approximation that can have large reconstruction errors.
-                # We can't verify correctness here, only sanity check the factorization.
-
-                # Sanity checks on the factorized representation
-                assert norm.row.shape == (raw_exp_avg_sq.shape[0],)
-                assert norm.col.shape == (raw_exp_avg_sq.shape[1],)
-                assert (
-                    not torch.isnan(norm.row).any() and not torch.isinf(norm.row).any()
-                )
-                assert (
-                    not torch.isnan(norm.col).any() and not torch.isinf(norm.col).any()
-                )
-                assert (norm.row > 0).all() and (
-                    norm.col > 0
-                ).all()  # Second moments are positive
+                torch.testing.assert_close(norm.avg_sq, expected_avg_sq)
 
             elif optimizer_name == "adafactor":
+                # Check normalizer type
+                assert isinstance(norm, AdafactorNormalizer)
+
                 # Ground truth: Adafactor stores row/col directly
+                lr_sqrt = lr**0.5
                 raw_row = weight_state["exp_avg_sq_row"]
                 raw_col = weight_state["exp_avg_sq_col"]
 
