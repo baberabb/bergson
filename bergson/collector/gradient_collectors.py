@@ -145,11 +145,18 @@ class GradientCollector(HookCollectorBase):
             a_factor = a_factor.rsqrt()
             a = a * a_factor.type_as(a)  # [N, S, I] * [I] → [N, S, I]
 
-        # Only project if no bias (bias requires full gradient to be materialized)
-        if p is not None and not module._has_bias:
+        # For normalizer cases, bias normalization differs from weight normalization,
+        # so we handle bias separately in backward hook
+        if module._has_bias and normalizer is None:
+            ones = torch.ones(a.size(0), a.size(1), 1, device=a.device, dtype=a.dtype)
+            a = torch.cat([a, ones], dim=-1)  # [N, S, I+1]
+            i = i + 1
+            setattr(module, LayerAdapter.in_attr(module), i)
+
+        if p is not None and (normalizer is None or not module._has_bias):
             a_projection = self.projection(name, p, i, "right", a.device, a.dtype).T
-            a = a @ a_projection  # type: ignore
-        # set module._inputs to a
+            a = a @ a_projection  # [N, S, I(+1)] @ [I(+1), p] → [N, S, p]
+
         module._inputs = a
 
     @HookCollectorBase.split_attention_heads
@@ -207,7 +214,7 @@ class GradientCollector(HookCollectorBase):
 
                 # If bias is present, materialize full gradient then project
                 if bias_grad is not None:
-                    P = g.mT @ a  # [N, O, I/q]
+                    P = g.mT @ a  # [N, O, I]
 
                     # Append pre-normalized bias gradient
                     P = torch.cat([P, bias_grad.unsqueeze(2)], dim=2)  # [N, O, I+1]
@@ -232,34 +239,13 @@ class GradientCollector(HookCollectorBase):
                     P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
 
             case None:
-                if module._has_bias:
-                    # Compute bias from RAW g (before any projection)
-                    bias_grad = g.sum(dim=1)  # [N, S, O] → [N, O]
+                if p is not None:
+                    g_projection = self.projection(
+                        name, p, o, "left", g.device, g.dtype
+                    )
+                    g = g @ g_projection.T  # [N, S, p]
 
-                    # Materialize full gradient then project if needed
-                    P = g.mT @ a  # [N, O, I]
-
-                    # Append bias gradient
-                    P = torch.cat([P, bias_grad.unsqueeze(2)], dim=2)  # [N, O, I+1]
-                    i += 1
-
-                    # Project the entire gradient if needed
-                    if p is not None:
-                        g_projection = self.projection(
-                            name, p, o, "left", g.device, g.dtype
-                        )
-                        a_projection = self.projection(
-                            name, p, i, "right", a.device, a.dtype
-                        ).T
-                        P = g_projection @ P @ a_projection
-                else:
-                    if p is not None:
-                        g_projection = self.projection(
-                            name, p, o, "left", g.device, g.dtype
-                        )
-                        g = g @ g_projection.T
-
-                    P = g.mT @ a  # [N, O/p, I/q]
+                P = g.mT @ a  # [N, O/p, I(+1)/p]
             case _:
                 raise ValueError(f"Unknown normalizer type {type(normalizer)}")
 

@@ -141,11 +141,9 @@ class AdafactorNormalizer(Normalizer):
         Bias is scaled by lr**2.
         """
         lr_sqrt = lr**0.5
-        self.row = self.row.mul_(lr_sqrt)
-        self.col = self.col.mul_(lr_sqrt)
-        self.bias_avg_sq = (
-            self.bias_avg_sq.mul_(lr) if self.bias_avg_sq is not None else None
-        )
+        self.row.mul_(lr_sqrt)
+        self.col.mul_(lr_sqrt)
+        self.bias_avg_sq.mul_(lr) if self.bias_avg_sq is not None else None
 
 
 @dataclass
@@ -197,10 +195,8 @@ class AdamNormalizer(Normalizer):
 
         Both avg_sq and bias_avg_sq are divided by lr².
         """
-        self.avg_sq = self.avg_sq.mul_(lr)
-        self.bias_avg_sq = (
-            self.bias_avg_sq.mul_(lr) if self.bias_avg_sq is not None else None
-        )
+        self.avg_sq.mul_(lr)
+        self.bias_avg_sq.mul_(lr) if self.bias_avg_sq is not None else None
 
 
 @dataclass
