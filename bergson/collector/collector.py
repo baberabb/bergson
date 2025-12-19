@@ -493,7 +493,7 @@ class CollectorComputer:
                     ),
                 ):
                     losses = self.forward_backward(self.model, batch)
-                    
+
                     # TODO: currently builder also calls torch.cuda.synchronize
                     torch.cuda.synchronize() if torch.cuda.is_available() else None
 
