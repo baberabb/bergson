@@ -390,11 +390,11 @@ class TestGradientCollectorCallback:
                 raw_bias_exp_avg_sq = bias_state["exp_avg_sq"]
                 expected_bias = raw_bias_exp_avg_sq * lr
 
-                assert norm.bias_avg_sq is not None, (
-                    f"Expected bias_avg_sq for {layer_name}"
-                )
+                assert (
+                    norm.bias_avg_sq is not None
+                ), f"Expected bias_avg_sq for {layer_name}"
                 torch.testing.assert_close(norm.bias_avg_sq, expected_bias)
             else:
-                assert norm.bias_avg_sq is None, (
-                    f"Unexpected bias_avg_sq for {layer_name}"
-                )
+                assert (
+                    norm.bias_avg_sq is None
+                ), f"Unexpected bias_avg_sq for {layer_name}"
