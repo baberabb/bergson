@@ -228,15 +228,38 @@ class GradientCollector(HookCollectorBase):
                         g = g @ g_projection.T  # [N, S, p]
 
                     P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
-            # no normalizer
-            case _:
-                if p is not None:
-                    g_projection = self.projection(
-                        name, p, o, "left", g.device, g.dtype
-                    )
-                    g = g @ g_projection.T
 
-                P = g.mT @ a  # [N, O/p, I/q]
+            case None:
+                if module._has_bias:
+                    # Compute bias from RAW g (before any projection)
+                    bias_grad = g.sum(dim=1)  # [N, S, O] → [N, O]
+
+                    # Materialize full gradient then project if needed
+                    P = g.mT @ a  # [N, O, I]
+
+                    # Append bias gradient
+                    P = torch.cat([P, bias_grad.unsqueeze(2)], dim=2)  # [N, O, I+1]
+                    i += 1
+
+                    # Project the entire gradient if needed
+                    if p is not None:
+                        g_projection = self.projection(
+                            name, p, o, "left", g.device, g.dtype
+                        )
+                        a_projection = self.projection(
+                            name, p, i, "right", a.device, a.dtype
+                        ).T
+                        P = g_projection @ P @ a_projection
+                else:
+                    if p is not None:
+                        g_projection = self.projection(
+                            name, p, o, "left", g.device, g.dtype
+                        )
+                        g = g @ g_projection.T
+
+                    P = g.mT @ a  # [N, O/p, I/q]
+            case _:
+                raise ValueError(f"Unknown normalizer type {type(normalizer)}")
 
         P = P.flatten(1).clamp_(self.lo, self.hi)
 

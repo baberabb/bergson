@@ -18,7 +18,136 @@ from bergson.gradients import (
 )
 
 
+# Test fixtures
+@pytest.fixture
+def test_params():
+    """Common test parameters used across gradient tests.
+
+    Returns:
+        dict: Test dimensions with keys:
+            - N: Batch size (4)
+            - S: Sequence length (6)
+            - I: Input dimension (5)
+            - O: Output dimension (3)
+    """
+    return {"N": 4, "S": 6, "I": 5, "O": 3}
+
+
+@pytest.fixture
+def simple_model_class(test_params):
+    """Factory for creating test model classes.
+
+    Creates simple neural network models with device/dtype properties required
+    by GradientCollector. Supports both single-layer and two-layer architectures.
+
+    Returns:
+        callable: Factory function that takes:
+            - include_bias (bool): Whether to include bias terms
+            - num_layers (int): Number of linear layers (1 or 2, default 2)
+
+    Examples:
+        >>> ModelClass = simple_model_class(include_bias=True, num_layers=1)
+        >>> model = ModelClass()  # Single layer: fc
+        >>> ModelClass = simple_model_class(include_bias=False, num_layers=2)
+        >>> model = ModelClass()  # Two layers: fc1, relu, fc2
+    """
+    I, O = test_params["I"], test_params["O"]
+
+    def _make_model(include_bias: bool, num_layers: int = 2):
+        class SimpleModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                if num_layers == 1:
+                    self.fc = nn.Linear(I, O, bias=include_bias)
+                    self.layers = nn.Sequential(self.fc)
+                else:  # num_layers == 2
+                    self.fc1 = nn.Linear(I, O * 2, bias=include_bias)
+                    self.relu = nn.ReLU()
+                    self.fc2 = nn.Linear(O * 2, O, bias=include_bias)
+                    self.layers = nn.Sequential(self.fc1, self.relu, self.fc2)
+
+            def forward(self, x):
+                return self.layers(x)
+
+            @property
+            def device(self):
+                return next(self.parameters()).device
+
+            @property
+            def dtype(self):
+                return next(self.parameters()).dtype
+
+        return SimpleModel
+
+    return _make_model
+
+
+@pytest.fixture
+def trained_model_with_normalizers(simple_model_class, test_params):
+    """Factory for creating trained models with Adam second moments.
+
+    Creates a two-layer model, runs several training steps with Adam optimizer,
+    then extracts second moments (exp_avg_sq) to create AdamNormalizers for
+    both weights and biases.
+
+    Returns:
+        callable: Factory function that takes:
+            - include_bias (bool): Whether to include bias normalizers
+
+        Returns tuple of (model, normalizers) where:
+            - model: Trained SimpleModel instance
+            - normalizers: Dict mapping layer names to AdamNormalizer instances
+                          with weight and optional bias second moments
+    """
+    N, S, I = test_params["N"], test_params["S"], test_params["I"]
+
+    def _create(include_bias: bool):
+        torch.manual_seed(42)
+        ModelClass = simple_model_class(include_bias)
+        model = ModelClass().to("cpu")
+
+        optimizer = torch.optim.Adam(model.parameters())
+
+        # Run a few training steps to build up second moments
+        for _ in range(5):
+            optimizer.zero_grad()
+            out = model(torch.randn(N, S, I))
+            loss = (out**2).sum()
+            loss.backward()
+            optimizer.step()
+
+        # Extract normalizers from optimizer state
+        normalizers = {}
+        for name, param in model.named_parameters():
+            if "weight" in name:
+                layer_name = name.replace(".weight", "")
+                exp_avg_sq = optimizer.state[param]["exp_avg_sq"]
+
+                # Get bias second moments if bias is included
+                bias_avg_sq = None
+                if include_bias:
+                    bias_param_name = layer_name + ".bias"
+                    for p_name, p in model.named_parameters():
+                        if p_name == bias_param_name:
+                            bias_avg_sq = optimizer.state[p]["exp_avg_sq"]
+                            break
+
+                normalizers[layer_name] = AdamNormalizer(exp_avg_sq, bias_avg_sq)
+
+        return model, normalizers
+
+    return _create
+
+
 def test_gradient_collector_proj_norm():
+    """Test gradient collection with projection and normalization.
+
+    Verifies that GradientCollector correctly:
+    - Collects gradients with and without random projection
+    - Applies Adam and Adafactor normalization
+    - Saves and loads GradientProcessor state
+    - Produces consistent results across save/load cycles
+    """
     temp_dir = Path(tempfile.mkdtemp())
     print(temp_dir)
 
@@ -124,55 +253,43 @@ def test_gradient_collector_proj_norm():
 
 
 @pytest.mark.parametrize("include_bias", [True, False])
-def test_gradient_collector_batched(include_bias: bool):
-    torch.manual_seed(42)
-    N = 4
-    S = 6
-    I = 5
-    O = 3
+def test_gradient_collector_batched(
+    include_bias: bool, trained_model_with_normalizers, test_params
+):
+    """Test per-sample gradient collection with Adam normalization.
 
-    class SimpleModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.fc1 = nn.Linear(I, O * 2, bias=include_bias)
-            self.relu = nn.ReLU()
-            self.fc2 = nn.Linear(O * 2, O, bias=include_bias)
+    Tests gradient collection with and without bias terms by:
+    - Computing ground truth gradients via individual backward passes
+    - Comparing against GradientCollector's batched computation
+    - Verifying proper bias normalization using Adam second moments
 
-        def forward(self, x):
-            return self.fc2(self.relu(self.fc1(x)))
+    Args:
+        include_bias: Whether to include bias gradients in collection
+    """
+    temp_dir = Path(tempfile.mkdtemp())
+    N, S, I = test_params["N"], test_params["S"], test_params["I"]
 
-    torch.manual_seed(42)
-    model = SimpleModel()
+    model, normalizers = trained_model_with_normalizers(include_bias)
 
-    optimizer = torch.optim.Adam(model.parameters())
+    # Create dummy dataset for GradientCollector
+    dummy_data = Dataset.from_dict({"input_ids": [[1] * 10] * N})
 
-    # Run a few training steps to build up second moments
-    for _ in range(5):
-        optimizer.zero_grad()
-        out = model(torch.randn(N, S, I))
-        loss = (out**2).sum()
-        loss.backward()
-        optimizer.step()
-
-    normalizers = {}
-    for name, param in model.named_parameters():
-        if "weight" in name:
-            layer_name = name.replace(".weight", "")
-            # Adam stores second moments as 'exp_avg_sq'
-            exp_avg_sq = optimizer.state[param]["exp_avg_sq"]
-            normalizers[layer_name] = AdamNormalizer(exp_avg_sq)
-
-    # collect gradients
-    collected_grads = {}
-
-    def closure(name: str, g: torch.Tensor):
-        """Store the gradients in a dictionary for later comparison."""
-        collected_grads[name] = g
+    # Create config for GradientCollector
+    cfg = IndexConfig(
+        run_path=str(temp_dir / "run"),
+        skip_index=True,
+    )
 
     processor = GradientProcessor(
         normalizers=normalizers, projection_dim=None, include_bias=include_bias
     )
-    collector = GradientCollector(model, closure, processor)
+    collector = GradientCollector(
+        model=model,
+        cfg=cfg,
+        data=dummy_data,
+        processor=processor,
+        target_modules={"fc1", "fc2"},
+    )
 
     x = torch.randn(N, S, I)
     with collector:
@@ -180,6 +297,9 @@ def test_gradient_collector_batched(include_bias: bool):
         out = model(x)
         loss = (out**2).sum()
         loss.backward()
+
+    # Copy collected gradients from collector.mod_grads
+    collected_grads = collector.mod_grads.copy()
 
     def compute_ground_truth():
         """Compute gradients using individual backward passes, with normalization."""
@@ -203,10 +323,16 @@ def test_gradient_collector_batched(include_bias: bool):
 
                 if include_bias:
                     bias_grad = layer.bias.grad.clone()
+                    # Normalize bias with bias second moments
+                    # (matching GradientCollector)
+                    bias_grad = bias_grad / normalizers[
+                        layer_name
+                    ].bias_avg_sq.sqrt().add(1e-8)
                     bias_grad = bias_grad.unsqueeze(1)
                     grad = torch.cat([grad, bias_grad], dim=1)
 
-                ground_truth_grads[layer_name].append(grad)
+                # Flatten to match GradientCollector's output format
+                ground_truth_grads[layer_name].append(grad.flatten())
 
         for layer_name in ["fc1", "fc2"]:
             ground_truth_grads[layer_name] = torch.stack(ground_truth_grads[layer_name])
@@ -220,23 +346,24 @@ def test_gradient_collector_batched(include_bias: bool):
         )
 
 
-def test_bias_gradients():
-    """Test that per-sample bias gradients are correctly computed."""
+def test_bias_gradients(test_params, simple_model_class):
+    """Test per-sample bias gradient computation without normalizers.
+
+    Validates that GradientCollector correctly computes bias gradients when
+    no normalizers are provided by:
+    - Computing ground truth via individual backward passes
+    - Collecting bias gradients using GradientCollector
+    - Verifying bias gradients match (summed over sequence dimension)
+
+    This tests the no-normalizer bias collection path added to support
+    bias gradients without Adam/Adafactor second moments.
+    """
+    temp_dir = Path(tempfile.mkdtemp())
     torch.manual_seed(42)
-    N = 4
-    S = 6
-    I = 5
-    O = 3
+    N, S, I, O = test_params["N"], test_params["S"], test_params["I"], test_params["O"]
 
-    class SimpleModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.fc = torch.nn.Linear(I, O, bias=True)
-
-        def forward(self, x):
-            return self.fc(x)
-
-    model = SimpleModel()
+    ModelClass = simple_model_class(include_bias=True, num_layers=1)
+    model = ModelClass().to("cpu")
     x = torch.randn(N, S, I)
 
     # bias gradient is a sum over sequence dimension for each n
@@ -258,13 +385,23 @@ def test_bias_gradients():
     ground_truth = compute_ground_truth(model)
 
     # GradientCollector with include_bias=True
-    collected_grads = {}
+    # Create dummy dataset for GradientCollector
+    dummy_data = Dataset.from_dict({"input_ids": [[1] * 10] * N})
 
-    def closure(name: str, g: torch.Tensor):
-        collected_grads[name] = g
+    # Create config for GradientCollector
+    cfg = IndexConfig(
+        run_path=str(temp_dir / "run"),
+        skip_index=True,
+    )
 
     processor = GradientProcessor(include_bias=True, projection_dim=None)
-    collector = GradientCollector(model, closure, processor, target_modules={"fc"})
+    collector = GradientCollector(
+        model=model,
+        cfg=cfg,
+        data=dummy_data,
+        processor=processor,
+        target_modules={"fc"},
+    )
 
     with collector:
         model.zero_grad()
@@ -272,12 +409,13 @@ def test_bias_gradients():
         loss = (output**2).sum()
         loss.backward()
 
-    # the last column is bias
-    bias_grads = collected_grads["fc"][..., -1]
+    # Reshape from [N, O*(I+1)] to [N, O, I+1] to extract bias from last column
+    collected = collector.mod_grads["fc"].reshape(N, O, I + 1)
+    bias_grads = collected[..., -1]
 
     assert bias_grads.shape == (
         N,
-        3,
+        O,
     ), f"Expected shape ({N}, {O}), got {bias_grads.shape}"
     assert ground_truth.shape == (
         N,
@@ -286,3 +424,78 @@ def test_bias_gradients():
 
     # Compare to ground truth
     torch.testing.assert_close(bias_grads, ground_truth)
+
+
+@pytest.mark.parametrize("include_bias", [True, False])
+def test_gradient_collector_with_projection(
+    include_bias: bool, trained_model_with_normalizers, test_params
+):
+    """Test gradient collection with random projection and bias terms.
+
+    Validates that combining random projection with bias collection works correctly:
+    - Verifies output shape is [N, projection_dim²] regardless of bias inclusion
+    - Checks gradients are non-zero (projection doesn't zero them out)
+    - Confirms deterministic behavior (same input = same output)
+
+    This tests the critical path where bias gradients are concatenated to weight
+    gradients BEFORE applying the random projection, ensuring the projection
+    accounts for the increased dimensionality.
+
+    Args:
+        include_bias: Whether to include bias gradients in collection
+    """
+    temp_dir = Path(tempfile.mkdtemp())
+    N, S, I = test_params["N"], test_params["S"], test_params["I"]
+    P = 4  # projection dimension
+
+    model, normalizers = trained_model_with_normalizers(include_bias)
+
+    # Create dummy dataset for GradientCollector
+    dummy_data = Dataset.from_dict({"input_ids": [[1] * 10] * N})
+
+    # Create config for GradientCollector
+    cfg = IndexConfig(
+        run_path=str(temp_dir / "run"),
+        skip_index=True,
+    )
+
+    processor = GradientProcessor(
+        normalizers=normalizers, projection_dim=P, include_bias=include_bias
+    )
+    collector = GradientCollector(
+        model=model,
+        cfg=cfg,
+        data=dummy_data,
+        processor=processor,
+        target_modules={"fc1", "fc2"},
+    )
+
+    x = torch.randn(N, S, I)
+    with collector:
+        model.zero_grad()
+        out = model(x)
+        loss = (out**2).sum()
+        loss.backward()
+
+    # Check shapes - with projection, output should be [N, P*P]
+    for layer_name in ["fc1", "fc2"]:
+        collected = collector.mod_grads[layer_name]
+        assert collected.shape == (
+            N,
+            P * P,
+        ), f"Expected shape ({N}, {P*P}), got {collected.shape} for {layer_name}"
+
+        # Check that gradients are not all zeros
+        assert collected.abs().sum() > 0, f"Gradients are all zeros for {layer_name}"
+
+        # Check determinism - running twice should give same results
+        with collector:
+            model.zero_grad()
+            out = model(x)
+            loss = (out**2).sum()
+            loss.backward()
+
+        collected2 = collector.mod_grads[layer_name]
+        torch.testing.assert_close(
+            collected, collected2, msg=f"Gradients not deterministic for {layer_name}"
+        )
