@@ -27,6 +27,8 @@ def test_build_e2e(tmp_path: Path):
             "--split",
             "train[:100]",
             "--truncation",
+            "--projection_dim",
+            "4",
         ],
         cwd=tmp_path,
         capture_output=True,  # Add this
