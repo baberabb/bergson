@@ -37,8 +37,8 @@ def test_params():
 def simple_model_class(test_params):
     """Factory for creating test model classes.
 
-    Creates simple neural network models with device/dtype properties required
-    by GradientCollector. Supports both single-layer and two-layer architectures.
+    Creates simple neural network models for testing gradient collection.
+    Supports both single-layer and two-layer architectures.
 
     Returns:
         callable: Factory function that takes:
@@ -68,14 +68,6 @@ def simple_model_class(test_params):
 
             def forward(self, x):
                 return self.layers(x)
-
-            @property
-            def device(self):
-                return next(self.parameters()).device
-
-            @property
-            def dtype(self):
-                return next(self.parameters()).dtype
 
         return SimpleModel
 

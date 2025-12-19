@@ -84,18 +84,20 @@ class GradientCollector(HookCollectorBase):
 
         Sets up a Builder for gradient storage if not using a Scorer.
         """
+        model_device = (
+            getattr(self.model, "device", None) or next(self.model.parameters()).device
+        )
+        model_dtype = (
+            getattr(self.model, "dtype", None) or next(self.model.parameters()).dtype
+        )
+
         assert isinstance(
-            self.model.device, torch.device
+            model_device, torch.device
         ), "Model device is not set correctly"
-        if self.cfg.include_bias and self.processor.normalizers is not None:
-            raise NotImplementedError(
-                "Bias with normalizers not supported yet, "
-                "consider disabling bias inclusion for now."
-            )
 
         # TODO: handle more elegantly?
         self.save_dtype = (
-            torch.float32 if self.model.dtype == torch.float32 else torch.float16
+            torch.float32 if model_dtype == torch.float32 else torch.float16
         )
 
         self.lo = torch.finfo(self.save_dtype).min
@@ -103,7 +105,7 @@ class GradientCollector(HookCollectorBase):
 
         self.per_doc_losses = torch.full(
             (len(self.data),),
-            device=self.model.device,
+            device=model_device,
             dtype=self.save_dtype,
             fill_value=0.0,
         )
@@ -363,9 +365,14 @@ class TraceCollector(HookCollectorBase):
     """Dtype for stored gradients."""
 
     def setup(self) -> None:
+
+        model_dtype = (
+            getattr(self.model, "dtype", None) or next(self.model.parameters()).dtype
+        )
+
         # TODO: handle more elegantly?
         self.save_dtype = (
-            torch.float32 if self.model.dtype == torch.float32 else torch.float16
+            torch.float32 if model_dtype == torch.float32 else torch.float16
         )
 
         self.lo = torch.finfo(self.save_dtype).min
@@ -473,9 +480,14 @@ class StreamingGradientCollector(HookCollectorBase):
     """Dtype for stored gradients."""
 
     def setup(self) -> None:
+
+        model_dtype = (
+            getattr(self.model, "dtype", None) or next(self.model.parameters()).dtype
+        )
+
         # TODO: handle more elegantly?
         self.save_dtype = (
-            torch.float32 if self.model.dtype == torch.float32 else torch.float16
+            torch.float32 if model_dtype == torch.float32 else torch.float16
         )
 
         self.lo = torch.finfo(self.save_dtype).min
