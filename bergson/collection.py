@@ -47,6 +47,8 @@ def collect_gradients(
     )
     computer.run_with_collector_hooks(desc="New worker - Collecting gradients")
 
+    process_preconditioners(processor, collector.processor.preconditioners, len(data))
+
 
 def process_preconditioners(
     processor: GradientProcessor,

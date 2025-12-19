@@ -35,6 +35,14 @@ def test_build_e2e(tmp_path: Path):
 
     assert "Error" not in result.stderr, f"Error found in stderr:\n{result.stderr}"
 
+    processor = GradientProcessor.load(tmp_path / "test_e2e")
+
+    assert processor.preconditioners is not None
+    assert processor.preconditioners_eigen is not None
+
+    assert len(processor.preconditioners) > 0
+    assert len(processor.preconditioners_eigen) > 0
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_build_consistency(tmp_path: Path, model, dataset):

@@ -58,8 +58,10 @@ class HookCollectorBase(ContextDecorator, ABC):
     model: nn.Module
     """ The model to attach forward and backward hooks to. """
 
-    cfg: IndexConfig | None = None
-    """ Config with all hyperparameters. Optional for some collectors. """
+    filter_modules: str | None = None
+    """If provided, a glob pattern to filter out modules from gradient collection.
+    For example, "transformer.h.*.mlp.*" will exclude all MLP layers in a
+    standard transformer architecture."""
 
     target_modules: set[str] | None = None
     """
@@ -92,7 +94,7 @@ class HookCollectorBase(ContextDecorator, ABC):
             self.model,
             self.target_modules,
             self.processor.include_bias,
-            filter_modules=self.cfg.filter_modules if self.cfg else None,
+            self.filter_modules,
         )
 
         # Allow subclasses to perform custom initialization
@@ -417,7 +419,7 @@ class CollectorComputer:
             batches = [[idx] for idx in range(len(data))]
         self.batches = batches
 
-        self.loss_fn = loss_fn_factory(cfg)
+        self.forward_backward = fwd_bwd_factory(cfg)
 
         # Collector
         self.collector = collector
@@ -490,10 +492,8 @@ class CollectorComputer:
                         else nullcontext()
                     ),
                 ):
-                    losses = self.loss_fn(self.model, batch)
-                    losses.mean().backward()
+                    losses = self.forward_backward(self.model, batch)
 
-                    self.model.zero_grad()
                     # TODO: currently builder also calls torch.cuda.synchronize
                     torch.cuda.synchronize() if torch.cuda.is_available() else None
 
@@ -510,9 +510,9 @@ class CollectorComputer:
         self.logger.info(f"Total processed: {total_processed.item()}")
 
 
-def loss_fn_factory(cfg: IndexConfig) -> Callable:
+def fwd_bwd_factory(cfg: IndexConfig) -> Callable:
     """
-    Create a loss function based on the configuration.
+    Create a forward/backward function based on the configuration.
 
     Args:
         cfg: IndexConfig that specifies:
@@ -522,12 +522,13 @@ def loss_fn_factory(cfg: IndexConfig) -> Callable:
               summed loss.
 
     Returns:
-        A callable loss_fn(model, batch) -> Tensor that computes per-sample losses.
+        A callable fwd_bwd(model, batch) -> Tensor that performs a forward pass and
+        backward pass, returning the per-sample losses.
         The batch must contain "input_ids" and optionally "labels" and "advantage".
         Returns a tensor of shape [batch_size] with one loss value per sample.
     """
 
-    def loss_fn(model, batch):
+    def fwd_bwd(model, batch):
         x, y = pad_and_tensor(
             batch["input_ids"],  # type: ignore
             labels=batch.get("labels"),  # type: ignore
@@ -563,6 +564,9 @@ def loss_fn_factory(cfg: IndexConfig) -> Callable:
             if "advantage" in batch:
                 losses *= torch.tensor(batch["advantage"], device=losses.device)
 
+        losses.mean().backward()
+        model.zero_grad()
+
         return losses
 
-    return loss_fn
+    return fwd_bwd
