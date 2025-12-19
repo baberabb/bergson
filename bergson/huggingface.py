@@ -270,7 +270,7 @@ class GradientCollectorCallback(TrainerCallback):
             for name, param in model.named_parameters()
             if param.requires_grad
         }
-        normalizers: dict[str, AdafactorNormalizer] = {}
+        normalizers: dict[str, AdafactorNormalizer | AdamNormalizer] = {}
 
         assert self.collector is not None
         proc = self.collector.processor
@@ -306,11 +306,9 @@ class GradientCollectorCallback(TrainerCallback):
                 if layer_name not in layer_second_moments:
                     layer_second_moments[layer_name] = {"lr": group_lr}
 
-                # Adam-like optimizer
-                if (eas := p_state.get("exp_avg_sq")) is not None:
-                    layer_second_moments[layer_name][param_type] = eas
-                # Adafactor-like optimizer
-                elif (vr := p_state.get("exp_avg_sq_row")) is not None:
+                # Check for Adafactor FIRST (more specific than Adam)
+                # Adafactor-like optimizer: weights have factorized moments
+                if (vr := p_state.get("exp_avg_sq_row")) is not None:
                     vc = p_state.get("exp_avg_sq_col")
                     if param_type == "weight":
                         # Factorized second moments for weights
@@ -321,6 +319,9 @@ class GradientCollectorCallback(TrainerCallback):
                         bias_eas = p_state.get("exp_avg_sq")
                         if bias_eas is not None:
                             layer_second_moments[layer_name]["bias"] = bias_eas
+                # Adam-like optimizer: has exp_avg_sq for both weight and bias
+                elif (eas := p_state.get("exp_avg_sq")) is not None:
+                    layer_second_moments[layer_name][param_type] = eas
 
         # Build normalizers from collected second moments
         for layer_name, moments in layer_second_moments.items():
@@ -328,22 +329,22 @@ class GradientCollectorCallback(TrainerCallback):
 
             # Adam-like: has weight exp_avg_sq
             if "weight" in moments:
-                weight_eas = moments["weight"]
-                bias_eas = moments.get("bias")  # May be None
+                weight_eas = moments["weight"] * lr
+                bias_eas = moments.get("bias")
+                bias_eas = bias_eas * lr if bias_eas is not None else None
 
-                # Create Adam normalizer with optional bias, then convert to Adafactor
-                # TODO: always convert to adafactor?
-                norm = (
-                    AdamNormalizer(weight_eas, bias_eas).to_adafactor().scale_by_lr(lr)
-                )
+                norm = AdamNormalizer(weight_eas, bias_eas)
 
-            # Adafactor-like: has row/col
+            # Adafactor-like: has row/col factorization
             elif "row" in moments and "col" in moments:
-                bias_eas = moments.get("bias")  # May be present
-                norm = AdafactorNormalizer(
-                    moments["row"], moments["col"], bias_eas
-                ).scale_by_lr(lr)
+                row = moments["row"] * lr**0.5
+                col = moments["col"] * lr**0.5
+                bias_eas = moments.get("bias")
+                bias_eas = bias_eas * lr if bias_eas is not None else None
+
+                norm = AdafactorNormalizer(row, col, bias_eas)
             else:
+                # No weight moments found - skip this layer
                 continue
 
             normalizers[layer_name] = norm
