@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.4.1 (2025-12-20)
+
+### Bug Fixes
+
+- Pin transformers to avoid fp error bug
+  ([`9feac20`](https://github.com/EleutherAI/bergson/commit/9feac20e237d66825a5d16c385e4174bb02f4705))
+
+
 ## v0.4.0 (2025-12-03)
 
 ### Features
