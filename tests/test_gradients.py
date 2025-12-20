@@ -64,6 +64,11 @@ def test_GPTNeoX():
                 B = collector.projection(name, p, i, "right", g.device, g.dtype)
                 g = A @ g @ B.T
 
+            assert torch.isfinite(g).all()
+            assert torch.isfinite(collected_grad.squeeze(0)).all()
+
+            # The test computes A @ weight.grad @ B.T, while GradientCollector computes
+            # (G @ A.T).mT @ (I @ B.T), which are mathematically equivalent.
             torch.testing.assert_close(g, collected_grad.squeeze(0).view_as(g))
 
             # Store normalizers for this layer
@@ -104,7 +109,10 @@ def test_GPTNeoX():
                     # Compare the normalized gradient with the collected gradient. We
                     # use a higher tolerance than the default because there seems to be
                     # some non-negligible numerical error that accumulates due to the
-                    # different order of operations. Maybe we should look into this
+                    # different order of operations.
+                    assert torch.isfinite(g).all()
+                    assert torch.isfinite(collected_grad.squeeze(0)).all()
+
                     torch.testing.assert_close(
                         g, collected_grad.squeeze(0).view_as(g), atol=1e-4, rtol=1e-4
                     )

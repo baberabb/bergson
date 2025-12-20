@@ -30,7 +30,7 @@ def test_large_gradients_query(tmp_path: Path, dataset):
     )
     grad_sizes = {name: math.prod(s) for name, s in collector.shapes().items()}
 
-    dataset.save_to_disk(tmp_path / "query_ds" / "data.hf")
+    dataset.save_to_disk(str(tmp_path / "query_ds" / "data.hf"))
     create_index(
         tmp_path / "query_ds",
         num_grads=len(dataset),

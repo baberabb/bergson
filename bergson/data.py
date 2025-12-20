@@ -235,7 +235,9 @@ def load_data_string(
         ds = assert_type(Dataset, Dataset.from_json(data_str))
     else:
         try:
-            ds = load_dataset(data_str, subset, split=split, streaming=streaming)
+            ds = load_dataset(
+                data_str, subset, split=split, streaming=streaming  # type: ignore
+            )
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
                 raise NotImplementedError(
@@ -279,11 +281,10 @@ def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
 
     def load_shard(dir: Path) -> Dataset:
-        ds = Dataset.load_from_disk(dir / "data.hf")
+        ds = Dataset.load_from_disk(str(dir / "data.hf"))
 
         # Add gradients to HF dataset.
         mmap = load_gradients(dir, structured=structured)
-        assert mmap.dtype.names is not None, "Expected structured gradients."
         if structured:
             for field_name in mmap.dtype.names:
                 flat = pa.array(mmap[field_name].reshape(-1).copy())
@@ -292,7 +293,6 @@ def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
         else:
             flat = pa.array(mmap.reshape(-1).copy())
             col_arrow = pa.FixedSizeListArray.from_arrays(flat, mmap.shape[1])
-
             ds = ds.add_column("gradients", col_arrow, new_fingerprint="gradients")
 
         return ds
