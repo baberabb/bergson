@@ -3,7 +3,7 @@ import math
 import os
 import random
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence, cast, overload
 
 import numpy as np
 import pyarrow as pa
@@ -304,6 +304,36 @@ def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
     return concatenate_datasets(
         [load_shard(path) for path in sorted(root_dir.iterdir()) if path.is_dir()]
     ).flatten_indices()
+
+
+class Scores(np.memmap):
+    @overload
+    def __getitem__(self, key: str) -> np.ndarray[Any, Any]: ...
+
+    @overload
+    def __getitem__(self, key: int | slice) -> Any: ...
+
+    def __getitem__(self, key: Any) -> Any:  # type: ignore
+        return super().__getitem__(key)
+
+
+def load_scores(
+    path: Path,
+) -> Scores:
+    bin_path = path / "scores.bin"
+    info_path = path / "info.json"
+
+    with open(info_path, "r") as f:
+        info = json.load(f)
+
+    mmap = np.memmap(
+        bin_path,
+        dtype=info["dtype"],
+        mode="r",
+        shape=(info["num_items"],),
+    )
+
+    return cast(Scores, mmap)
 
 
 class Builder:
