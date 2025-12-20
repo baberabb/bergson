@@ -250,6 +250,7 @@ class GradientCollector(HookCollectorBase):
         if self.rank == 0:
             if self.reduce_cfg is not None:
                 # Create a new dataset with one row for each reduced gradient
+                assert self.builder is not None
                 self.data = Dataset.from_list(
                     [
                         {"query_index": i}
@@ -271,7 +272,7 @@ class GradientCollector(HookCollectorBase):
                     new_fingerprint="loss",
                 )
 
-            self.data.save_to_disk(self.cfg.partial_run_path / "data.hf")
+            self.data.save_to_disk(str(self.cfg.partial_run_path / "data.hf"))
 
             self.processor.save(self.cfg.partial_run_path)
 

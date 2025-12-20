@@ -235,7 +235,9 @@ def load_data_string(
         ds = assert_type(Dataset, Dataset.from_json(data_str))
     else:
         try:
-            ds = load_dataset(data_str, subset, split=split, streaming=streaming)
+            ds = load_dataset(
+                data_str, subset, split=split, streaming=streaming  # type: ignore
+            )
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
                 raise NotImplementedError(
@@ -279,7 +281,7 @@ def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
 
     def load_shard(dir: Path) -> Dataset:
-        ds = Dataset.load_from_disk(dir / "data.hf")
+        ds = Dataset.load_from_disk(str(dir / "data.hf"))
 
         # Add gradients to HF dataset.
         mmap = load_gradients(dir, structured=structured)
