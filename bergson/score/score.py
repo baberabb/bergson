@@ -154,7 +154,8 @@ def precondition_ds(
         h_inv = {}
         for name, H in mixed_preconditioner.items():
             H = H.to(device=device, dtype=torch.float64)
-            H = H + 1e-4 * torch.eye(H.shape[0], device=H.device, dtype=H.dtype)
+            damping_val = 0.1 * H.abs().mean()
+            H = H + damping_val * torch.eye(H.shape[0], device=H.device, dtype=H.dtype)
 
             eigval, eigvec = torch.linalg.eigh(H)
             h_inv[name] = (eigvec * (1.0 / eigval) @ eigvec.mT).to(
