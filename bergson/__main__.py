@@ -12,15 +12,18 @@ from .reduce import reduce
 from .score.score import score_dataset
 
 
-def validate_run_path(run_path: Path):
+def validate_run_path(index_cfg: IndexConfig):
     """Validate the run path."""
-    if run_path.exists():
-        print(f"Run path {run_path} already exists.")
-        response = input("Do you want to overwrite the existing run path? (y/n): ")
-        if response.lower() != "y":
-            exit()
+    for path in [Path(index_cfg.run_path), Path(index_cfg.partial_run_path)]:
+        if not path.exists():
+            continue
+
+        if index_cfg.overwrite:
+            shutil.rmtree(path)
         else:
-            shutil.rmtree(run_path)
+            raise FileExistsError(
+                f"Run path {path} already exists. Use --overwrite to overwrite it."
+            )
 
 
 @dataclass
@@ -34,10 +37,7 @@ class Build:
         if self.index_cfg.skip_index and self.index_cfg.skip_preconditioners:
             raise ValueError("Either skip_index or skip_preconditioners must be False")
 
-        run_path = Path(self.index_cfg.run_path)
-        partial_run_path = Path(self.index_cfg.partial_run_path)
-        validate_run_path(run_path)
-        validate_run_path(partial_run_path)
+        validate_run_path(self.index_cfg)
 
         build(self.index_cfg)
 
@@ -58,10 +58,7 @@ class Reduce:
                 "Compressed gradients will be reduced."
             )
 
-        run_path = Path(self.index_cfg.run_path)
-        partial_run_path = Path(self.index_cfg.partial_run_path)
-        validate_run_path(run_path)
-        validate_run_path(partial_run_path)
+        validate_run_path(self.index_cfg)
 
         reduce(self.index_cfg, self.reduce_cfg)
 

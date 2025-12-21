@@ -16,9 +16,6 @@ class DataConfig:
     subset: str | None = None
     """Subset of the dataset to use for building the index."""
 
-    streaming: bool = False
-    """Whether to use streaming mode for the dataset."""
-
     prompt_column: str = "text"
     """Column in the dataset that contains the prompts."""
 
@@ -35,6 +32,10 @@ class DataConfig:
 
     truncation: bool = False
     """Whether to truncate long documents to fit the token budget."""
+
+    data_args: str = ""
+    """Arguments to pass to the dataset constructor in the format
+    arg1=val1,arg2=val2."""
 
 
 @dataclass
@@ -134,6 +135,9 @@ class IndexConfig:
     """If provided, a glob pattern to filter out modules from gradient collection.
     For example, "transformer.h.*.mlp.*" will exclude all MLP layers in a
     standard transformer architecture."""
+
+    overwrite: bool = False
+    """Whether to overwrite any existing index in the run path."""
 
     @property
     def partial_run_path(self) -> Path:

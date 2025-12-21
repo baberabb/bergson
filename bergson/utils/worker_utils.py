@@ -154,7 +154,7 @@ def estimate_advantage(ds: Dataset, cfg: DataConfig):
 def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
     """Handle data loading and preprocessing"""
     ds = load_data_string(
-        cfg.data.dataset, cfg.data.split, cfg.data.subset, cfg.data.streaming
+        cfg.data.dataset, cfg.data.split, cfg.data.subset, cfg.data.data_args
     )
 
     # In many cases the token_batch_size may be smaller than the max length allowed by
