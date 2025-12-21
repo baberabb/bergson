@@ -136,6 +136,9 @@ class IndexConfig:
     For example, "transformer.h.*.mlp.*" will exclude all MLP layers in a
     standard transformer architecture."""
 
+    overwrite: bool = False
+    """Whether to overwrite any existing index in the run path."""
+
     @property
     def partial_run_path(self) -> Path:
         """Temporary path to use while writing build artifacts."""
