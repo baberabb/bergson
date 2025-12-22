@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.4.2 (2025-12-22)
+
+### Bug Fixes
+
+- Unit normalize in float32
+  ([`cae8352`](https://github.com/EleutherAI/bergson/commit/cae8352c783cd68516ccab18a6746ba974455043))
+
+
 ## v0.4.1 (2025-12-20)
 
 ### Bug Fixes
