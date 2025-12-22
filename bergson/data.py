@@ -336,7 +336,8 @@ def load_scores(
 
 
 class Builder:
-    """Creates and writes gradients to disk, with optional distributed reduction."""
+    """Creates and writes gradients to disk, with optional distributed reduction.
+    Scores are always saved as float32."""
 
     num_items: int
 
@@ -355,12 +356,13 @@ class Builder:
         self.grad_sizes = grad_sizes
         self.num_items = len(data)
         self.reduce_cfg = reduce_cfg
+        self.eps = torch.finfo(torch.float32).eps
 
         if reduce_cfg is not None:
             num_grads = 1
             self.in_memory_grad_buffer = torch.zeros(
                 (num_grads, sum(self.grad_sizes.values())),
-                dtype=torch.float32,  # TODO: Is this supposed to be hardcoded?
+                dtype=torch.float32,
             )
             np_dtype = np.float32
         else:
@@ -390,13 +392,14 @@ class Builder:
 
         offset = 0
         for module_name in self.grad_sizes.keys():
-            mod_grads[module_name] /= norms.unsqueeze(1)
+            grads = mod_grads[module_name]
+            if self.reduce_cfg.unit_normalize:
+                grads = grads / (norms.unsqueeze(1) + self.eps)
 
-            grads = mod_grads[module_name].sum(dim=0).to(torch.float32)
-            self.in_memory_grad_buffer[
-                0, offset : offset + mod_grads[module_name].shape[1]
-            ] += grads
-            offset += mod_grads[module_name].shape[1]
+            grads = grads.sum(dim=0).to(torch.float32)
+
+            self.in_memory_grad_buffer[0, offset : offset + grads.shape[0]] += grads
+            offset += grads.shape[0]
 
     def __call__(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
         torch.cuda.synchronize()
@@ -431,10 +434,12 @@ class Builder:
         if self.reduce_cfg.method == "mean":
             self.in_memory_grad_buffer /= self.num_items
 
+        self.in_memory_grad_buffer = self.in_memory_grad_buffer.cpu()
+
         rank = dist.get_rank() if dist.is_initialized() else 0
         if rank == 0:
-            self.grad_buffer[:] = (
-                self.in_memory_grad_buffer.cpu().numpy().astype(self.grad_buffer.dtype)
+            self.grad_buffer[:] = self.in_memory_grad_buffer.numpy().astype(
+                self.grad_buffer.dtype
             )
 
 
