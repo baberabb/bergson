@@ -51,8 +51,8 @@ def create_normalizers(
         return fit_normalizers(
             model,
             stats_ds,
+            cfg,
             batches=allocate_batches(stats_ds["length"][:], cfg.token_batch_size),
-            kind=cfg.normalizer,
             target_modules=target_modules,
         )
 
