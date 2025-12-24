@@ -1,20 +1,13 @@
 import json
-import random
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal, Mapping
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
-from datasets import Dataset
 from torch import Tensor
-from tqdm.auto import tqdm
-from transformers import PreTrainedModel
 from transformers.pytorch_utils import Conv1D as HFConv1D
-
-from .data import pad_and_tensor
 
 NORMALIZER_TYPES: dict[str, type["Normalizer"]] = {}
 
@@ -222,6 +215,7 @@ class LayerAdapter:
                 return "out_channels"
             case _:
                 raise ValueError(f"Unsupported layer type: {type(layer)}")
+
 
 @dataclass
 class AdafactorNormalizer(Normalizer):

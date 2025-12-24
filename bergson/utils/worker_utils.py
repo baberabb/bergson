@@ -18,10 +18,10 @@ from transformers import (
 )
 
 from bergson.config import DataConfig, IndexConfig
-from bergson.data import load_data_string, tokenize, allocate_batches
+from bergson.data import allocate_batches, load_data_string, tokenize
 from bergson.gradients import GradientProcessor, Normalizer
-from bergson.utils.utils import assert_type, get_layer_list
 from bergson.normalizer.fit_normalizers import fit_normalizers
+from bergson.utils.utils import assert_type, get_layer_list
 
 
 def create_normalizers(

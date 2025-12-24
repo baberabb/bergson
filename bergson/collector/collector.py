@@ -479,7 +479,8 @@ class CollectorComputer:
         step = 0
         with prof:
             for indices in tqdm(
-                self.batches, desc=f"Computing {desc}",
+                self.batches,
+                desc=f"Computing {desc}",
             ):
                 batch = self.data[indices]
 
