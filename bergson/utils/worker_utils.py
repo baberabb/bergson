@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 from datasets import (
@@ -171,6 +172,18 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
     )
     if cfg.data.reward_column:
         assert isinstance(ds, Dataset), "Dataset required for advantage estimation"
+
+        rewards = np.array(ds[cfg.data.reward_column], dtype=np.float64)
+        nan_mask = np.isnan(rewards)
+        if nan_mask.any():
+            if cfg.data.skip_nan_rewards:
+                print(f"Warning: Filtering out {nan_mask.sum()} rows with NaN rewards")
+                ds = ds.filter(lambda _, idx: not nan_mask[idx], with_indices=True)
+            else:
+                raise ValueError(
+                    f"Reward column '{cfg.data.reward_column}' contains NaN values"
+                )
+
         ds = ds.add_column(
             "advantage",
             estimate_advantage(ds, cfg.data),
