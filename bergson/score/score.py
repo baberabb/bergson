@@ -14,7 +14,7 @@ from transformers import PreTrainedModel
 
 from bergson.collection import collect_gradients
 from bergson.config import IndexConfig, ScoreConfig
-from bergson.data import allocate_batches, load_gradient_dataset, load_gradients
+from bergson.data import allocate_batches, load_gradients
 from bergson.distributed import launch_distributed_run
 from bergson.gradients import GradientProcessor
 from bergson.score.scorer import Scorer
@@ -196,7 +196,7 @@ def get_query_ds(score_cfg: ScoreConfig):
         score_cfg.modules = target_modules
 
     try:
-        query_ds = load_gradient_dataset(Path(score_cfg.query_path), structured=True)
+        mmap = load_gradients(Path(score_cfg.query_path), structured=False)
     except ValueError as e:
         if "integer won't fit into a C int" not in str(e):
             raise e
@@ -208,21 +208,21 @@ def get_query_ds(score_cfg: ScoreConfig):
 
         mmap = load_gradients(Path(score_cfg.query_path), structured=False)
 
-        # Convert unstructured gradients to a dictionary of module-wise tensors
-        with open(query_path / "info.json", "r") as f:
-            metadata = json.load(f)
-            grad_sizes = metadata["grad_sizes"]
+    # Convert unstructured gradients to a dictionary of module-wise tensors
+    with open(query_path / "info.json", "r") as f:
+        metadata = json.load(f)
+        grad_sizes = metadata["grad_sizes"]
 
-        sizes = torch.tensor(list(grad_sizes.values()))
-        module_offsets = torch.tensor([0] + torch.cumsum(sizes, dim=0).tolist())
+    sizes = torch.tensor(list(grad_sizes.values()))
+    module_offsets = torch.tensor([0] + torch.cumsum(sizes, dim=0).tolist())
 
-        query_ds = Dataset.from_dict(
-            {
-                name: mmap[:, module_offsets[i] : module_offsets[i + 1]].copy()
-                for i, name in enumerate(grad_sizes.keys())
-                if name in target_modules
-            }
-        )
+    query_ds = Dataset.from_dict(
+        {
+            name: mmap[:, module_offsets[i] : module_offsets[i + 1]].copy()
+            for i, name in enumerate(grad_sizes.keys())
+            if name in target_modules
+        }
+    )
 
     return query_ds.with_format("torch", columns=target_modules)
 
