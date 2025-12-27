@@ -33,6 +33,7 @@ dev = [
     "sphinx-autodoc-typehints",
     "sphinx-rtd-theme",
     "nbsphinx",
+    "torch-tb-profiler>=0.4.3",
 ]
 example = [
     "trl",
