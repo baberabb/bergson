@@ -121,7 +121,12 @@ class MemmapScoreWriter(ScoreWriter):
         # scores: [num_indices, num_scores]
         for i in range(self.num_scores):
             self.scores[f"score_{i}"][indices] = (
-                scores[:, i].cpu().numpy().astype(np.float32).flatten()
+                scores[:, i]
+                .to(dtype=torch.float32)
+                .cpu()
+                .numpy()
+                .astype(np.float32)
+                .flatten()
             )
             self.scores[f"written_{i}"][indices] = True
 
