@@ -383,9 +383,7 @@ class Builder:
     def reduce(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
         assert self.reduce_cfg is not None and self.in_memory_grad_buffer is not None
         device = next(iter(mod_grads.values())).device
-        import debugpy
 
-        debugpy.breakpoint()
         if self.reduce_cfg.unit_normalize:
             ssqs = torch.zeros(len(indices), device=device)
             for mod_grad in mod_grads.values():
