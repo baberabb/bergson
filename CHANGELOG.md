@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.4.4 (2026-01-05)
+
+### Bug Fixes
+
+- Release bergson
+  ([`c9040a6`](https://github.com/EleutherAI/bergson/commit/c9040a6dc12bea49b8f3e4bf8efbe82c92022bca))
+
+
 ## v0.4.3 (2026-01-05)
 
 ### Bug Fixes
