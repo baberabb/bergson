@@ -23,7 +23,10 @@ def test_GPTNeoX():
     model = AutoModelForCausalLM.from_config(config)
 
     tokens = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], device=model.device)
-    inputs = dict(input_ids=tokens, labels=tokens)
+    inputs = dict(
+        input_ids=tokens,
+        labels=tokens,
+    )
     data = Dataset.from_dict({"input_ids": tokens.tolist()})
 
     # Test with 16 x 16 random projection as well as with no projection

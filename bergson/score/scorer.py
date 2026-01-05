@@ -49,7 +49,7 @@ class Scorer:
     ):
         first_grad = next(iter(mod_grads.values()))
         if first_grad.dtype != self.dtype:
-            mod_grads = {name: grad.to(self.device) for name, grad in mod_grads.items()}
+            mod_grads = {name: grad.to(self.dtype) for name, grad in mod_grads.items()}
 
         scores = self.scorer_callback(mod_grads)
         self.writer(indices, scores)

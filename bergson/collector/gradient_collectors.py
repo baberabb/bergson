@@ -200,7 +200,7 @@ class GradientCollector(HookCollectorBase):
             else:
                 self.processor.preconditioners[name] = P.mT @ P
 
-        if self.save_index:
+        if self.save_index and self.reduce_cfg is None:
             # Asynchronously move the gradient to CPU and convert to the final dtype
             self.mod_grads[name] = P.to(
                 device="cpu", dtype=self.save_dtype, non_blocking=True

@@ -357,12 +357,13 @@ class Builder:
         self.num_items = len(data)
         self.reduce_cfg = reduce_cfg
         self.eps = torch.finfo(torch.float32).eps
-
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
         if reduce_cfg is not None:
             num_grads = 1
             self.in_memory_grad_buffer = torch.zeros(
                 (num_grads, sum(self.grad_sizes.values())),
                 dtype=torch.float32,
+                device=f"cuda:{self.rank}",
             )
             np_dtype = np.float32
         else:
@@ -381,14 +382,15 @@ class Builder:
 
     def reduce(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
         assert self.reduce_cfg is not None and self.in_memory_grad_buffer is not None
+        device = next(iter(mod_grads.values())).device
 
         if self.reduce_cfg.unit_normalize:
-            ssqs = torch.zeros(len(indices))
+            ssqs = torch.zeros(len(indices), device=device)
             for mod_grad in mod_grads.values():
                 ssqs += mod_grad.pow(2).sum(dim=-1)
             norms = ssqs.sqrt()
         else:
-            norms = torch.ones(len(indices))
+            norms = torch.ones(len(indices), device=device)
 
         offset = 0
         for module_name in self.grad_sizes.keys():

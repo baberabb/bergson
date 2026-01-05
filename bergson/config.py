@@ -30,6 +30,9 @@ class DataConfig:
     When specified, gradients are calculated using the policy
     gradient loss from Dr. GRPO. https://arxiv.org/abs/2503.20783"""
 
+    skip_nan_rewards: bool = False
+    """Whether to skip examples with NaN rewards."""
+
     truncation: bool = False
     """Whether to truncate long documents to fit the token budget."""
 
