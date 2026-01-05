@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.4.3 (2026-01-05)
+
+### Bug Fixes
+
+- Release bergson
+  ([`350dafe`](https://github.com/EleutherAI/bergson/commit/350dafe9c419ac3a874848a9d355af52de2407bb))
+
+
 ## v0.4.2 (2025-12-22)
 
 ### Bug Fixes
