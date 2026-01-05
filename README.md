@@ -39,7 +39,7 @@ pip install bergson
 # Quickstart
 
 ```
-bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
+bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation --token_batch_size 8192
 ```
 
 # Usage
