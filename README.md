@@ -39,7 +39,7 @@ pip install bergson
 # Quickstart
 
 ```
-bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation --token_batch_size 8192
+bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation --token_batch_size 4096
 ```
 
 # Usage
@@ -81,7 +81,7 @@ We provide a query Attributor which supports unit normalized gradients and KNN s
 bergson query --index  <index_path> --model <model_name> --unit_norm
 ```
 
-or programmatically with 
+or programmatically with
 
 ```python
 from bergson import Attributor, FaissConfig
