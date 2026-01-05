@@ -195,7 +195,18 @@ def get_query_ds(score_cfg: ScoreConfig):
     if not score_cfg.modules:
         score_cfg.modules = target_modules
 
-    mmap = load_gradients(Path(score_cfg.query_path), structured=False)
+    try:
+        mmap = load_gradients(Path(score_cfg.query_path), structured=False)
+    except ValueError as e:
+        if "integer won't fit into a C int" not in str(e):
+            raise e
+
+        print(
+            "Query gradients are too large to load with structure. "
+            "Attempting to load without structure..."
+        )
+
+        mmap = load_gradients(Path(score_cfg.query_path), structured=False)
 
     # Convert unstructured gradients to a dictionary of module-wise tensors
     with open(query_path / "info.json", "r") as f:
