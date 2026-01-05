@@ -75,7 +75,13 @@ bergson reduce <output_path> --model <model_name> --dataset <dataset_name> --met
 
 ## Index Query
 
-We provide a query Attributor which supports unit normalized gradients and KNN search out of the box.
+We provide a query Attributor which supports unit normalized gradients and KNN search out of the box. Access it via CLI with
+
+```bash
+bergson query --index  <index_path> --model <model_name> --unit_norm
+```
+
+or programmatically with 
 
 ```python
 from bergson import Attributor, FaissConfig
