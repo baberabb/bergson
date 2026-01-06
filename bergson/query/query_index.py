@@ -1,13 +1,17 @@
 import json
 from pathlib import Path
+from dataclasses import asdict
 
 from datasets import Dataset, load_dataset
 from simple_parsing import ArgumentParser, ConflictResolution
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from bergson import Attributor, FaissConfig
-from bergson.config import QueryConfig
+from bergson.config import QueryConfig, IndexConfig
 from bergson.utils.utils import assert_type
+
+from bergson.utils.worker_utils import setup_model_and_peft
+
 
 
 def query(query_cfg: QueryConfig):
@@ -27,10 +31,19 @@ def query(query_cfg: QueryConfig):
     if not query_cfg.model:
         query_cfg.model = index_cfg["model"]
 
-    tokenizer = AutoTokenizer.from_pretrained(query_cfg.model)
-    model = AutoModelForCausalLM.from_pretrained(
-        query_cfg.model, device_map={"": "cuda:0"}
-    )
+    # Support loading a different model than the one the index was built for, e.g.
+    # a different checkpoint.
+    if query_cfg.model:
+        query_index_cfg = IndexConfig(
+            **{k: v for k, v in index_cfg.items() if k != 'model'},
+            model=query_cfg.model,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(query_cfg.model)
+        model, _ = setup_model_and_peft(query_index_cfg, 0)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(index_cfg.model)
+        model, _ = setup_model_and_peft(index_cfg, 0)
+
     dataset = load_dataset(dataset_name, split="train")
     dataset = assert_type(Dataset, dataset)
 
