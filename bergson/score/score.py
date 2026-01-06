@@ -195,18 +195,7 @@ def get_query_ds(score_cfg: ScoreConfig):
     if not score_cfg.modules:
         score_cfg.modules = target_modules
 
-    try:
-        mmap = load_gradients(Path(score_cfg.query_path), structured=False)
-    except ValueError as e:
-        if "integer won't fit into a C int" not in str(e):
-            raise e
-
-        print(
-            "Query gradients are too large to load with structure. "
-            "Attempting to load without structure..."
-        )
-
-        mmap = load_gradients(Path(score_cfg.query_path), structured=False)
+    mmap = load_gradients(Path(score_cfg.query_path), structured=False)
 
     # Convert unstructured gradients to a dictionary of module-wise tensors
     with open(query_path / "info.json", "r") as f:
@@ -295,7 +284,7 @@ def score_worker(
             query_grads,
             score_cfg,
             device=torch.device(f"cuda:{rank}"),
-            dtype=model.dtype if model.dtype != "auto" else torch.float32,
+            dtype=torch.float32 if model.dtype == torch.float32 else torch.float16
         )
 
         collect_gradients(**kwargs)

@@ -80,6 +80,8 @@ class Score:
                 "Warning: projection_dim is not 0. Compressed gradients will be scored."
             )
 
+        validate_run_path(self.index_cfg)
+
         score_dataset(self.index_cfg, self.score_cfg)
 
 
