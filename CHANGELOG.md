@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.4.6 (2026-01-06)
+
+### Bug Fixes
+
+- Update build.yml
+  ([`ba4cd5a`](https://github.com/EleutherAI/bergson/commit/ba4cd5ad49d36595c5ea063037eb832aa3a1a3b4))
+
+
 ## v0.4.5 (2026-01-06)
 
 ### Bug Fixes
