@@ -97,7 +97,7 @@ def test_score(tmp_path: Path, model, dataset):
         module: torch.randn(1, shape.numel()) for module, shape in shapes.items()
     }
 
-    dtype = model.dtype if model.dtype != "auto" else torch.float32
+    grad_dtype = torch.float64 if model.dtype == torch.float64 else torch.float32
 
     scorer = Scorer(
         tmp_path,
@@ -105,7 +105,7 @@ def test_score(tmp_path: Path, model, dataset):
         query_grads,
         score_cfg,
         device=torch.device("cpu"),
-        dtype=dtype,
+        dtype=grad_dtype,
     )
 
     collect_gradients(
