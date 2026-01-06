@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.4.5 (2026-01-06)
+
+### Bug Fixes
+
+- Always use unstructured gradients in score
+  ([`595ed92`](https://github.com/EleutherAI/bergson/commit/595ed92deb06278f343a489f782e318916036eb2))
+
+
 ## v0.4.4 (2026-01-05)
 
 ### Bug Fixes
