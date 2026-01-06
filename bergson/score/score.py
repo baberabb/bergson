@@ -284,7 +284,7 @@ def score_worker(
             query_grads,
             score_cfg,
             device=torch.device(f"cuda:{rank}"),
-            dtype=torch.float32 if model.dtype == torch.float32 else torch.float16
+            dtype=torch.float32 if model.dtype == torch.float32 else torch.float16,
         )
 
         collect_gradients(**kwargs)

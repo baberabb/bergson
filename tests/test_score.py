@@ -97,9 +97,7 @@ def test_score(tmp_path: Path, model, dataset):
         module: torch.randn(1, shape.numel()) for module, shape in shapes.items()
     }
 
-    grad_dtype = (
-        torch.float64 if model.dtype == torch.float64 else torch.float32
-    )
+    grad_dtype = torch.float64 if model.dtype == torch.float64 else torch.float32
 
     scorer = Scorer(
         tmp_path,
