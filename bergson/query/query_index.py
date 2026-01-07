@@ -2,19 +2,18 @@ import json
 from pathlib import Path
 from dataclasses import asdict
 
-from datasets import Dataset, load_dataset
-from simple_parsing import ArgumentParser, ConflictResolution
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from bergson import Attributor, FaissConfig
 from bergson.config import QueryConfig, IndexConfig
-from bergson.utils.utils import assert_type
-
+from bergson.utils.utils import setup_reproducibility
 from bergson.utils.worker_utils import setup_model_and_peft
+from bergson.data import load_data_string
 
 
-
-def query(query_cfg: QueryConfig):
+def query(
+    query_cfg: QueryConfig,
+):
     """
     Run an interactive CLI session that queries a pre-built gradient index.
 
@@ -25,30 +24,33 @@ def query(query_cfg: QueryConfig):
         used to print the retrieved documents.
     """
     with open(Path(query_cfg.index) / "index_config.json", "r") as f:
-        index_cfg = json.load(f)
+        index_cfg = IndexConfig(**json.load(f))
 
-    dataset_name = index_cfg["data"]["dataset"]
-    if not query_cfg.model:
-        query_cfg.model = index_cfg["model"]
+    if index_cfg.debug:
+        setup_reproducibility()
 
-    # Support loading a different model than the one the index was built for, e.g.
+    # Load a different model than the one the index was built for, e.g.
     # a different checkpoint.
     if query_cfg.model:
         query_index_cfg = IndexConfig(
-            **{k: v for k, v in index_cfg.items() if k != 'model'},
+            **{k: v for k, v in asdict(index_cfg).items() if k != 'model'},
             model=query_cfg.model,
         )
         tokenizer = AutoTokenizer.from_pretrained(query_cfg.model)
-        model, _ = setup_model_and_peft(query_index_cfg, 0)
+        model, target_modules = setup_model_and_peft(query_index_cfg, 0, device_map_auto=True)
     else:
         tokenizer = AutoTokenizer.from_pretrained(index_cfg.model)
-        model, _ = setup_model_and_peft(index_cfg, 0)
+        model, target_modules = setup_model_and_peft(index_cfg, 0, device_map_auto=True)
 
-    dataset = load_dataset(dataset_name, split="train")
-    dataset = assert_type(Dataset, dataset)
+    ds = load_data_string(
+        index_cfg.data.dataset, index_cfg.data.split, index_cfg.data.subset, index_cfg.data.data_args
+    )
 
     faiss_cfg = FaissConfig() if query_cfg.faiss else None
     attr = Attributor(Path(query_cfg.index), device="cuda", faiss_cfg=faiss_cfg)
+
+    # Get the device of the first model parameter for multi-GPU setups
+    model_device = next(model.parameters()).device
 
     # Query loop
     while True:
@@ -57,10 +59,10 @@ def query(query_cfg: QueryConfig):
             break
 
         # Tokenize the query
-        inputs = tokenizer(query, return_tensors="pt").to("cuda:0")
+        inputs = tokenizer(query, return_tensors="pt").to(model_device)
         x = inputs["input_ids"]
 
-        with attr.trace(model.base_model, 5) as result:
+        with attr.trace(model.base_model, 5, modules=target_modules) as result:
             model(x, labels=x).loss.backward()
             model.zero_grad()
 
@@ -73,19 +75,8 @@ def query(query_cfg: QueryConfig):
                 print("Found invalid result, skipping")
                 continue
 
-            text = dataset[int(idx.item())][query_cfg.text_field]
+            text = ds[int(idx.item())][query_cfg.text_field]
             print(text[:5000])
 
             print(f"{i + 1}: (distance: {d.item():.4f})")
 
-
-def main():
-    """Parse arguments for `query_index.py` and launch the REPL."""
-    parser = ArgumentParser(conflict_resolution=ConflictResolution.EXPLICIT)
-    parser.add_arguments(QueryConfig, dest="prog")
-    prog: QueryConfig = parser.parse_args().prog
-    query(prog)
-
-
-if __name__ == "__main__":
-    main()

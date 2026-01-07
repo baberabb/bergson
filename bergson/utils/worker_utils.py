@@ -48,6 +48,7 @@ def create_processor(
 def setup_model_and_peft(
     cfg: IndexConfig,
     rank: int,
+    device_map_auto: bool = False,
 ) -> tuple[AutoModelForCausalLM, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
 
@@ -66,7 +67,13 @@ def setup_model_and_peft(
             raise ValueError(f"Unsupported precision: {other}")
 
     # Common configuration
-    device_map = {"": f"cuda:{rank}"} if not cfg.fsdp else "cpu"
+    if device_map_auto:
+        device_map = "auto"
+    elif cfg.fsdp:
+        device_map = "cpu"
+    else:
+        device_map = {"": f"cuda:{rank}"}
+
     quantization_config = None
     if cfg.precision in ("int4", "int8"):
         quantization_config = BitsAndBytesConfig(

@@ -147,6 +147,13 @@ class IndexConfig:
         """Temporary path to use while writing build artifacts."""
         return Path(self.run_path + ".part")
 
+    def __post_init__(self):
+        if isinstance(self.data, dict):
+            self.data = DataConfig(**self.data)
+        
+        if isinstance(self.attention, dict):
+            self.attention = AttentionConfig(**self.attention)
+
 
 @dataclass
 class QueryConfig:
