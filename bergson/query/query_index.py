@@ -33,17 +33,24 @@ def query(
     # a different checkpoint.
     if query_cfg.model:
         query_index_cfg = IndexConfig(
-            **{k: v for k, v in asdict(index_cfg).items() if k != 'model'},
+            **{k: v for k, v in asdict(index_cfg).items() if k != "model"},
             model=query_cfg.model,
         )
         tokenizer = AutoTokenizer.from_pretrained(query_cfg.model)
-        model, target_modules = setup_model_and_peft(query_index_cfg, 0, device_map_auto=True)
+        model, target_modules = setup_model_and_peft(
+            query_index_cfg, 0, device_map_auto=query_cfg.device_map_auto
+        )
     else:
         tokenizer = AutoTokenizer.from_pretrained(index_cfg.model)
-        model, target_modules = setup_model_and_peft(index_cfg, 0, device_map_auto=True)
+        model, target_modules = setup_model_and_peft(
+            index_cfg, 0, device_map_auto=query_cfg.device_map_auto
+        )
 
     ds = load_data_string(
-        index_cfg.data.dataset, index_cfg.data.split, index_cfg.data.subset, index_cfg.data.data_args
+        index_cfg.data.dataset,
+        index_cfg.data.split,
+        index_cfg.data.subset,
+        index_cfg.data.data_args,
     )
 
     faiss_cfg = FaissConfig() if query_cfg.faiss else None
@@ -79,4 +86,3 @@ def query(
             print(text[:5000])
 
             print(f"{i + 1}: (distance: {d.item():.4f})")
-

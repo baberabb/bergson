@@ -169,8 +169,11 @@ class QueryConfig:
     text_field: str = "text"
     """Field to use for the query."""
 
-    unit_norm: bool = False
+    unit_norm: bool = True
     """Whether to unit normalize the query."""
+
+    device_map_auto: bool = False
+    """Load the model onto multiple devices if necessary."""
 
     faiss: bool = False
     """Whether to use FAISS for the query."""
