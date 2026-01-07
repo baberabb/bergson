@@ -150,7 +150,7 @@ class IndexConfig:
     def __post_init__(self):
         if isinstance(self.data, dict):
             self.data = DataConfig(**self.data)
-        
+
         if isinstance(self.attention, dict):
             self.attention = AttentionConfig(**self.attention)
 

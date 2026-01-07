@@ -1,14 +1,14 @@
 import json
-from pathlib import Path
 from dataclasses import asdict
+from pathlib import Path
 
 from transformers import AutoTokenizer
 
 from bergson import Attributor, FaissConfig
-from bergson.config import QueryConfig, IndexConfig
+from bergson.config import IndexConfig, QueryConfig
+from bergson.data import load_data_string
 from bergson.utils.utils import setup_reproducibility
 from bergson.utils.worker_utils import setup_model_and_peft
-from bergson.data import load_data_string
 
 
 def query(
