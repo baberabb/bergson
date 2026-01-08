@@ -133,7 +133,7 @@ def test_score(tmp_path: Path, model, dataset):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_precondition_ds(tmp_path: Path, model, dataset):
-    cfg = IndexConfig(run_path=str(tmp_path))
+    cfg = IndexConfig(run_path=str(tmp_path), token_batch_size=1024)
 
     preprocess_device = torch.device("cuda:0")
 
