@@ -89,7 +89,7 @@ class IndexConfig:
     projection_type: Literal["normal", "rademacher"] = "rademacher"
     """Type of random projections to use for the gradients."""
 
-    token_batch_size: int = 8192
+    token_batch_size: int = 2048
     """Batch size in tokens for building the index."""
 
     processor_path: str = ""
