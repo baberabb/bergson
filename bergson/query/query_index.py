@@ -69,12 +69,15 @@ def query(
         inputs = tokenizer(query, return_tensors="pt").to(model_device)
         x = inputs["input_ids"]
 
-        with attr.trace(model.base_model, 5, modules=target_modules) as result:
+        with attr.trace(
+            model.base_model, 5, modules=target_modules, reverse=query_cfg.reverse
+        ) as result:
             model(x, labels=x).loss.backward()
             model.zero_grad()
 
         # Print the results
-        print(f"Top 5 results for '{query}':")
+        mode = "Bottom" if query_cfg.reverse else "Top"
+        print(f"{mode} 5 results for '{query}':")
         for i, (d, idx) in enumerate(
             zip(result.scores.squeeze(), result.indices.squeeze())
         ):

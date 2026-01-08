@@ -9,7 +9,12 @@ from datasets import (
 )
 from peft import PeftConfig, PeftModel, get_peft_model_state_dict
 from torch.distributed.fsdp import fully_shard
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    PreTrainedModel,
+)
 
 from bergson.config import DataConfig, IndexConfig
 from bergson.data import load_data_string, tokenize
@@ -49,7 +54,7 @@ def setup_model_and_peft(
     cfg: IndexConfig,
     rank: int,
     device_map_auto: bool = False,
-) -> tuple[AutoModelForCausalLM, set | None]:
+) -> tuple[PreTrainedModel, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
 
     match cfg.precision:

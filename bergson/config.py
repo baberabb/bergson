@@ -178,6 +178,10 @@ class QueryConfig:
     faiss: bool = False
     """Whether to use FAISS for the query."""
 
+    reverse: bool = False
+    """Whether to return results in reverse order
+    (lowest influences instead of highest)."""
+
 
 @dataclass
 class ScoreConfig:

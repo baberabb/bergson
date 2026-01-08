@@ -98,6 +98,7 @@ class Attributor:
         queries: dict[str, Tensor],
         k: int | None,
         modules: set[str] | None = None,
+        reverse: bool = False,
     ):
         """
         Search for the `k` nearest examples in the index based on the query or queries.
@@ -107,6 +108,7 @@ class Attributor:
             k: The number of nearest examples to return for each query.
             module: The name of the module to search for. If `None`,
                 all modules will be searched.
+            reverse: If True, return the lowest influence examples instead of highest.
 
         Returns:
             A namedtuple containing the top `k` indices and inner products for each
@@ -135,7 +137,7 @@ class Attributor:
                 .numpy()
             )
 
-            distances, indices = self.faiss_index.search(q, k)
+            distances, indices = self.faiss_index.search(q, k, reverse=reverse)
 
             return torch.from_numpy(distances), torch.from_numpy(indices)
 
@@ -150,7 +152,7 @@ class Attributor:
             [q[name] @ self.grads[name].mT for name in modules], dim=-1
         ).sum(-1)
 
-        return torch.topk(scores, k)  # type: ignore
+        return torch.topk(scores, k, largest=not reverse)  # type: ignore
 
     @contextmanager
     def trace(
@@ -160,10 +162,18 @@ class Attributor:
         *,
         precondition: bool = False,
         modules: set[str] | None = None,
+        reverse: bool = False,
     ) -> Generator[TraceResult, None, None]:
         """
         Context manager to trace the gradients of a module and return the
         corresponding Attributor instance.
+
+        Args:
+            module: The module to trace.
+            k: The number of nearest examples to return.
+            precondition: Whether to apply preconditioning.
+            modules: The modules to trace. If None, all modules will be traced.
+            reverse: If True, return the lowest influence examples instead of highest.
         """
 
         result = TraceResult()
@@ -192,4 +202,4 @@ class Attributor:
         if any(q.isnan().any() for q in queries.values()):
             raise ValueError("NaN found in queries.")
 
-        result._scores, result._indices = self.search(queries, k, modules)
+        result._scores, result._indices = self.search(queries, k, modules, reverse)

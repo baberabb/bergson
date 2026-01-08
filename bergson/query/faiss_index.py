@@ -326,22 +326,34 @@ class FaissIndex:
 
         print(f"Built index in {(perf_counter() - start) / 60:.2f} minutes.")
 
-    def search(self, q: NDArray, k: int | None) -> tuple[NDArray, NDArray]:
+    def search(
+        self, q: NDArray, k: int | None, reverse: bool = False
+    ) -> tuple[NDArray, NDArray]:
         """
         Perform a nearest neighbor search on the index.
 
         If fewer than `k` items are found, invalid items will be returned
         with index -1 and a maximum-valued negative distance. If `k` is
-        `None`, all available items are returned."""
+        `None`, all available items are returned.
+
+        Args:
+            q: Query vectors of shape [num_queries, dim].
+            k: Number of results to return per query.
+            reverse: If True, return lowest influence examples instead of highest.
+        """
         shard_distances = []
         shard_indices = []
         offset = 0
+
+        # For reverse mode with FAISS, we need to fetch all results and then
+        # select the lowest scores
+        fetch_k = self.ntotal if reverse else k
 
         for shard in self.shards:
             if hasattr(shard, "nprobe"):
                 shard.nprobe = self.faiss_cfg.nprobe  # type: ignore
 
-            distances, indices = shard.search(q, k or shard.ntotal)
+            distances, indices = shard.search(q, fetch_k or shard.ntotal)
 
             indices += offset
             offset += shard.ntotal
@@ -352,9 +364,14 @@ class FaissIndex:
         distances = np.concatenate(shard_distances, axis=1)
         indices = np.concatenate(shard_indices, axis=1)
 
-        # Rerank results overfetched from multiple shards
-        if len(self.shards) > 1:
-            topk_indices = np.argsort(distances, axis=1)[:, : k or self.ntotal]
+        # Rerank results overfetched from multiple shards or for reverse mode
+        if len(self.shards) > 1 or reverse:
+            if reverse:
+                # For reverse mode, sort ascending (lowest first) and take first k
+                topk_indices = np.argsort(distances, axis=1)[:, : k or self.ntotal]
+            else:
+                # For normal mode, sort descending (highest first) and take first k
+                topk_indices = np.argsort(-distances, axis=1)[:, : k or self.ntotal]
             indices = indices[np.arange(indices.shape[0])[:, None], topk_indices]
             distances = distances[np.arange(distances.shape[0])[:, None], topk_indices]
 
