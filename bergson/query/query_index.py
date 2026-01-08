@@ -85,7 +85,9 @@ def query(
                 print("Found invalid result, skipping")
                 continue
 
-            text = ds[int(idx.item())][query_cfg.text_field]
-            print(text[:5000])
+            text = str(ds[int(idx.item())][query_cfg.text_field])  # type: ignore[arg-type]
+            print(text[:2000])
+            if len(text) > 2000:
+                print(". . .")
 
             print(f"{i + 1}: (distance: {d.item():.4f})")

@@ -281,7 +281,7 @@ class FaissIndex:
         ordered_modules = []
         for i, grads in enumerate(tqdm(dl, desc="Loading gradients")):
             if i == 0:
-                ordered_modules = list(grads.dtype.names)
+                ordered_modules = list(grads.dtype.names or [])
 
             grads = structured_to_unstructured(grads)
 

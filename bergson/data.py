@@ -284,7 +284,9 @@ def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
 
         # Add gradients to HF dataset.
         mmap = load_gradients(dir, structured=structured)
+
         if structured:
+            assert mmap.dtype.names is not None
             for field_name in mmap.dtype.names:
                 flat = pa.array(mmap[field_name].reshape(-1).copy())
                 col = pa.FixedSizeListArray.from_arrays(flat, mmap[field_name].shape[1])
