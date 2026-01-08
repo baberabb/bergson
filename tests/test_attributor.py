@@ -10,7 +10,7 @@ from bergson.config import IndexConfig
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_attributor(tmp_path: Path, model, dataset):
-    cfg = IndexConfig(run_path=str(tmp_path))
+    cfg = IndexConfig(run_path=str(tmp_path), token_batch_size=1024)
     cfg.skip_preconditioners = True
 
     collect_gradients(
@@ -39,7 +39,7 @@ def test_faiss(tmp_path: Path, model, dataset):
     model.to("cuda")
     dtype = torch.float32 if model.dtype == torch.float32 else torch.float16
 
-    cfg = IndexConfig(run_path=str(tmp_path))
+    cfg = IndexConfig(run_path=str(tmp_path), token_batch_size=1024)
 
     collect_gradients(
         model=model,
@@ -70,7 +70,7 @@ def test_faiss(tmp_path: Path, model, dataset):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_attributor_reverse(tmp_path: Path, model, dataset):
     """Test that reverse mode returns lowest influence examples."""
-    cfg = IndexConfig(run_path=str(tmp_path))
+    cfg = IndexConfig(run_path=str(tmp_path), token_batch_size=1024)
     cfg.skip_preconditioners = True
 
     collect_gradients(
@@ -110,7 +110,7 @@ def test_faiss_reverse(tmp_path: Path, model, dataset):
     model.to("cuda")
     dtype = torch.float32 if model.dtype == torch.float32 else torch.float16
 
-    cfg = IndexConfig(run_path=str(tmp_path))
+    cfg = IndexConfig(run_path=str(tmp_path), token_batch_size=1024)
 
     collect_gradients(
         model=model,
