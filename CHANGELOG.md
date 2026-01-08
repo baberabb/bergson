@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.5.0 (2026-01-08)
+
+### Features
+
+- Add optimizer-aware gradients
+  ([`497edab`](https://github.com/EleutherAI/bergson/commit/497edab8f2ca19d8fcb1d409fbd99452a929584e))
+
+
 ## v0.4.6 (2026-01-06)
 
 ### Bug Fixes
