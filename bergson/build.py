@@ -56,7 +56,7 @@ def build_worker(
         )
 
     model, target_modules = setup_model_and_peft(cfg, rank)
-    processor = create_processor(cfg, rank)
+    processor = create_processor(model, ds, cfg, rank, target_modules)
 
     attention_cfgs = {module: cfg.attention for module in cfg.split_attention_modules}
 

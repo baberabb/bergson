@@ -59,108 +59,6 @@ class Normalizer(ABC):
 
 
 @dataclass
-class AdafactorNormalizer(Normalizer):
-    """
-    Row and column sums of second moments of gradients for a matrix-valued parameter.
-    """
-
-    row: Tensor  # shape [O]
-    col: Tensor  # shape [I]
-
-    def __post_init__(self):
-        assert self.row.ndim == 1, f"Expected 1D tensor for row, got {self.row.ndim}D"
-        assert self.col.ndim == 1, f"Expected 1D tensor for col, got {self.col.ndim}D"
-
-    @torch.compile
-    def normalize_(
-        self,
-        grad: Tensor,
-        eps: float = 1e-30,
-    ) -> Tensor:
-        """
-        Normalize the row and column sums by adding a small epsilon.
-
-        Note: Our `eps` corresponds to epsilon_1 in the original Adafactor paper. They
-        recommend 1e-30, but we use 1e-16 for extra numerical stability.
-        """
-        # We follow the Adafactor implementation in the tensor2tensor repo, which is
-        # different from the paper and from the PyTorch implementation. First add eps
-        # to ensure these second moments are sufficiently far from zero. Then we don't
-        # need to worry about numerical stability anywhere else, and we don't need to
-        # materialize the outer product at any point.
-        r, c = self.row.add(eps), self.col.add(eps)
-
-        # This is the denominator for V, the rank-one matrix of second moment estimates:
-        # V = torch.outer(r, c) / denom
-        # V_ij = r_i * c_j / denom
-        # But we want to (implicitly) take the Hadamard product with the elementwise
-        # reciprocal square root of V:
-        # (V_ij)^{-1/2} = denom.sqrt() * r_i.rsqrt() * c_j.rsqrt()
-        denom = r.mean()
-
-        # Hadamard product with a rank-one matrix ab^T is the same as left-multiplying
-        # by diag(a) and right-multiplying by diag(b). In this case we can represent
-        # the elementwise reciprocal square root of V as ab^T where:
-        # a = denom.sqrt() * r.rsqrt() and b = c.rsqrt()
-        a = denom.sqrt() * r.rsqrt_()  # shape [O]
-        b = c.rsqrt_()
-
-        # Implicitly do the Hadamard product
-        grad *= a[:, None]  # [N, O] * [O] → [N, O]
-        grad *= b[None, :]
-        return grad
-
-    def to_adam(self) -> "AdamNormalizer":
-        """
-        Convert this Adafactor normalizer to an Adam normalizer by materializing the
-        rank-one second moment matrix.
-        """
-        # Compute the second moment matrix as a square matrix of shape [O, I]
-        # NOTE: We don't add the epsilon here, since the AdamNormalizer is going to
-        # add it outside the square root. This could cause infs though if there are
-        # any exactly zero rows or columns, so we should be careful.
-        avg_sq = torch.outer(self.row, self.col) / self.row.mean()
-        return AdamNormalizer(avg_sq=avg_sq)
-
-
-@dataclass
-class AdamNormalizer(Normalizer):
-    """
-    Contains the second moments of the gradients.
-    """
-
-    avg_sq: Tensor
-
-    @torch.compile
-    def normalize_(
-        self,
-        grad: Tensor,
-        eps: float = 1e-8,
-    ) -> Tensor:
-        """Normalize the gradients by the square root of the second moments."""
-        # Adam-style epsilon is added outside the square root
-        denom = self.avg_sq.sqrt()
-        return grad.div_(denom.add_(eps))
-
-    def to_adafactor(self) -> AdafactorNormalizer:
-        """
-        Convert this Adam normalizer to an Adafactor normalizer, minimizing the
-        I-divergence (generalized Kullback-Leibler divergence) between the original
-        and the factored second moments.
-        """
-        # We assume avg_sq is a square matrix of shape [O, I]
-        assert (
-            self.avg_sq.ndim == 2
-        ), f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
-
-        # Compute row and column means
-        return AdafactorNormalizer(
-            row=self.avg_sq.mean(dim=1),  # shape [O]
-            col=self.avg_sq.mean(dim=0),  # shape [I]
-        )
-
-
-@dataclass
 class GradientProcessor:
     """Configuration for processing and compressing gradients."""
 
@@ -317,3 +215,105 @@ class LayerAdapter:
                 return "out_channels"
             case _:
                 raise ValueError(f"Unsupported layer type: {type(layer)}")
+
+
+@dataclass
+class AdafactorNormalizer(Normalizer):
+    """
+    Row and column sums of second moments of gradients for a matrix-valued parameter.
+    """
+
+    row: Tensor  # shape [O]
+    col: Tensor  # shape [I]
+
+    def __post_init__(self):
+        assert self.row.ndim == 1, f"Expected 1D tensor for row, got {self.row.ndim}D"
+        assert self.col.ndim == 1, f"Expected 1D tensor for col, got {self.col.ndim}D"
+
+    @torch.compile
+    def normalize_(
+        self,
+        grad: Tensor,
+        eps: float = 1e-30,
+    ) -> Tensor:
+        """
+        Normalize the row and column sums by adding a small epsilon.
+
+        Note: Our `eps` corresponds to epsilon_1 in the original Adafactor paper. They
+        recommend 1e-30, but we use 1e-16 for extra numerical stability.
+        """
+        # We follow the Adafactor implementation in the tensor2tensor repo, which is
+        # different from the paper and from the PyTorch implementation. First add eps
+        # to ensure these second moments are sufficiently far from zero. Then we don't
+        # need to worry about numerical stability anywhere else, and we don't need to
+        # materialize the outer product at any point.
+        r, c = self.row.add(eps), self.col.add(eps)
+
+        # This is the denominator for V, the rank-one matrix of second moment estimates:
+        # V = torch.outer(r, c) / denom
+        # V_ij = r_i * c_j / denom
+        # But we want to (implicitly) take the Hadamard product with the elementwise
+        # reciprocal square root of V:
+        # (V_ij)^{-1/2} = denom.sqrt() * r_i.rsqrt() * c_j.rsqrt()
+        denom = r.mean()
+
+        # Hadamard product with a rank-one matrix ab^T is the same as left-multiplying
+        # by diag(a) and right-multiplying by diag(b). In this case we can represent
+        # the elementwise reciprocal square root of V as ab^T where:
+        # a = denom.sqrt() * r.rsqrt() and b = c.rsqrt()
+        a = denom.sqrt() * r.rsqrt_()  # shape [O]
+        b = c.rsqrt_()
+
+        # Implicitly do the Hadamard product
+        grad *= a[:, None]  # [N, O] * [O] → [N, O]
+        grad *= b[None, :]
+        return grad
+
+    def to_adam(self) -> "AdamNormalizer":
+        """
+        Convert this Adafactor normalizer to an Adam normalizer by materializing the
+        rank-one second moment matrix.
+        """
+        # Compute the second moment matrix as a square matrix of shape [O, I]
+        # NOTE: We don't add the epsilon here, since the AdamNormalizer is going to
+        # add it outside the square root. This could cause infs though if there are
+        # any exactly zero rows or columns, so we should be careful.
+        avg_sq = torch.outer(self.row, self.col) / self.row.mean()
+        return AdamNormalizer(avg_sq=avg_sq)
+
+
+@dataclass
+class AdamNormalizer(Normalizer):
+    """
+    Contains the second moments of the gradients.
+    """
+
+    avg_sq: Tensor
+
+    @torch.compile
+    def normalize_(
+        self,
+        grad: Tensor,
+        eps: float = 1e-8,
+    ) -> Tensor:
+        """Normalize the gradients by the square root of the second moments."""
+        # Adam-style epsilon is added outside the square root
+        denom = self.avg_sq.sqrt()
+        return grad.div_(denom.add_(eps))
+
+    def to_adafactor(self) -> AdafactorNormalizer:
+        """
+        Convert this Adam normalizer to an Adafactor normalizer, minimizing the
+        I-divergence (generalized Kullback-Leibler divergence) between the original
+        and the factored second moments.
+        """
+        # We assume avg_sq is a square matrix of shape [O, I]
+        assert (
+            self.avg_sq.ndim == 2
+        ), f"Expected 2D tensor for avg_sq, got {self.avg_sq.ndim}D"
+
+        # Compute row and column means
+        return AdafactorNormalizer(
+            row=self.avg_sq.mean(dim=1),  # shape [O]
+            col=self.avg_sq.mean(dim=0),  # shape [I]
+        )
