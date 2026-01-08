@@ -9,7 +9,12 @@ from datasets import (
 )
 from peft import PeftConfig, PeftModel, get_peft_model_state_dict
 from torch.distributed.fsdp import fully_shard
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    PreTrainedModel,
+)
 
 from bergson.config import DataConfig, IndexConfig
 from bergson.data import load_data_string, tokenize
@@ -48,7 +53,8 @@ def create_processor(
 def setup_model_and_peft(
     cfg: IndexConfig,
     rank: int,
-) -> tuple[AutoModelForCausalLM, set | None]:
+    device_map_auto: bool = False,
+) -> tuple[PreTrainedModel, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
 
     match cfg.precision:
@@ -66,7 +72,13 @@ def setup_model_and_peft(
             raise ValueError(f"Unsupported precision: {other}")
 
     # Common configuration
-    device_map = {"": f"cuda:{rank}"} if not cfg.fsdp else "cpu"
+    if device_map_auto:
+        device_map = "auto"
+    elif cfg.fsdp:
+        device_map = "cpu"
+    else:
+        device_map = {"": f"cuda:{rank}"}
+
     quantization_config = None
     if cfg.precision in ("int4", "int8"):
         quantization_config = BitsAndBytesConfig(

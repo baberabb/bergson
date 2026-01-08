@@ -14,7 +14,9 @@ dependencies = [
     "datasets",
     "jaxtyping>=0.3.3",
     "natsort",
+    "numpy",
     "peft>=0.17.0",
+    "pyarrow",
     "simple-parsing",
     "torch",
     "transformers<4.56.0" # 4.56.0 increases fp error from operation order

@@ -147,6 +147,13 @@ class IndexConfig:
         """Temporary path to use while writing build artifacts."""
         return Path(self.run_path + ".part")
 
+    def __post_init__(self):
+        if isinstance(self.data, dict):
+            self.data = DataConfig(**self.data)
+
+        if isinstance(self.attention, dict):
+            self.attention = AttentionConfig(**self.attention)
+
 
 @dataclass
 class QueryConfig:
@@ -162,11 +169,18 @@ class QueryConfig:
     text_field: str = "text"
     """Field to use for the query."""
 
-    unit_norm: bool = False
+    unit_norm: bool = True
     """Whether to unit normalize the query."""
+
+    device_map_auto: bool = False
+    """Load the model onto multiple devices if necessary."""
 
     faiss: bool = False
     """Whether to use FAISS for the query."""
+
+    reverse: bool = False
+    """Whether to return results in reverse order
+    (lowest influences instead of highest)."""
 
 
 @dataclass
