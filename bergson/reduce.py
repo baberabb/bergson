@@ -34,6 +34,8 @@ def reduce_worker(
     ----------
     rank : int
         Distributed rank / GPU ID for this worker.
+    local_rank : int
+        Local rank / GPU ID for this worker on the node.
     world_size : int
         Total number of workers participating in the run.
     index_cfg : IndexConfig
@@ -59,8 +61,8 @@ def reduce_worker(
             world_size=world_size,
         )
 
-    model, target_modules = setup_model_and_peft(index_cfg, local_rank)
-    processor = create_processor(model, ds, index_cfg, local_rank, rank, target_modules)
+    model, target_modules = setup_model_and_peft(index_cfg)
+    processor = create_processor(model, ds, index_cfg, target_modules)
 
     attention_cfgs = {
         module: index_cfg.attention for module in index_cfg.split_attention_modules
@@ -131,5 +133,5 @@ def reduce(index_cfg: IndexConfig, reduce_cfg: ReduceConfig):
         "reduce", reduce_worker, [index_cfg, reduce_cfg, ds], index_cfg.distributed
     )
 
-    if index_cfg.distributed.start_rank == 0:
+    if index_cfg.distributed.rank == 0:
         shutil.move(index_cfg.partial_run_path, index_cfg.run_path)

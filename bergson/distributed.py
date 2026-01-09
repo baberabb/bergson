@@ -36,16 +36,14 @@ def launch_distributed_run(
         dist_config = DistributedConfig()
 
     local_world_size = dist_config.nproc_per_node
+    world_size = dist_config.world_size
+    start_rank = dist_config.start_rank
 
     # Multi-node environment
     if dist_config.nnode > 1:
-        world_size = dist_config.world_size
-        start_rank = dist_config.start_rank
         master_addr = os.environ.get("MASTER_ADDR", "localhost")
         master_port = os.environ.get("MASTER_PORT", "29500")
     else:
-        world_size = local_world_size
-        start_rank = 0
         master_addr = "localhost"
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("", 0))

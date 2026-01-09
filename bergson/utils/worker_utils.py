@@ -63,11 +63,12 @@ def create_processor(
     model: PreTrainedModel,
     ds: Dataset | IterableDataset,
     cfg: IndexConfig,
-    local_rank: int,
-    rank: int,
     target_modules: set[str] | None = None,
 ) -> GradientProcessor:
     """Handle processor creation and normalizer fitting"""
+    local_rank = cfg.distributed.local_rank
+    rank = cfg.distributed.rank
+
     processor_path = Path(cfg.processor_path)
     if (processor_path / "processor_config.json").exists():
         if local_rank == 0:
@@ -95,10 +96,10 @@ def create_processor(
 
 def setup_model_and_peft(
     cfg: IndexConfig,
-    local_rank: int,
     device_map_auto: bool = False,
 ) -> tuple[PreTrainedModel, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
+    local_rank = cfg.distributed.local_rank
 
     match cfg.precision:
         case "bf16":

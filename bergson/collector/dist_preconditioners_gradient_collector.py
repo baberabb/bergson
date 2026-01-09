@@ -22,9 +22,12 @@ from bergson.utils.utils import assert_type
 
 
 @dataclass(kw_only=True)
-class MultiNodeGradientCollector(HookCollectorBase):
+class GradientCollectorWithDistributedPreconditioners(HookCollectorBase):
     """
     Collects per-sample gradients from model layers and writes them to disk.
+    Preconditioners are distributed across nodes, and data from each node is
+    distributed to each preconditioner at every step. This enables the computation
+    of preconditioners that are too large to fit on a single device.
 
     - For each forward/backward hook, we compute the the gradient or a low-rank
     approximation via random projections, if cfg.projection_dim is set.

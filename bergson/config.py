@@ -59,10 +59,10 @@ class AttentionConfig:
 
 @dataclass
 class DistributedConfig:
-    """Configuration for multi-node training, modelled after torchrun."""
+    """Configuration for multi-node preconditioner computation."""
 
     nnode: int = 1
-    """The number of nodes to use for training."""
+    """The number of nodes to use for preconditioner computation."""
 
     nproc_per_node: int = field(default_factory=lambda: torch.cuda.device_count())
     """The number of processes per node."""
@@ -80,11 +80,11 @@ class DistributedConfig:
         if self.nnode == 1:
             return 0
 
-        for var in ("SLURM_NODEID", "GROUP_RANK"):
+        for var in ("SLURM_NODEID", "GROUP_RANK", "NODE_RANK"):
             if var in os.environ:
                 return int(os.environ[var])
 
-        raise ValueError("Node rank not found. Set it with --node-rank.")
+        raise ValueError("Node rank not found. Set it with --node_rank.")
 
     @property
     def world_size(self) -> int:
@@ -198,7 +198,7 @@ class IndexConfig:
     """Whether to overwrite any existing index in the run path."""
 
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
-    """Configuration for multi-node distributed training."""
+    """Configuration for multi-node distributed preconditioner computation."""
 
     @property
     def partial_run_path(self) -> Path:

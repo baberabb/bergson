@@ -12,11 +12,13 @@ from tqdm.auto import tqdm
 from bergson.collection import collect_gradients
 from bergson.config import IndexConfig
 from bergson.data import allocate_batches
+from bergson.distributed import launch_distributed_run
 from bergson.utils.utils import assert_type, setup_reproducibility
-from bergson.utils.worker_utils import setup_model_and_peft
-
-from .distributed import launch_distributed_run
-from .utils.worker_utils import create_processor, setup_data_pipeline
+from bergson.utils.worker_utils import (
+    create_processor,
+    setup_data_pipeline,
+    setup_model_and_peft,
+)
 
 
 def build_worker(
@@ -33,6 +35,8 @@ def build_worker(
     ----------
     rank : int
         Distributed rank / GPU ID for this worker.
+    local_rank : int
+        Local rank / GPU ID for this worker on the node.
     world_size : int
         Total number of workers participating in the run.
     cfg : IndexConfig
@@ -56,8 +60,8 @@ def build_worker(
             world_size=world_size,
         )
 
-    model, target_modules = setup_model_and_peft(cfg, local_rank)
-    processor = create_processor(model, ds, cfg, local_rank, rank, target_modules)
+    model, target_modules = setup_model_and_peft(cfg)
+    processor = create_processor(model, ds, cfg, target_modules)
 
     attention_cfgs = {module: cfg.attention for module in cfg.split_attention_modules}
 
@@ -124,6 +128,6 @@ def build(index_cfg: IndexConfig):
         "build", build_worker, [index_cfg, ds], index_cfg.distributed
     )
 
-    rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+    rank = index_cfg.distributed.rank
     if rank == 0:
         shutil.move(index_cfg.partial_run_path, index_cfg.run_path)
