@@ -38,12 +38,12 @@ def query(
         )
         tokenizer = AutoTokenizer.from_pretrained(query_cfg.model)
         model, target_modules = setup_model_and_peft(
-            query_index_cfg, 0, device_map_auto=query_cfg.device_map_auto
+            query_index_cfg, device_map_auto=query_cfg.device_map_auto
         )
     else:
         tokenizer = AutoTokenizer.from_pretrained(index_cfg.model)
         model, target_modules = setup_model_and_peft(
-            index_cfg, 0, device_map_auto=query_cfg.device_map_auto
+            index_cfg, device_map_auto=query_cfg.device_map_auto
         )
 
     ds = load_data_string(

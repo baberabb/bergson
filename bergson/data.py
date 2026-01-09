@@ -28,7 +28,11 @@ def ceildiv(a: int, b: int) -> int:
     return -(-a // b)  # Equivalent to math.ceil(a / b) but faster for integers
 
 
-def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[list[int]]:
+def allocate_batches(
+    doc_lengths: list[int],
+    N: int,
+    seed: int = 42,
+) -> list[list[int]]:
     """
     Allocate documents into batches that are then distributed evenly across
     a fixed number of workers.
@@ -41,7 +45,8 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
     N : int
         Hard memory budget per *batch*, expressed as
         ``max(length in batch) * (# docs in batch) ≤ N``.
-
+    seed : int
+        Random seed for shuffling batches within each worker's allocation.
     Returns
     -------
     list[list[int]]
@@ -445,6 +450,8 @@ class Builder:
             self.grad_buffer[:] = self.in_memory_grad_buffer.numpy().astype(
                 self.grad_buffer.dtype
             )
+
+        self.in_memory_grad_buffer = self.in_memory_grad_buffer.cpu()
 
 
 def pad_and_tensor(

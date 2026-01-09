@@ -14,6 +14,9 @@ from .score.score import score_dataset
 
 def validate_run_path(index_cfg: IndexConfig):
     """Validate the run path."""
+    if index_cfg.distributed.rank != 0:
+        return
+
     for path in [Path(index_cfg.run_path), Path(index_cfg.partial_run_path)]:
         if not path.exists():
             continue

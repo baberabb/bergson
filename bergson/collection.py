@@ -24,8 +24,6 @@ def collect_gradients(
     """
     Compute gradients using the hooks specified in the GradientCollector.
     """
-    if attention_cfgs is None:
-        attention_cfgs = {}
     collector = GradientCollector(
         model=model.base_model,  # type: ignore
         cfg=cfg,

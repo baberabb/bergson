@@ -15,6 +15,9 @@ We view attribution as a counterfactual question: **_If we "unlearned" this trai
 
 # Announcements
 
+**January 2026**
+- [Experimental] Support distributing preconditioners across nodes and devices for VRAM-efficient computation through the GradientCollectorWithDistributedPreconditioners. If you would like this functionality exposed via the CLI please get in touch! https://github.com/EleutherAI/bergson/pull/100
+
 **October 2025**
 - Support bias parameter gradients in linear modules: https://github.com/EleutherAI/bergson/pull/54
 - Support convolution modules: https://github.com/EleutherAI/bergson/pull/50
