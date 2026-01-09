@@ -2,10 +2,11 @@ import os
 import socket
 from typing import Any, Callable
 
-import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.distributed.elastic.multiprocessing import DefaultLogsSpecs, start_processes
+
+from .config import DistributedConfig
 
 
 def dist_worker(
@@ -25,19 +26,25 @@ def dist_worker(
             dist.destroy_process_group()
 
 
-def launch_distributed_run(process_name: str, worker, const_worker_args: list[Any]):
-    local_world_size = torch.cuda.device_count()
+def launch_distributed_run(
+    process_name: str,
+    worker,
+    const_worker_args: list[Any],
+    dist_config: DistributedConfig | None = None,
+):
+    if dist_config is None:
+        dist_config = DistributedConfig()
+
+    local_world_size = dist_config.nproc_per_node
 
     # Multi-node environment
-    if "WORLD_SIZE" in os.environ:
-        world_size = int(os.environ["WORLD_SIZE"])
-        # Starting rank for this node
-        start_rank = int(os.environ["START_RANK"])
-        master_addr = os.environ["MASTER_ADDR"]
+    if dist_config.nnode > 1:
+        world_size = dist_config.world_size
+        start_rank = dist_config.start_rank
+        master_addr = os.environ.get("MASTER_ADDR", "localhost")
         master_port = os.environ.get("MASTER_PORT", "29500")
     else:
         world_size = local_world_size
-        # Starting rank for this node
         start_rank = 0
         master_addr = "localhost"
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

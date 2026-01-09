@@ -127,8 +127,9 @@ def reduce(index_cfg: IndexConfig, reduce_cfg: ReduceConfig):
 
     ds = setup_data_pipeline(index_cfg)
 
-    launch_distributed_run("reduce", reduce_worker, [index_cfg, reduce_cfg, ds])
+    launch_distributed_run(
+        "reduce", reduce_worker, [index_cfg, reduce_cfg, ds], index_cfg.distributed
+    )
 
-    rank = int(os.environ.get("START_RANK", os.environ.get("RANK", 0)))
-    if rank == 0:
+    if index_cfg.distributed.start_rank == 0:
         shutil.move(index_cfg.partial_run_path, index_cfg.run_path)

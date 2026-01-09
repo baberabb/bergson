@@ -366,7 +366,10 @@ def score_dataset(
     )
 
     launch_distributed_run(
-        "score", score_worker, [index_cfg, score_cfg, ds, query_grads]
+        "score",
+        score_worker,
+        [index_cfg, score_cfg, ds, query_grads],
+        index_cfg.distributed,
     )
 
     rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))

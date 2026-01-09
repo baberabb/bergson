@@ -120,7 +120,9 @@ def build(index_cfg: IndexConfig):
 
     ds = setup_data_pipeline(index_cfg)
 
-    launch_distributed_run("build", build_worker, [index_cfg, ds])
+    launch_distributed_run(
+        "build", build_worker, [index_cfg, ds], index_cfg.distributed
+    )
 
     rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
     if rank == 0:

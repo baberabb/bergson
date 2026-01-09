@@ -112,7 +112,6 @@ class MultiNodeGradientCollector(HookCollectorBase):
 
         # Compute whether we need to save the index
         self.save_index = self.scorer is None and not self.cfg.skip_index
-        self.skip_preconditioners = self.cfg.skip_preconditioners
 
         if self.save_index:
             grad_sizes = {name: math.prod(s) for name, s in self.shapes().items()}
