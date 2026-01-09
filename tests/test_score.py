@@ -18,6 +18,7 @@ from bergson.config import IndexConfig, ScoreConfig
 from bergson.data import create_index, load_scores
 from bergson.score.score import precondition_ds
 from bergson.score.scorer import Scorer
+from bergson.utils.utils import convert_precision_to_torch, get_gradient_dtype
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -97,7 +98,11 @@ def test_score(tmp_path: Path, model, dataset):
         module: torch.randn(1, shape.numel()) for module, shape in shapes.items()
     }
 
-    grad_dtype = torch.float64 if model.dtype == torch.float64 else torch.float32
+    score_dtype = (
+        convert_precision_to_torch(score_cfg.precision)
+        if score_cfg.precision != "auto"
+        else get_gradient_dtype(model)
+    )
 
     scorer = Scorer(
         tmp_path,
@@ -105,7 +110,7 @@ def test_score(tmp_path: Path, model, dataset):
         query_grads,
         score_cfg,
         device=torch.device("cpu"),
-        dtype=grad_dtype,
+        dtype=score_dtype,
     )
 
     collect_gradients(

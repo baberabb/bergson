@@ -20,7 +20,7 @@ from datasets import (
 from numpy.typing import DTypeLike
 
 from .config import DataConfig, ReduceConfig
-from .utils.utils import assert_type, simple_parse_args_string
+from .utils.utils import assert_type, convert_dtype_to_np, simple_parse_args_string
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -367,17 +367,16 @@ class Builder:
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         if reduce_cfg is not None:
             num_grads = 1
+            np_dtype = np.float32
             self.in_memory_grad_buffer = torch.zeros(
                 (num_grads, sum(self.grad_sizes.values())),
                 dtype=torch.float32,
                 device=f"cuda:{self.rank}",
             )
-            np_dtype = np.float32
         else:
             num_grads = self.num_items
+            np_dtype = convert_dtype_to_np(dtype)
             self.in_memory_grad_buffer = None
-            # TODO: Handle this more elegantly
-            np_dtype = np.float32 if dtype == torch.float32 else np.float16
 
         self.grad_buffer = create_index(
             path,

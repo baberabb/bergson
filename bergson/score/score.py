@@ -17,7 +17,11 @@ from bergson.data import allocate_batches, load_gradients
 from bergson.distributed import launch_distributed_run
 from bergson.gradients import GradientProcessor
 from bergson.score.scorer import Scorer
-from bergson.utils.utils import assert_type
+from bergson.utils.utils import (
+    assert_type,
+    convert_precision_to_torch,
+    get_gradient_dtype,
+)
 from bergson.utils.worker_utils import (
     create_processor,
     setup_data_pipeline,
@@ -277,6 +281,12 @@ def score_worker(
         "attention_cfgs": attention_cfgs,
     }
 
+    score_dtype = (
+        convert_precision_to_torch(score_cfg.precision)
+        if score_cfg.precision != "auto"
+        else get_gradient_dtype(model)
+    )
+
     if isinstance(ds, Dataset):
         kwargs["batches"] = allocate_batches(ds["length"], index_cfg.token_batch_size)
         kwargs["scorer"] = Scorer(
@@ -285,7 +295,7 @@ def score_worker(
             query_grads,
             score_cfg,
             device=torch.device(f"cuda:{rank}"),
-            dtype=torch.float32 if model.dtype == torch.float32 else torch.float16,
+            dtype=score_dtype,
         )
 
         collect_gradients(**kwargs)
@@ -310,7 +320,7 @@ def score_worker(
                 query_grads,
                 score_cfg,
                 torch.device(f"cuda:{rank}"),
-                model.dtype if model.dtype != "auto" else torch.float32,
+                score_dtype,
             )
 
             collect_gradients(**kwargs)
