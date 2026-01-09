@@ -565,7 +565,7 @@ def fwd_bwd_factory(cfg: IndexConfig) -> Callable:
             if "advantage" in batch:
                 losses *= torch.tensor(batch["advantage"], device=losses.device)
 
-        losses.sum().backward()
+        losses.mean().backward()
         model.zero_grad()
 
         return losses
