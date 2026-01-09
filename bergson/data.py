@@ -5,6 +5,7 @@ import random
 from pathlib import Path
 from typing import Any, Sequence, cast, overload
 
+import ml_dtypes  # noqa: F401  # registers bfloat16 dtype with numpy
 import numpy as np
 import pyarrow as pa
 import torch
@@ -207,7 +208,7 @@ def create_index(
                     "num_grads": num_grads,
                     "dtype": struct_dtype,
                     "grad_sizes": grad_sizes,
-                    "base_dtype": np.dtype(dtype).str,
+                    "base_dtype": np.dtype(dtype).name,
                 },
                 f,
                 indent=2,

@@ -198,6 +198,18 @@ def tensor_to_numpy(tensor: Tensor) -> np.ndarray:
     return tensor.view(torch.uint16).numpy().view(bfloat16)
 
 
+def numpy_to_tensor(arr: np.ndarray) -> Tensor:
+    """Convert a numpy array to torch tensor, handling bfloat16.
+
+    PyTorch's from_numpy() doesn't support ml_dtypes bfloat16, so we view
+    the array as uint16 and reinterpret as torch.bfloat16.
+    This preserves the exact bit pattern without lossy float conversion.
+    """
+    if arr.dtype == np.dtype(bfloat16):
+        return torch.from_numpy(arr.view(np.uint16)).view(torch.bfloat16)
+    return torch.from_numpy(arr)
+
+
 def convert_dtype_to_np(dtype: torch.dtype) -> np.dtype:
     """Convert a torch dtype to the corresponding numpy dtype."""
     match dtype:
