@@ -20,7 +20,12 @@ from datasets import (
 from numpy.typing import DTypeLike
 
 from .config import DataConfig, ReduceConfig
-from .utils.utils import assert_type, convert_dtype_to_np, simple_parse_args_string
+from .utils.utils import (
+    assert_type,
+    convert_dtype_to_np,
+    simple_parse_args_string,
+    tensor_to_numpy,
+)
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -422,7 +427,7 @@ class Builder:
             for module_name in self.grad_sizes.keys():
                 self.grad_buffer[
                     indices, offset : offset + mod_grads[module_name].shape[1]
-                ] = mod_grads[module_name].numpy()
+                ] = tensor_to_numpy(mod_grads[module_name])
                 offset += mod_grads[module_name].shape[1]
 
     def flush(self):
@@ -446,7 +451,7 @@ class Builder:
 
         rank = dist.get_rank() if dist.is_initialized() else 0
         if rank == 0:
-            self.grad_buffer[:] = self.in_memory_grad_buffer.numpy().astype(
+            self.grad_buffer[:] = tensor_to_numpy(self.in_memory_grad_buffer).astype(
                 self.grad_buffer.dtype
             )
 

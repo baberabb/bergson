@@ -31,6 +31,8 @@ def test_build_e2e(tmp_path: Path):
             "4",
             "--token_batch_size",
             "1024",
+            "--precision",
+            "bf16",
         ],
         cwd=tmp_path,
         capture_output=True,  # Add this

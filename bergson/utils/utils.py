@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Literal, Type, TypeVar, cast
 
 import numpy as np
 import torch
+from ml_dtypes import bfloat16
 from torch import Tensor, nn
 from transformers import PreTrainedModel
 
@@ -181,6 +182,22 @@ def get_gradient_dtype(model) -> torch.dtype:
         return dtypes_by_priority[0]
 
 
+np_bfloat16 = np.dtype(bfloat16)
+
+
+def tensor_to_numpy(tensor: Tensor) -> np.ndarray:
+    """Convert a torch tensor to numpy array, handling bfloat16.
+
+    PyTorch's .numpy() doesn't support bfloat16, so we view the tensor
+    as uint16 (same bit width) and reinterpret as ml_dtypes.bfloat16.
+    This preserves the exact bit pattern without lossy float conversion.
+    """
+    if tensor.dtype != torch.bfloat16:
+        return tensor.numpy()
+
+    return tensor.view(torch.uint16).numpy().view(bfloat16)
+
+
 def convert_dtype_to_np(dtype: torch.dtype) -> np.dtype:
     """Convert a torch dtype to the corresponding numpy dtype."""
     match dtype:
@@ -190,8 +207,9 @@ def convert_dtype_to_np(dtype: torch.dtype) -> np.dtype:
             return np.dtype(np.float32)
         case torch.float64:
             return np.dtype(np.float64)
+        case torch.bfloat16:
+            return np.dtype(bfloat16)
         case _:
-            # No numpy implementation for bfloat16
             raise ValueError(f"Unsupported torch dtype: {dtype}")
 
 

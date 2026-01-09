@@ -18,7 +18,11 @@ from bergson.config import IndexConfig, ScoreConfig
 from bergson.data import create_index, load_scores
 from bergson.score.score import precondition_ds
 from bergson.score.scorer import Scorer
-from bergson.utils.utils import convert_precision_to_torch, get_gradient_dtype
+from bergson.utils.utils import (
+    assert_type,
+    convert_precision_to_torch,
+    get_gradient_dtype,
+)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -188,6 +192,6 @@ def test_precondition_ds(tmp_path: Path, model, dataset):
     # Compare the two query datasets
     for name in score_cfg.modules:
         assert not torch.allclose(
-            torch.tensor(preconditioned_query_ds[name][:]),
-            torch.tensor(vanilla_query_ds[name][:]),
+            assert_type(torch.Tensor, preconditioned_query_ds[name][:]),
+            assert_type(torch.Tensor, vanilla_query_ds[name][:]),
         )
