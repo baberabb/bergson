@@ -282,6 +282,10 @@ class ScoreConfig:
     batch_size: int = 1024
     """Batch size for processing the query dataset."""
 
+    precision: Literal["auto", "bf16", "fp16", "fp32"] = "auto"
+    """Precision (dtype) to convert the query and index gradients to before
+    computing the scores. If "auto", the model's gradient dtype is used."""
+
 
 @dataclass
 class ReduceConfig:

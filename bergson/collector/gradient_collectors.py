@@ -19,7 +19,7 @@ from bergson.gradients import (
 )
 from bergson.process_preconditioners import process_preconditioners
 from bergson.score.scorer import Scorer
-from bergson.utils.utils import assert_type
+from bergson.utils.utils import assert_type, get_gradient_dtype
 
 
 @dataclass(kw_only=True)
@@ -93,18 +93,14 @@ class GradientCollector(HookCollectorBase):
                 "consider disabling bias inclusion for now."
             )
 
-        # TODO: handle more elegantly?
-        self.save_dtype = (
-            torch.float32 if self.model.dtype == torch.float32 else torch.float16
-        )
-
+        self.save_dtype = get_gradient_dtype(self.model)
         self.lo = torch.finfo(self.save_dtype).min
         self.hi = torch.finfo(self.save_dtype).max
 
         self.per_doc_losses = torch.full(
             (len(self.data),),
             device=self.model.device,
-            dtype=self.save_dtype,
+            dtype=torch.float32,
             fill_value=0.0,
         )
 
@@ -263,11 +259,7 @@ class GradientCollector(HookCollectorBase):
                 self.data = self.data.add_column(
                     "loss",
                     self.per_doc_losses.cpu().numpy(),
-                    feature=Value(
-                        "float16"
-                        if self.save_dtype == torch.float16
-                        else "float32"  # TODO: This is not robust
-                    ),
+                    feature=Value("float32"),
                     new_fingerprint="loss",
                 )
 
@@ -302,11 +294,7 @@ class TraceCollector(HookCollectorBase):
     """Dtype for stored gradients."""
 
     def setup(self) -> None:
-        # TODO: handle more elegantly?
-        self.save_dtype = (
-            torch.float32 if self.model.dtype == torch.float32 else torch.float16
-        )
-
+        self.save_dtype = get_gradient_dtype(self.model)
         self.lo = torch.finfo(self.save_dtype).min
         self.hi = torch.finfo(self.save_dtype).max
 

@@ -5,6 +5,7 @@ import random
 from pathlib import Path
 from typing import Any, Sequence, cast, overload
 
+import ml_dtypes  # noqa: F401  # registers bfloat16 dtype with numpy
 import numpy as np
 import pyarrow as pa
 import torch
@@ -20,7 +21,12 @@ from datasets import (
 from numpy.typing import DTypeLike
 
 from .config import DataConfig, ReduceConfig
-from .utils.utils import assert_type, simple_parse_args_string
+from .utils.utils import (
+    assert_type,
+    convert_dtype_to_np,
+    simple_parse_args_string,
+    tensor_to_numpy,
+)
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -202,7 +208,7 @@ def create_index(
                     "num_grads": num_grads,
                     "dtype": struct_dtype,
                     "grad_sizes": grad_sizes,
-                    "base_dtype": np.dtype(dtype).str,
+                    "base_dtype": np.dtype(dtype).name,
                 },
                 f,
                 indent=2,
@@ -367,17 +373,16 @@ class Builder:
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         if reduce_cfg is not None:
             num_grads = 1
+            np_dtype = np.float32
             self.in_memory_grad_buffer = torch.zeros(
                 (num_grads, sum(self.grad_sizes.values())),
                 dtype=torch.float32,
                 device=f"cuda:{self.rank}",
             )
-            np_dtype = np.float32
         else:
             num_grads = self.num_items
+            np_dtype = convert_dtype_to_np(dtype)
             self.in_memory_grad_buffer = None
-            # TODO: Handle this more elegantly
-            np_dtype = np.float32 if dtype == torch.float32 else np.float16
 
         self.grad_buffer = create_index(
             path,
@@ -423,7 +428,7 @@ class Builder:
             for module_name in self.grad_sizes.keys():
                 self.grad_buffer[
                     indices, offset : offset + mod_grads[module_name].shape[1]
-                ] = mod_grads[module_name].numpy()
+                ] = tensor_to_numpy(mod_grads[module_name])
                 offset += mod_grads[module_name].shape[1]
 
     def flush(self):
@@ -447,7 +452,7 @@ class Builder:
 
         rank = dist.get_rank() if dist.is_initialized() else 0
         if rank == 0:
-            self.grad_buffer[:] = self.in_memory_grad_buffer.numpy().astype(
+            self.grad_buffer[:] = tensor_to_numpy(self.in_memory_grad_buffer).astype(
                 self.grad_buffer.dtype
             )
 

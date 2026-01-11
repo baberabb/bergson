@@ -13,6 +13,7 @@ dependencies = [
     "accelerate", # For device_map in from_pretrained
     "datasets",
     "jaxtyping>=0.3.3",
+    "ml_dtypes",
     "natsort",
     "numpy",
     "peft>=0.17.0",

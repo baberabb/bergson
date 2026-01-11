@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Literal, Type, TypeVar, cast
 
 import numpy as np
 import torch
+from ml_dtypes import bfloat16
 from torch import Tensor, nn
 from transformers import PreTrainedModel
 
@@ -148,3 +149,107 @@ def validate_batch_size(
             f"Token batch size {token_batch_size} is too large for the device. "
             f"Try reducing the batch size or use --fsdp to shard the model."
         ) from e
+
+
+DTYPE_BY_PRIORITY = {
+    torch.float64: 0,
+    torch.float32: 1,
+    torch.float16: 2,
+    torch.bfloat16: 3,
+    torch.float8_e5m2: 4,
+}
+
+
+def get_gradient_dtype(model) -> torch.dtype:
+    """Returns the gradient dtype for a model.
+    If multiple dtypes are found, return the first present dtype in
+    [torch.float64, torch.float32, torch.float16, torch.bfloat16].
+    """
+    dtypes = set()
+    for p in model.parameters():
+        if p.requires_grad and p.dtype.is_floating_point:
+            dtypes.add(p.dtype)
+
+    assert len(dtypes) > 0, "No trainable parameters found"
+
+    if len(dtypes) == 1:
+        return dtypes.pop()
+    else:
+        dtypes_by_priority = sorted(dtypes, key=lambda x: dtypes_by_priority[x])
+        print(
+            f"Multiple gradient dtypes found: {dtypes}. Using {dtypes_by_priority[0]}."
+        )
+        return dtypes_by_priority[0]
+
+
+np_bfloat16 = np.dtype(bfloat16)
+
+
+def tensor_to_numpy(tensor: Tensor) -> np.ndarray:
+    """Convert a torch tensor to numpy array, handling bfloat16.
+
+    PyTorch's .numpy() doesn't support bfloat16, so we view the tensor
+    as uint16 (same bit width) and reinterpret as ml_dtypes.bfloat16.
+    This preserves the exact bit pattern without lossy float conversion.
+    """
+    if tensor.dtype != torch.bfloat16:
+        return tensor.numpy()
+
+    return tensor.view(torch.uint16).numpy().view(bfloat16)
+
+
+def numpy_to_tensor(arr: np.ndarray) -> Tensor:
+    """Convert a numpy array to torch tensor, handling bfloat16.
+
+    PyTorch's from_numpy() doesn't support ml_dtypes bfloat16, so we view
+    the array as uint16 and reinterpret as torch.bfloat16.
+    This preserves the exact bit pattern without lossy float conversion.
+    """
+    if arr.dtype == np.dtype(bfloat16):
+        return torch.from_numpy(arr.view(np.uint16)).view(torch.bfloat16)
+    return torch.from_numpy(arr)
+
+
+def convert_dtype_to_np(dtype: torch.dtype) -> np.dtype:
+    """Convert a torch dtype to the corresponding numpy dtype."""
+    match dtype:
+        case torch.float16:
+            return np.dtype(np.float16)
+        case torch.float32:
+            return np.dtype(np.float32)
+        case torch.float64:
+            return np.dtype(np.float64)
+        case torch.bfloat16:
+            return np.dtype(bfloat16)
+        case _:
+            raise ValueError(f"Unsupported torch dtype: {dtype}")
+
+
+def convert_dtype_to_torch(dtype: np.dtype) -> torch.dtype:
+    """Convert a numpy dtype to the corresponding torch dtype."""
+    match dtype:
+        case np.float16:
+            return torch.float16
+        case np.float32:
+            return torch.float32
+        case np.float64:
+            return torch.float64
+        case _:
+            raise ValueError(f"Unsupported numpy dtype: {dtype}")
+
+
+def convert_precision_to_torch(
+    precision: Literal["auto", "bf16", "fp16", "fp32"],
+) -> torch.dtype:
+    """Convert a precision string to the corresponding torch dtype."""
+    match precision:
+        case "auto":
+            raise ValueError(
+                "Precision 'auto' is not supported for conversion to torch dtype."
+            )
+        case "bf16":
+            return torch.bfloat16
+        case "fp16":
+            return torch.float16
+        case "fp32":
+            return torch.float32

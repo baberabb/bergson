@@ -19,7 +19,7 @@ from bergson.gradients import (
     Normalizer,
 )
 from bergson.process_preconditioners import process_preconditioners
-from bergson.utils.utils import assert_type
+from bergson.utils.utils import assert_type, get_gradient_dtype
 
 
 @dataclass(kw_only=True)
@@ -123,11 +123,7 @@ class NormalizerCollector(HookCollectorBase):
                 "consider disabling bias inclusion for now."
             )
 
-        # TODO: handle more elegantly?
-        self.save_dtype = (
-            torch.float32 if self.model.dtype == torch.float32 else torch.float16
-        )
-
+        self.save_dtype = get_gradient_dtype(self.model)
         self.lo = torch.finfo(self.save_dtype).min
         self.hi = torch.finfo(self.save_dtype).max
 
