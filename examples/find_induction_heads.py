@@ -667,25 +667,40 @@ def setup_training(
 
     pad_id = -100
 
-    def compute_metrics(eval_preds: EvalPrediction):
-        # predictions: (B, T, V) - logits
-        # label_ids: (B, T) - with DataCollatorForLanguageModeling, equals input_ids
-        logits = eval_preds.predictions[:, :-1]  # (B, T-1, V) predict next token
-        labels = eval_preds.label_ids[:, 1:]  # (B, T-1) shifted labels
+    def preprocess_logits_for_metrics(logits, labels):
+        """
+        Reduce logits to per-token losses and predictions before accumulating.
+        This prevents OOM by reducing (B, T, V) to (B, T, 2) - losses and preds.
+        """
+        # Shift for next-token prediction
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
 
         # Compute per-token cross-entropy loss
-        B, T, V = logits.shape
-        log_probs = logits - np.log(np.exp(logits).sum(axis=-1, keepdims=True) + 1e-10)
-        token_log_probs = np.take_along_axis(
-            log_probs, labels[:, :, np.newaxis], axis=-1
-        ).squeeze(-1)
-        token_losses = -token_log_probs  # (B, T)
+        loss_fct = torch.nn.CrossEntropyLoss(reduction="none", ignore_index=pad_id)
+        token_losses = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+        ).view(shift_labels.shape)
+
+        # Get predictions for accuracy
+        preds = shift_logits.argmax(dim=-1)
+
+        # Stack losses and preds: (B, T-1, 2)
+        return torch.stack([token_losses, preds.float()], dim=-1)
+
+    def compute_metrics(eval_preds: EvalPrediction):
+        # predictions: (B, T-1, 2) - [token_losses, preds] from preprocess
+        # label_ids: (B, T)
+        preprocessed = eval_preds.predictions
+        token_losses = preprocessed[:, :, 0]  # (B, T-1)
+        preds = preprocessed[:, :, 1].astype(np.int64)  # (B, T-1)
+        labels = eval_preds.label_ids[:, 1:]  # (B, T-1) shifted labels
 
         # Mask out padding
         mask = labels != pad_id
 
-        # Standard accuracy
-        preds = logits.argmax(-1)
+        # Accuracy
         acc = float((preds[mask] == labels[mask]).mean()) if mask.any() else 0.0
 
         # In-context learning score (Nanda et al.)
@@ -755,7 +770,7 @@ def setup_training(
         overwrite_output_dir=True,
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=64,
-        per_device_eval_batch_size=128,
+        per_device_eval_batch_size=64,
         gradient_accumulation_steps=1,
         warmup_steps=1000,
         learning_rate=5e-4,
@@ -793,6 +808,7 @@ def setup_training(
         data_collator=data_collator,
         callbacks=[bergson_callback],
         compute_metrics=compute_metrics,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
 
     # Prepare for gradient collection
