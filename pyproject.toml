@@ -16,11 +16,15 @@ dependencies = [
     "ml_dtypes",
     "natsort",
     "numpy",
+    "pandas-stubs~=2.3.3",
     "peft>=0.17.0",
     "pyarrow",
     "simple-parsing",
-    "torch",
-    "transformers<4.56.0" # 4.56.0 increases fp error from operation order
+    "torch", # 4.56.0 increases fp error from operation order
+    "transformers<4.56.0",
+    "wandb",
+    "matplotlib",
+    "faiss-gpu-cu12",
 ]
 version = "0.5.0"
 [project.optional-dependencies]

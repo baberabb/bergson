@@ -231,8 +231,6 @@ class GradientCollectorWithDistributedPreconditioners(HookCollectorBase):
             else:
                 self.mod_grads[name] = P.to(dtype=self.save_dtype)
 
-        del module._inputs
-
     def process_batch(self, indices: list[int], **kwargs):
         """Process collected gradients for a batch and update losses."""
         losses = kwargs.get("losses")

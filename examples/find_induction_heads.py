@@ -12,11 +12,12 @@ This script:
 
 import math
 import os
+import shutil
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 import random
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -52,7 +53,6 @@ from bergson.huggingface import (
     GradientCollectorCallback,
     prepare_for_gradient_collection,
 )
-from bergson.utils import assert_type
 
 HEAD_CFGS = {
     "h.0.attn.c_attn": AttentionConfig(12, 192, 2),
@@ -391,7 +391,7 @@ def load_data(
         else "train"
     )
     dataset = load_dataset(name, split=split)
-    dataset = assert_type(Dataset, dataset)
+    dataset = cast("Dataset", dataset)
 
     def tokenize_function(examples):
         # Tokenize the text
@@ -608,6 +608,51 @@ def test_induction_head_labels(tokenizer):
         assert labels[-1].item() == B_id
 
 
+def compute_in_context_score(
+    token_losses: np.ndarray,
+    mask: np.ndarray,
+    early_pos: int = 50,
+    late_pos: int = 500,
+) -> float:
+    """
+    Compute in-context learning score (Nanda et al.).
+
+    "The loss of the 500th token in the context minus the average loss of the
+    50th token in the context, averaged over dataset examples."
+
+    A negative score indicates good in-context learning (later tokens predicted
+    better than earlier ones). As induction heads form, this should become more
+    negative.
+
+    Args:
+        token_losses: Per-token losses, shape (B, T)
+        mask: Boolean mask for valid (non-padding) positions, shape (B, T)
+        early_pos: Early position to measure loss (default: 50)
+        late_pos: Late position to measure loss (default: 500)
+
+    Returns:
+        Mean of (late_loss - early_loss) across examples
+    """
+    B = token_losses.shape[0]
+    scores = []
+
+    for i in range(B):
+        valid_positions = np.where(mask[i])[0]
+        if len(valid_positions) < early_pos:
+            continue  # Sequence too short
+
+        # Get losses at early and late positions (or last valid if shorter)
+        early_idx = min(early_pos - 1, len(valid_positions) - 1)
+        late_idx = min(late_pos - 1, len(valid_positions) - 1)
+
+        early_loss = token_losses[i, valid_positions[early_idx]]
+        late_loss = token_losses[i, valid_positions[late_idx]]
+
+        scores.append(late_loss - early_loss)
+
+    return float(np.mean(scores)) if scores else 0.0
+
+
 def setup_training(
     model,
     tokenizer,
@@ -623,17 +668,33 @@ def setup_training(
     pad_id = -100
 
     def compute_metrics(eval_preds: EvalPrediction):
-        # predictions: (B, T, V)
-        # label_ids: with your collator, this equals input_ids: (B, T)
-        preds = eval_preds.predictions[:, :-1]  # type: ignore
-        labels = eval_preds.label_ids[:, 1:]  # type: ignore
+        # predictions: (B, T, V) - logits
+        # label_ids: (B, T) - with DataCollatorForLanguageModeling, equals input_ids
+        logits = eval_preds.predictions[:, :-1]  # (B, T-1, V) predict next token
+        labels = eval_preds.label_ids[:, 1:]  # (B, T-1) shifted labels
 
+        # Compute per-token cross-entropy loss
+        B, T, V = logits.shape
+        log_probs = logits - np.log(np.exp(logits).sum(axis=-1, keepdims=True) + 1e-10)
+        token_log_probs = np.take_along_axis(
+            log_probs, labels[:, :, np.newaxis], axis=-1
+        ).squeeze(-1)
+        token_losses = -token_log_probs  # (B, T)
+
+        # Mask out padding
         mask = labels != pad_id
-        if not mask.any():  # type: ignore
-            return {"accuracy": 0.0}
 
-        acc = (preds.argmax(-1)[mask] == labels[mask]).mean()  # type: ignore
-        return {"accuracy": float(acc)}
+        # Standard accuracy
+        preds = logits.argmax(-1)
+        acc = float((preds[mask] == labels[mask]).mean()) if mask.any() else 0.0
+
+        # In-context learning score (Nanda et al.)
+        in_context_score = compute_in_context_score(token_losses, mask)
+
+        return {
+            "accuracy": acc,
+            "in_context_score": in_context_score,
+        }
 
     # def compute_metrics(eval_preds):
     #     print("compute_metrics")
@@ -710,6 +771,7 @@ def setup_training(
         run_name="2-layer-transformer-SmolLM2-corpus",
         seed=42,
         fp16=True,
+        max_grad_norm=1.0,  # Clip gradients to prevent fp16 overflow
         dataloader_drop_last=False,
     )
 
@@ -756,17 +818,26 @@ def mean_query_gradients(
 
     # Collect gradients for the induction head dataset
     print("Collecting gradients for induction head dataset...")
+    index_path = Path(output_dir) / "induction_gradients"
     collect_gradients(
         model=model,
         data=induction_dataset,
         processor=processor,
         cfg=IndexConfig(
-            run_path=str(Path(output_dir) / "induction_gradients"),
+            run_path=str(index_path),
             skip_preconditioners=True,
             skip_index=False,
+            token_batch_size=1024,  # Match model's max_position_embeddings
         ),
         attention_cfgs=HEAD_CFGS,
     )
+
+    # Move from .part to final location (collect_gradients saves to run_path.part)
+    part_path = Path(str(index_path) + ".part")
+    if part_path.exists():
+        if index_path.exists():
+            shutil.rmtree(index_path)
+        shutil.move(part_path, index_path)
 
     # Build the attributor for querying
     print("Building attributor for querying...")
@@ -852,15 +923,20 @@ def main(args):
 
     if train:
         if args.small:
-            train_dataset, _ = load_data(tokenizer, name=dataset_name, N=0.4)
+            train_dataset, eval_dataset = load_data(tokenizer, name=dataset_name, N=0.4)
         else:
-            train_dataset, _ = load_data(tokenizer, name=dataset_name)
+            train_dataset, eval_dataset = load_data(tokenizer, name=dataset_name)
+
+        # Cap eval set at 10k examples to match Nanda et al.
+        if len(eval_dataset) > 10000:
+            eval_dataset = eval_dataset.select(range(10000))
+            print(f"Using fixed eval subset: {len(eval_dataset)} examples")
 
         trainer = setup_training(
             model,
             tokenizer,
             train_dataset,
-            eval_dataset=induction_dataset,
+            eval_dataset=eval_dataset,
             output_dir=output_dir,
             projection_dim=projection_dim,
             wandb=False,
@@ -893,10 +969,10 @@ def main(args):
     model = model.cpu()
 
     # Load parquet table containing training order
-    training_order_ds = assert_type(
+    training_order_ds = cast(
         Dataset, load_from_disk(str(Path(output_dir) / "gradients" / "order.hf"))
     )
-    training_order = assert_type(pd.DataFrame, training_order_ds.to_pandas())
+    training_order = cast(pd.DataFrame, training_order_ds.to_pandas())
 
     # Analyze data
     os.makedirs("figures", exist_ok=True)
