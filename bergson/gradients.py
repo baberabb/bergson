@@ -237,9 +237,8 @@ class AdafactorNormalizer(Normalizer):
         assert self.col.ndim == 1, f"Expected 1D tensor for col, got {self.col.ndim}D"
         if self.bias_avg_sq is not None:
             assert (
-                    self.bias_avg_sq.ndim == 1
+                self.bias_avg_sq.ndim == 1
             ), f"Expected 1D tensor for bias_avg_sq, got {self.bias_avg_sq.ndim}D"
-
 
     @torch.compile
     def normalize_(
@@ -304,7 +303,6 @@ class AdafactorNormalizer(Normalizer):
         self.bias_avg_sq.mul_(lr) if self.bias_avg_sq is not None else None
 
 
-
 @dataclass
 class AdamNormalizer(Normalizer):
     """
@@ -317,7 +315,6 @@ class AdamNormalizer(Normalizer):
 
     avg_sq: Tensor
     bias_avg_sq: Tensor | None = None
-
 
     @torch.compile
     def normalize_(
@@ -355,4 +352,3 @@ class AdamNormalizer(Normalizer):
         """
         self.avg_sq.mul_(lr)
         self.bias_avg_sq.mul_(lr) if self.bias_avg_sq is not None else None
-

@@ -85,7 +85,7 @@ class GradientCollector(HookCollectorBase):
         Sets up a Builder for gradient storage if not using a Scorer.
         """
         model_device = (
-                getattr(self.model, "device", None) or next(self.model.parameters()).device
+            getattr(self.model, "device", None) or next(self.model.parameters()).device
         )
         assert isinstance(
             model_device, torch.device
