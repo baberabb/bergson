@@ -19,7 +19,7 @@ from bergson.gradients import (
 )
 from bergson.process_preconditioners import process_preconditioners
 from bergson.score.scorer import Scorer
-from bergson.utils.utils import assert_type
+from bergson.utils.utils import assert_type, get_gradient_dtype
 
 
 @dataclass(kw_only=True)
@@ -85,34 +85,25 @@ class GradientCollector(HookCollectorBase):
         Sets up a Builder for gradient storage if not using a Scorer.
         """
         model_device = (
-            getattr(self.model, "device", None) or next(self.model.parameters()).device
+                getattr(self.model, "device", None) or next(self.model.parameters()).device
         )
-        model_dtype = (
-            getattr(self.model, "dtype", None) or next(self.model.parameters()).dtype
-        )
-
         assert isinstance(
             model_device, torch.device
         ), "Model device is not set correctly"
 
-        # TODO: handle more elegantly?
-        self.save_dtype = (
-            torch.float32 if model_dtype == torch.float32 else torch.float16
-        )
-
+        self.save_dtype = get_gradient_dtype(self.model)
         self.lo = torch.finfo(self.save_dtype).min
         self.hi = torch.finfo(self.save_dtype).max
 
         self.per_doc_losses = torch.full(
             (len(self.data),),
             device=model_device,
-            dtype=self.save_dtype,
+            dtype=torch.float32,
             fill_value=0.0,
         )
 
         # Compute whether we need to save the index
         self.save_index = self.scorer is None and not self.cfg.skip_index
-        self.skip_preconditioners = self.cfg.skip_preconditioners
 
         if self.save_index:
             grad_sizes = {name: math.prod(s) for name, s in self.shapes().items()}
@@ -251,14 +242,14 @@ class GradientCollector(HookCollectorBase):
 
         P = P.flatten(1).clamp_(self.lo, self.hi)
 
-        if not self.skip_preconditioners:
+        if not self.cfg.skip_preconditioners:
             P = P.float()
             if name in self.processor.preconditioners:
                 self.processor.preconditioners[name].addmm_(P.mT, P)
             else:
                 self.processor.preconditioners[name] = P.mT @ P
 
-        if self.save_index:
+        if self.save_index and self.reduce_cfg is None:
             # Asynchronously move the gradient to CPU and convert to the final dtype
             self.mod_grads[name] = P.to(
                 device="cpu", dtype=self.save_dtype, non_blocking=True
@@ -300,29 +291,35 @@ class GradientCollector(HookCollectorBase):
                 self.rank,
             )
 
-        if self.rank == 0:
-            if self.cfg.drop_columns:
-                self.data = self.data.remove_columns(["input_ids"])
-
-            self.data = self.data.add_column(
-                "loss",
-                self.per_doc_losses.cpu().numpy(),
-                feature=Value(
-                    "float16"
-                    if self.save_dtype == torch.float16
-                    else "float32"  # TODO: This is not robust
-                ),
-                new_fingerprint="loss",
-            )
-
-            self.data.save_to_disk(self.cfg.partial_run_path / "data.hf")
-
-            self.processor.save(self.cfg.partial_run_path)
-
         # Flush and reduce builder if it exists
         if self.builder is not None:
             self.builder.flush()
             self.builder.dist_reduce()
+
+        if self.rank == 0:
+            if self.reduce_cfg is not None:
+                # Create a new dataset with one row for each reduced gradient
+                assert self.builder is not None
+                self.data = Dataset.from_list(
+                    [
+                        {"query_index": i}
+                        for i in range(self.builder.grad_buffer.shape[0])
+                    ]
+                )
+            else:
+                if self.cfg.drop_columns:
+                    self.data = self.data.remove_columns(["input_ids"])
+
+                self.data = self.data.add_column(
+                    "loss",
+                    self.per_doc_losses.cpu().numpy(),
+                    feature=Value("float32"),
+                    new_fingerprint="loss",
+                )
+
+            self.data.save_to_disk(str(self.cfg.partial_run_path / "data.hf"))
+
+            self.processor.save(self.cfg.partial_run_path)
 
 
 @dataclass(kw_only=True)
@@ -351,16 +348,7 @@ class TraceCollector(HookCollectorBase):
     """Dtype for stored gradients."""
 
     def setup(self) -> None:
-
-        model_dtype = (
-            getattr(self.model, "dtype", None) or next(self.model.parameters()).dtype
-        )
-
-        # TODO: handle more elegantly?
-        self.save_dtype = (
-            torch.float32 if model_dtype == torch.float32 else torch.float16
-        )
-
+        self.save_dtype = get_gradient_dtype(self.model)
         self.lo = torch.finfo(self.save_dtype).min
         self.hi = torch.finfo(self.save_dtype).max
 

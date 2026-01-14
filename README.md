@@ -6,14 +6,18 @@ We view attribution as a counterfactual question: **_If we "unlearned" this trai
 ## Core features
 
 - Gradient store for serial queries. We provide collection-time gradient compression for efficient storage, and integrate with FAISS for fast KNN search over large stores.
-- On-the-fly queries. Query gradients without compression or disk I/O overhead via a single pass over a dataset with a set of precomputed query gradients.
+- On-the-fly queries. Query gradients without disk I/O overhead via a single pass over a dataset with a set of precomputed query gradients.
   - Experiment with multiple query strategies based on [LESS](https://arxiv.org/pdf/2402.04333).
+  - Ideal for compression-free gradients.
 - Train‑time gradient collection. Capture gradients produced during training with a ~17% performance overhead.
 - Scalable. We use [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), BitsAndBytes, and other performance optimizations to support large models, datasets, and clusters.
 - Integrated with HuggingFace Transformers and Datasets. We also support on-disk datasets in a variety of formats.
 - Structured gradient views and per-attention head gradient collection. Bergson enables mechanistic interpretability via easy access to per‑module or per-attention head gradients.
 
 # Announcements
+
+**January 2026**
+- [Experimental] Support distributing preconditioners across nodes and devices for VRAM-efficient computation through the GradientCollectorWithDistributedPreconditioners. If you would like this functionality exposed via the CLI please get in touch! https://github.com/EleutherAI/bergson/pull/100
 
 **October 2025**
 - Support bias parameter gradients in linear modules: https://github.com/EleutherAI/bergson/pull/54
@@ -39,7 +43,7 @@ pip install bergson
 # Quickstart
 
 ```
-bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation
+bergson build runs/quickstart --model EleutherAI/pythia-14m --dataset NeelNanda/pile-10k --truncation --token_batch_size 4096
 ```
 
 # Usage
@@ -64,18 +68,24 @@ At the lowest level of abstraction, the `GradientCollector` context manager allo
 You can score a large dataset against a previously built query index without saving its gradients to disk:
 
 ```bash
-bergson score <output_path> --model <model_name> --dataset <dataset_name> --query_path <existing_index_path> --score mean --projection_dim 0
+bergson score <output_path> --model <model_name> --dataset <dataset_name> --query_path <existing_index_path> --score mean
 ```
 
 We provide a utility to reduce a dataset into its mean or sum query gradient, for use as a query index:
 
 ```bash
-bergson reduce <output_path> --model <model_name> --dataset <dataset_name> --method mean --unit_normalize --projection_dim 0
+bergson reduce <output_path> --model <model_name> --dataset <dataset_name> --method mean --unit_normalize
 ```
 
 ## Index Query
 
-We provide a query Attributor which supports unit normalized gradients and KNN search out of the box.
+We provide a query Attributor which supports unit normalized gradients and KNN search out of the box. Access it via CLI with
+
+```bash
+bergson query --index  <index_path> --model <model_name> --unit_norm
+```
+
+or programmatically with
 
 ```python
 from bergson import Attributor, FaissConfig

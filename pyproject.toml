@@ -13,13 +13,16 @@ dependencies = [
     "accelerate", # For device_map in from_pretrained
     "datasets",
     "jaxtyping>=0.3.3",
+    "ml_dtypes",
     "natsort",
+    "numpy",
     "peft>=0.17.0",
+    "pyarrow",
     "simple-parsing",
     "torch",
-    "transformers",
+    "transformers<4.56.0" # 4.56.0 increases fp error from operation order
 ]
-version = "0.4.0"
+version = "0.5.0"
 [project.optional-dependencies]
 dev = [
     "pre-commit",
@@ -33,6 +36,7 @@ dev = [
     "sphinx-autodoc-typehints",
     "sphinx-rtd-theme",
     "nbsphinx",
+    "torch-tb-profiler>=0.4.3",
 ]
 example = [
     "trl",

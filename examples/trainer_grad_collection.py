@@ -19,7 +19,7 @@ from bergson.huggingface import (
     GradientCollectorCallback,
     prepare_for_gradient_collection,
 )
-from bergson.utils import assert_type
+from bergson.utils.utils import assert_type
 
 
 def worker(
@@ -118,7 +118,9 @@ def main(args: IndexConfig):
         conversation_column=args.data.conversation_column,
     )
     dataset = load_data_string(
-        args.data.dataset, args.data.split, streaming=args.data.streaming
+        args.data.dataset,
+        args.data.split,
+        data_args=args.data.data_args,
     )
     dataset = dataset.map(
         tokenize,

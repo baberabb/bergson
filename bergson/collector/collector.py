@@ -477,10 +477,10 @@ class CollectorComputer:
         total_processed = torch.tensor(0, device=self.model.device)
         prof = self._setup_profiler()
         step = 0
-
         with prof:
             for indices in tqdm(
-                self.batches, disable=self.rank != 0, desc=f"Computing {desc}"
+                self.batches,
+                desc=f"Computing {desc}",
             ):
                 batch = self.data[indices]
 
@@ -503,6 +503,7 @@ class CollectorComputer:
                 step += 1
 
                 self.collector.process_batch(indices, losses=losses)
+                total_processed += len(indices)
 
         self.collector.teardown()
         if dist.is_initialized():
@@ -564,7 +565,7 @@ def fwd_bwd_factory(cfg: IndexConfig) -> Callable:
             if "advantage" in batch:
                 losses *= torch.tensor(batch["advantage"], device=losses.device)
 
-        losses.mean().backward()
+        losses.sum().backward()
         model.zero_grad()
 
         return losses

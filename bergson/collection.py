@@ -6,6 +6,7 @@ from bergson.collector.gradient_collectors import GradientCollector
 from bergson.config import AttentionConfig, IndexConfig, ReduceConfig
 from bergson.gradients import GradientProcessor
 from bergson.score.scorer import Scorer
+from bergson.utils.utils import validate_batch_size
 
 
 def collect_gradients(
@@ -23,8 +24,6 @@ def collect_gradients(
     """
     Compute gradients using the hooks specified in the GradientCollector.
     """
-    if attention_cfgs is None:
-        attention_cfgs = {}
     collector = GradientCollector(
         model=model.base_model,  # type: ignore
         cfg=cfg,
@@ -35,6 +34,8 @@ def collect_gradients(
         reduce_cfg=reduce_cfg,
         attention_cfgs=attention_cfgs or {},
     )
+
+    validate_batch_size(model, cfg.token_batch_size, collector)
 
     computer = CollectorComputer(
         model=model,  # type: ignore

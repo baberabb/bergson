@@ -1,41 +1,88 @@
 from pathlib import Path
+from typing import cast
 
+import numpy as np
 import pandas as pd
 import torch
 from datasets import (
     Dataset,
-    DatasetDict,
     IterableDataset,
-    IterableDatasetDict,
-    load_dataset,
 )
 from peft import PeftConfig, PeftModel, get_peft_model_state_dict
 from torch.distributed.fsdp import fully_shard
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    PreTrainedModel,
+)
 
 from bergson.config import DataConfig, IndexConfig
-from bergson.data import tokenize
-from bergson.gradients import GradientProcessor
+from bergson.data import allocate_batches, load_data_string, tokenize
+from bergson.gradients import GradientProcessor, Normalizer
+from bergson.normalizer.fit_normalizers import fit_normalizers
 from bergson.utils.utils import assert_type, get_layer_list
 
 
-def create_processor(
+def create_normalizers(
+    model: PreTrainedModel,
+    ds: Dataset | IterableDataset,
     cfg: IndexConfig,
-    rank: int,
+    target_modules: set[str] | None = None,
+) -> dict[str, Normalizer]:
+    """Create normalizers for the model"""
+    if cfg.normalizer != "none":
+        # Evenly sample `stats_sample_size` examples to compute statistics
+        if isinstance(ds, Dataset):
+            if cfg.stats_sample_size is not None and cfg.stats_sample_size < len(ds):
+                stats_ds = ds.shuffle(seed=0).select(range(cfg.stats_sample_size))
+            else:
+                stats_ds = ds
+        else:
+            if cfg.stats_sample_size is None:
+                stats_iterable_ds = ds
+            else:
+                stats_iterable_ds = ds.shuffle(seed=0).take(cfg.stats_sample_size)
+
+            stats_ds = assert_type(
+                Dataset, Dataset.from_generator(lambda: iter(stats_iterable_ds))
+            )
+
+        return fit_normalizers(
+            model,
+            stats_ds,
+            cfg,
+            batches=allocate_batches(stats_ds["length"][:], cfg.token_batch_size),
+            target_modules=target_modules,
+        )
+
+    return {}
+
+
+def create_processor(
+    model: PreTrainedModel,
+    ds: Dataset | IterableDataset,
+    cfg: IndexConfig,
+    target_modules: set[str] | None = None,
 ) -> GradientProcessor:
     """Handle processor creation and normalizer fitting"""
+    local_rank = cfg.distributed.local_rank
+    rank = cfg.distributed.rank
+
     processor_path = Path(cfg.processor_path)
     if (processor_path / "processor_config.json").exists():
-        if rank == 0:
+        if local_rank == 0:
             print(f"Loading processor from '{cfg.processor_path}'")
 
         processor = GradientProcessor.load(
             processor_path,
-            map_location=f"cuda:{rank}",
+            map_location=f"cuda:{local_rank}",
         )
     else:
+        normalizers = create_normalizers(model, ds, cfg, target_modules)
+
         processor = GradientProcessor(
-            {},
+            normalizers,
             projection_dim=cfg.projection_dim or None,
             reshape_to_square=cfg.reshape_to_square,
             projection_type=cfg.projection_type,
@@ -49,9 +96,10 @@ def create_processor(
 
 def setup_model_and_peft(
     cfg: IndexConfig,
-    rank: int,
-) -> tuple[AutoModelForCausalLM, set | None]:
+    device_map_auto: bool = False,
+) -> tuple[PreTrainedModel, set | None]:
     """Handle model loading, quantization, FSDP, and PEFT detection"""
+    local_rank = cfg.distributed.local_rank
 
     match cfg.precision:
         case "bf16":
@@ -68,7 +116,13 @@ def setup_model_and_peft(
             raise ValueError(f"Unsupported precision: {other}")
 
     # Common configuration
-    device_map = {"": f"cuda:{rank}"} if not cfg.fsdp else "cpu"
+    if device_map_auto:
+        device_map = "auto"
+    elif cfg.fsdp:
+        device_map = "cpu"
+    else:
+        device_map = {"": f"cuda:{local_rank}"}
+
     quantization_config = None
     if cfg.precision in ("int4", "int8"):
         quantization_config = BitsAndBytesConfig(
@@ -92,7 +146,7 @@ def setup_model_and_peft(
             cfg.model,
             device_map=device_map,
             quantization_config=quantization_config,
-            dtype=dtype,
+            torch_dtype=dtype,
             revision=cfg.revision,
         )
         target_modules = None
@@ -103,7 +157,7 @@ def setup_model_and_peft(
             peft_config.base_model_name_or_path,  # type: ignore
             device_map=device_map,
             quantization_config=quantization_config,
-            dtype=dtype,
+            torch_dtype=dtype,
             revision=cfg.revision,
         )
 
@@ -139,6 +193,8 @@ def setup_model_and_peft(
             fully_shard(layer)
         fully_shard(model)
 
+    model = cast(PreTrainedModel, model)
+
     return model, target_modules  # type: ignore
 
 
@@ -156,31 +212,9 @@ def estimate_advantage(ds: Dataset, cfg: DataConfig):
 
 def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
     """Handle data loading and preprocessing"""
-
-    data_str = cfg.data.dataset
-    if data_str.endswith(".csv"):
-        ds = assert_type(Dataset, Dataset.from_csv(data_str))
-    elif data_str.endswith(".json") or data_str.endswith(".jsonl"):
-        ds = assert_type(Dataset, Dataset.from_json(data_str))
-    else:
-        try:
-            ds = load_dataset(
-                data_str,
-                cfg.data.subset,
-                split=cfg.data.split,
-                streaming=cfg.data.streaming,
-            )
-
-            if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
-                raise NotImplementedError(
-                    "DatasetDicts and IterableDatasetDicts are not supported."
-                )
-        except ValueError as e:
-            # Automatically use load_from_disk if appropriate
-            if "load_from_disk" in str(e):
-                ds = Dataset.load_from_disk(data_str, keep_in_memory=False)
-            else:
-                raise e
+    ds = load_data_string(
+        cfg.data.dataset, cfg.data.split, cfg.data.subset, cfg.data.data_args
+    )
 
     # In many cases the token_batch_size may be smaller than the max length allowed by
     # the model. If cfg.data.truncation is True, we use the tokenizer to truncate
@@ -196,6 +230,18 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
     )
     if cfg.data.reward_column:
         assert isinstance(ds, Dataset), "Dataset required for advantage estimation"
+
+        rewards = np.array(ds[cfg.data.reward_column], dtype=np.float64)
+        nan_mask = np.isnan(rewards)
+        if nan_mask.any():
+            if cfg.data.skip_nan_rewards:
+                print(f"Warning: Filtering out {nan_mask.sum()} rows with NaN rewards")
+                ds = ds.filter(lambda _, idx: not nan_mask[idx], with_indices=True)
+            else:
+                raise ValueError(
+                    f"Reward column '{cfg.data.reward_column}' contains NaN values"
+                )
+
         ds = ds.add_column(
             "advantage",
             estimate_advantage(ds, cfg.data),

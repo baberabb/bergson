@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from datasets import Dataset
-from numpy.typing import DTypeLike
 from peft import PeftModel
 from torch import Tensor
 from torch.utils.data import DataLoader
@@ -22,6 +21,7 @@ from bergson.collector.gradient_collectors import StreamingGradientCollector
 from bergson.data import create_index
 from bergson.gradients import AdafactorNormalizer, AdamNormalizer
 from bergson.utils.peft import detect_peft_modules
+from bergson.utils.utils import convert_dtype_to_torch
 
 
 class GradientCollectorCallback(TrainerCallback):
@@ -34,7 +34,7 @@ class GradientCollectorCallback(TrainerCallback):
         attention_cfgs: dict[str, AttentionConfig] = {},
         projection_dim: int = 16,
         include_bias: bool = False,
-        dtype: DTypeLike = np.float16,
+        dtype: np.dtype = np.dtype(np.float16),
         accumulate_grads: bool = False,
         use_optimizer_state: bool = True,
         track_order: bool = False,
@@ -77,8 +77,7 @@ class GradientCollectorCallback(TrainerCallback):
         self.mod_grads = {}
         self.batch_indices: Tensor | None = None
 
-        # TODO: Handle this more elegantly
-        self.torch_dtype = torch.float32 if self.dtype == np.float32 else torch.float16
+        self.torch_dtype = convert_dtype_to_torch(self.dtype)
 
     def write_grads(self, grad_buffer: np.memmap):
         torch.cuda.synchronize()

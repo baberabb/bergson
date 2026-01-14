@@ -1,7 +1,9 @@
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import torch
 from simple_parsing import field
 
 
@@ -15,9 +17,6 @@ class DataConfig:
 
     subset: str | None = None
     """Subset of the dataset to use for building the index."""
-
-    streaming: bool = False
-    """Whether to use streaming mode for the dataset."""
 
     prompt_column: str = "text"
     """Column in the dataset that contains the prompts."""
@@ -33,8 +32,15 @@ class DataConfig:
     When specified, gradients are calculated using the policy
     gradient loss from Dr. GRPO. https://arxiv.org/abs/2503.20783"""
 
+    skip_nan_rewards: bool = False
+    """Whether to skip examples with NaN rewards."""
+
     truncation: bool = False
     """Whether to truncate long documents to fit the token budget."""
+
+    data_args: str = ""
+    """Arguments to pass to the dataset constructor in the format
+    arg1=val1,arg2=val2."""
 
 
 @dataclass
@@ -49,6 +55,56 @@ class AttentionConfig:
 
     head_dim: int = 0
     """Axis index for `num_heads` in the weight matrix."""
+
+
+@dataclass
+class DistributedConfig:
+    """Configuration for multi-node preconditioner computation."""
+
+    nnode: int = 1
+    """The number of nodes to use for preconditioner computation."""
+
+    nproc_per_node: int = field(default_factory=lambda: torch.cuda.device_count())
+    """The number of processes per node."""
+
+    node_rank: int | None = None
+    """The rank of the current node. If not set Bergson will attempt to infer
+    it from environment variables."""
+
+    @property
+    def _node_rank(self) -> int:
+        """Get the rank of the node from config or environment variables."""
+        if self.node_rank is not None:
+            return self.node_rank
+
+        if self.nnode == 1:
+            return 0
+
+        for var in ("SLURM_NODEID", "GROUP_RANK", "NODE_RANK"):
+            if var in os.environ:
+                return int(os.environ[var])
+
+        raise ValueError("Node rank not found. Set it with --node_rank.")
+
+    @property
+    def world_size(self) -> int:
+        """Total number of processes across all nodes."""
+        return self.nnode * self.nproc_per_node
+
+    @property
+    def start_rank(self) -> int:
+        """Starting rank for processes on this node."""
+        return self._node_rank * self.nproc_per_node
+
+    @property
+    def local_rank(self) -> int:
+        """Local rank of the current process."""
+        return int(os.environ.get("LOCAL_RANK", 0))
+
+    @property
+    def rank(self) -> int:
+        """Rank of the current process."""
+        return self.start_rank + self.local_rank
 
 
 @dataclass
@@ -85,11 +141,14 @@ class IndexConfig:
     projection_type: Literal["normal", "rademacher"] = "rademacher"
     """Type of random projections to use for the gradients."""
 
-    token_batch_size: int = 8192
+    token_batch_size: int = 2048
     """Batch size in tokens for building the index."""
 
     processor_path: str = ""
     """Path to a precomputed processor."""
+
+    normalizer: Literal["adafactor", "adam", "none"] = "none"
+    """Type of normalizer to use for the gradients."""
 
     skip_preconditioners: bool = False
     """Whether to skip computing preconditioners for the gradients."""
@@ -135,10 +194,26 @@ class IndexConfig:
     For example, "transformer.h.*.mlp.*" will exclude all MLP layers in a
     standard transformer architecture."""
 
+    overwrite: bool = False
+    """Whether to overwrite any existing index in the run path."""
+
+    distributed: DistributedConfig = field(default_factory=DistributedConfig)
+    """Configuration for multi-node distributed preconditioner computation."""
+
     @property
     def partial_run_path(self) -> Path:
         """Temporary path to use while writing build artifacts."""
         return Path(self.run_path + ".part")
+
+    def __post_init__(self):
+        if isinstance(self.data, dict):
+            self.data = DataConfig(**self.data)
+
+        if isinstance(self.attention, dict):
+            self.attention = AttentionConfig(**self.attention)
+
+        if isinstance(self.distributed, dict):
+            self.distributed = DistributedConfig(**self.distributed)
 
 
 @dataclass
@@ -155,11 +230,18 @@ class QueryConfig:
     text_field: str = "text"
     """Field to use for the query."""
 
-    unit_norm: bool = False
+    unit_norm: bool = True
     """Whether to unit normalize the query."""
+
+    device_map_auto: bool = False
+    """Load the model onto multiple devices if necessary."""
 
     faiss: bool = False
     """Whether to use FAISS for the query."""
+
+    reverse: bool = False
+    """Whether to return results in reverse order
+    (lowest influences instead of highest)."""
 
 
 @dataclass
@@ -200,6 +282,10 @@ class ScoreConfig:
     batch_size: int = 1024
     """Batch size for processing the query dataset."""
 
+    precision: Literal["auto", "bf16", "fp16", "fp32"] = "auto"
+    """Precision (dtype) to convert the query and index gradients to before
+    computing the scores. If "auto", the model's gradient dtype is used."""
+
 
 @dataclass
 class ReduceConfig:
@@ -229,15 +315,20 @@ class FaissConfig:
         - "PQ6720": nearest neighbors with vector product quantization to 6720 elements.
             Reduces memory usage at the cost of accuracy.
     """
+
     mmap_index: bool = False
     """Whether to query the gradients on-disk."""
+
     max_train_examples: int | None = None
     """The maximum number of examples to train the index on.
         If `None`, all examples will be used."""
+
     batch_size: int = 1024
     """The batch size for pre-processing gradients."""
+
     num_shards: int = 1
     """The number of shards to build for an index.
         Using more shards reduces peak RAM usage."""
+
     nprobe: int = 10
     """The number of FAISS vector clusters to search if using ANN."""
