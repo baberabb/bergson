@@ -27,6 +27,12 @@ def test_build_e2e(tmp_path: Path):
             "--split",
             "train[:100]",
             "--truncation",
+            "--projection_dim",
+            "4",
+            "--token_batch_size",
+            "1024",
+            "--precision",
+            "bf16",
         ],
         cwd=tmp_path,
         capture_output=True,  # Add this
@@ -35,17 +41,26 @@ def test_build_e2e(tmp_path: Path):
 
     assert "Error" not in result.stderr, f"Error found in stderr:\n{result.stderr}"
 
+    processor = GradientProcessor.load(tmp_path / "test_e2e")
+
+    assert processor.preconditioners is not None
+    assert processor.preconditioners_eigen is not None
+
+    assert len(processor.preconditioners) > 0
+    assert len(processor.preconditioners_eigen) > 0
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_build_consistency(tmp_path: Path, model, dataset):
     cfg = IndexConfig(
         run_path=str(tmp_path),
         skip_preconditioners=True,
+        token_batch_size=1024,
     )
     collect_gradients(
         model=model,
         data=dataset,
-        processor=GradientProcessor(),
+        processor=GradientProcessor(projection_dim=cfg.projection_dim),
         cfg=cfg,
     )
 
@@ -53,7 +68,7 @@ def test_build_consistency(tmp_path: Path, model, dataset):
 
     cache_path = Path("runs/test_build_cache.npy")
     if not cache_path.exists():
-        # Regenerate cache
+        # Regenerate cache, TODO: We shouldn't do this, maybe use dvc
         np.save(cache_path, index[index.dtype.names[0]][0])
 
     cached_item_grad = np.load(cache_path)
@@ -70,7 +85,7 @@ def test_split_attention_build(tmp_path: Path, model, dataset):
         ),
     }
 
-    cfg = IndexConfig(run_path=str(tmp_path))
+    cfg = IndexConfig(run_path=str(tmp_path), token_batch_size=1024)
 
     collect_gradients(
         model=model,
@@ -98,6 +113,8 @@ def test_conv1d_build(tmp_path: Path, dataset):
         # This build hangs in pytest with preconditioners enabled.
         # It works when run directly so it may be a pytest issue.
         skip_preconditioners=True,
+        # GPT-2 max_position_embeddings is 1024
+        token_batch_size=1024,
     )
 
     collect_gradients(
@@ -116,3 +133,23 @@ def test_conv1d_build(tmp_path: Path, dataset):
     assert len(modules := index.dtype.names) != 0
     assert len(index[modules[0]]) == len(dataset)
     assert index[modules[0]][0].sum().item() != 0.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_tokenizer_build(tmp_path: Path, model, dataset):
+    cfg = IndexConfig(
+        run_path=str(tmp_path),
+        # Use a different tokenizer than the model
+        tokenizer="openai-community/gpt2",
+        token_batch_size=1024,
+    )
+
+    collect_gradients(
+        model=model,
+        data=dataset,
+        processor=GradientProcessor(projection_dim=16),
+        cfg=cfg,
+    )
+    assert any(
+        Path(cfg.partial_run_path).iterdir()
+    ), "Expected artifacts in the run path"

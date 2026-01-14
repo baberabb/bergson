@@ -4,7 +4,7 @@ import torch
 from torch import Tensor, nn
 from transformers import PreTrainedModel
 
-from .gradients import Normalizer
+from ..gradients import Normalizer
 
 
 class FiniteDiff:

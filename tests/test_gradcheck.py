@@ -37,7 +37,7 @@ def test_reversibility(step_size):
     model.zero_grad(set_to_none=True)
     loss.backward()
 
-    grads = {n: p.grad.detach().clone() for n, p in model.named_parameters()}
+    grads = {n: p.grad.detach().clone() for n, p in model.named_parameters()}  # type: ignore
     orig = clone_params(model)
 
     # 2. compute finite differences

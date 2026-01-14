@@ -3,8 +3,9 @@ import math
 import os
 import random
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence, cast, overload
 
+import ml_dtypes  # noqa: F401  # registers bfloat16 dtype with numpy
 import numpy as np
 import pyarrow as pa
 import torch
@@ -19,8 +20,13 @@ from datasets import (
 )
 from numpy.typing import DTypeLike
 
-from .config import DataConfig
-from .utils import assert_type
+from .config import DataConfig, ReduceConfig
+from .utils.utils import (
+    assert_type,
+    convert_dtype_to_np,
+    simple_parse_args_string,
+    tensor_to_numpy,
+)
 
 
 def ceildiv(a: int, b: int) -> int:
@@ -28,7 +34,11 @@ def ceildiv(a: int, b: int) -> int:
     return -(-a // b)  # Equivalent to math.ceil(a / b) but faster for integers
 
 
-def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[list[int]]:
+def allocate_batches(
+    doc_lengths: list[int],
+    N: int,
+    seed: int = 42,
+) -> list[list[int]]:
     """
     Allocate documents into batches that are then distributed evenly across
     a fixed number of workers.
@@ -41,7 +51,8 @@ def allocate_batches(doc_lengths: list[int], N: int, seed: int = 42) -> list[lis
     N : int
         Hard memory budget per *batch*, expressed as
         ``max(length in batch) * (# docs in batch) ≤ N``.
-
+    seed : int
+        Random seed for shuffling batches within each worker's allocation.
     Returns
     -------
     list[list[int]]
@@ -182,10 +193,6 @@ def create_index(
         # Ensure the directory exists
         root.mkdir(parents=True, exist_ok=True)
 
-        # Ensure no existing file is overwritten
-        if grad_path.exists():
-            raise FileExistsError(f"File {grad_path} already exists.")
-
         # Allocate (extends file to right size without writing zeros byte-by-byte)
         nbytes = struct_dtype["itemsize"] * num_grads
         with open(grad_path, "wb") as f:
@@ -201,7 +208,7 @@ def create_index(
                     "num_grads": num_grads,
                     "dtype": struct_dtype,
                     "grad_sizes": grad_sizes,
-                    "base_dtype": np.dtype(dtype).str,
+                    "base_dtype": np.dtype(dtype).name,
                 },
                 f,
                 indent=2,
@@ -230,7 +237,7 @@ def load_data_string(
     data_str: str,
     split: str = "train",
     subset: str | None = None,
-    streaming: bool = False,
+    data_args: str = "",
 ) -> Dataset | IterableDataset:
     """Load a dataset from a string identifier or path."""
     if data_str.endswith(".csv"):
@@ -239,7 +246,8 @@ def load_data_string(
         ds = assert_type(Dataset, Dataset.from_json(data_str))
     else:
         try:
-            ds = load_dataset(data_str, subset, split=split, streaming=streaming)
+            kwargs = simple_parse_args_string(data_args)
+            ds = load_dataset(data_str, subset, split=split, **kwargs)
 
             if isinstance(ds, DatasetDict) or isinstance(ds, IterableDatasetDict):
                 raise NotImplementedError(
@@ -255,9 +263,9 @@ def load_data_string(
     return ds
 
 
-def load_gradients(root_dir: Path, structured: bool = True) -> np.memmap:
+def load_gradients(root_dir: Path | str, structured: bool = True) -> np.memmap:
     """Map the structured gradients stored in `root_dir` into memory."""
-
+    root_dir = Path(root_dir)
     with (root_dir / "info.json").open("r") as f:
         info = json.load(f)
 
@@ -283,11 +291,13 @@ def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
     """Load a dataset of gradients from `root_dir`."""
 
     def load_shard(dir: Path) -> Dataset:
-        ds = Dataset.load_from_disk(dir / "data.hf")
+        ds = Dataset.load_from_disk(str(dir / "data.hf"))
 
         # Add gradients to HF dataset.
         mmap = load_gradients(dir, structured=structured)
+
         if structured:
+            assert mmap.dtype.names is not None
             for field_name in mmap.dtype.names:
                 flat = pa.array(mmap[field_name].reshape(-1).copy())
                 col = pa.FixedSizeListArray.from_arrays(flat, mmap[field_name].shape[1])
@@ -295,7 +305,6 @@ def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
         else:
             flat = pa.array(mmap.reshape(-1).copy())
             col_arrow = pa.FixedSizeListArray.from_arrays(flat, mmap.shape[1])
-
             ds = ds.add_column("gradients", col_arrow, new_fingerprint="gradients")
 
         return ds
@@ -307,6 +316,147 @@ def load_gradient_dataset(root_dir: Path, structured: bool = True) -> Dataset:
     return concatenate_datasets(
         [load_shard(path) for path in sorted(root_dir.iterdir()) if path.is_dir()]
     ).flatten_indices()
+
+
+class Scores(np.memmap):
+    @overload
+    def __getitem__(self, key: str) -> np.ndarray[Any, Any]: ...
+
+    @overload
+    def __getitem__(self, key: int | slice) -> Any: ...
+
+    def __getitem__(self, key: Any) -> Any:  # type: ignore
+        return super().__getitem__(key)
+
+
+def load_scores(
+    path: Path,
+) -> Scores:
+    bin_path = path / "scores.bin"
+    info_path = path / "info.json"
+
+    with open(info_path, "r") as f:
+        info = json.load(f)
+
+    mmap = np.memmap(
+        bin_path,
+        dtype=info["dtype"],
+        mode="r",
+        shape=(info["num_items"],),
+    )
+
+    return cast(Scores, mmap)
+
+
+class Builder:
+    """Creates and writes gradients to disk, with optional distributed reduction.
+    Scores are always saved as float32."""
+
+    num_items: int
+
+    grad_buffer: np.memmap
+
+    reduce_cfg: ReduceConfig | None
+
+    def __init__(
+        self,
+        path: Path,
+        data: Dataset,
+        grad_sizes: dict[str, int],
+        dtype: torch.dtype,
+        reduce_cfg: ReduceConfig | None = None,
+    ):
+        self.grad_sizes = grad_sizes
+        self.num_items = len(data)
+        self.reduce_cfg = reduce_cfg
+        self.eps = torch.finfo(torch.float32).eps
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
+        if reduce_cfg is not None:
+            num_grads = 1
+            np_dtype = np.float32
+            self.in_memory_grad_buffer = torch.zeros(
+                (num_grads, sum(self.grad_sizes.values())),
+                dtype=torch.float32,
+                device=f"cuda:{self.rank}",
+            )
+        else:
+            num_grads = self.num_items
+            np_dtype = convert_dtype_to_np(dtype)
+            self.in_memory_grad_buffer = None
+
+        self.grad_buffer = create_index(
+            path,
+            num_grads=num_grads,
+            grad_sizes=self.grad_sizes,
+            dtype=np_dtype,
+            with_structure=False,
+        )
+
+    def reduce(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
+        assert self.reduce_cfg is not None and self.in_memory_grad_buffer is not None
+        device = next(iter(mod_grads.values())).device
+
+        if self.reduce_cfg.unit_normalize:
+            ssqs = torch.zeros(len(indices), device=device)
+            for mod_grad in mod_grads.values():
+                ssqs += mod_grad.pow(2).sum(dim=-1)
+            norms = ssqs.sqrt()
+        else:
+            norms = torch.ones(len(indices), device=device)
+
+        offset = 0
+        for module_name in self.grad_sizes.keys():
+            grads = mod_grads[module_name]
+            if self.reduce_cfg.unit_normalize:
+                grads = grads / (norms.unsqueeze(1) + self.eps)
+
+            grads = grads.sum(dim=0).to(torch.float32)
+
+            self.in_memory_grad_buffer[0, offset : offset + grads.shape[0]] += grads
+            offset += grads.shape[0]
+
+    def __call__(self, indices: list[int], mod_grads: dict[str, torch.Tensor]):
+        torch.cuda.synchronize()
+
+        if self.reduce_cfg is not None:
+            self.reduce(indices, mod_grads)
+        else:
+            # It turns out that it's very important for efficiency to write the
+            # gradients sequentially instead of first concatenating them, then
+            # writing to one vector
+            offset = 0
+            for module_name in self.grad_sizes.keys():
+                self.grad_buffer[
+                    indices, offset : offset + mod_grads[module_name].shape[1]
+                ] = tensor_to_numpy(mod_grads[module_name])
+                offset += mod_grads[module_name].shape[1]
+
+    def flush(self):
+        self.grad_buffer.flush()
+
+    def dist_reduce(self):
+        if self.reduce_cfg is None:
+            return
+
+        assert self.in_memory_grad_buffer is not None
+
+        self.in_memory_grad_buffer = self.in_memory_grad_buffer.cuda()
+
+        if dist.is_initialized():
+            dist.reduce(self.in_memory_grad_buffer, dst=0, op=dist.ReduceOp.SUM)
+
+        if self.reduce_cfg.method == "mean":
+            self.in_memory_grad_buffer /= self.num_items
+
+        self.in_memory_grad_buffer = self.in_memory_grad_buffer.cpu()
+
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if rank == 0:
+            self.grad_buffer[:] = tensor_to_numpy(self.in_memory_grad_buffer).astype(
+                self.grad_buffer.dtype
+            )
+
+        self.in_memory_grad_buffer = self.in_memory_grad_buffer.cpu()
 
 
 def pad_and_tensor(

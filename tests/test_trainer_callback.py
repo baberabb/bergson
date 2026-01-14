@@ -26,7 +26,7 @@ from bergson.huggingface import (
     GradientCollectorCallback,
     prepare_for_gradient_collection,
 )
-from bergson.utils import assert_type
+from bergson.utils.utils import assert_type
 
 
 class TestGradientCollectorCallback:

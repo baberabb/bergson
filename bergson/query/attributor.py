@@ -1,4 +1,3 @@
-from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
@@ -6,8 +5,9 @@ from typing import Generator
 import torch
 from torch import Tensor, nn
 
+from bergson.collector.gradient_collectors import TraceCollector
 from bergson.data import load_gradients
-from bergson.gradients import GradientCollector, GradientProcessor
+from bergson.gradients import GradientProcessor
 from bergson.query.faiss_index import FaissConfig, FaissIndex
 
 
@@ -39,7 +39,7 @@ class TraceResult:
 class Attributor:
     def __init__(
         self,
-        index_path: Path,
+        index_path: str | Path,
         device: str = "cpu",
         dtype: torch.dtype = torch.float32,
         unit_norm: bool = False,
@@ -49,6 +49,7 @@ class Attributor:
         self.dtype = dtype
         self.unit_norm = unit_norm
         self.faiss_index = None
+        index_path = Path(index_path)
 
         # Load the gradient processor
         self.processor = GradientProcessor.load(index_path, map_location=device)
@@ -75,7 +76,7 @@ class Attributor:
 
         # Load the gradients into memory
         mmap = load_gradients(index_path)
-
+        assert mmap.dtype.names is not None
         # Copy gradients into device memory
         self.grads = {
             name: torch.tensor(mmap[name], device=device, dtype=dtype)
@@ -97,6 +98,7 @@ class Attributor:
         queries: dict[str, Tensor],
         k: int | None,
         modules: set[str] | None = None,
+        reverse: bool = False,
     ):
         """
         Search for the `k` nearest examples in the index based on the query or queries.
@@ -106,6 +108,7 @@ class Attributor:
             k: The number of nearest examples to return for each query.
             module: The name of the module to search for. If `None`,
                 all modules will be searched.
+            reverse: If True, return the lowest influence examples instead of highest.
 
         Returns:
             A namedtuple containing the top `k` indices and inner products for each
@@ -134,7 +137,7 @@ class Attributor:
                 .numpy()
             )
 
-            distances, indices = self.faiss_index.search(q, k)
+            distances, indices = self.faiss_index.search(q, k, reverse=reverse)
 
             return torch.from_numpy(distances), torch.from_numpy(indices)
 
@@ -149,7 +152,7 @@ class Attributor:
             [q[name] @ self.grads[name].mT for name in modules], dim=-1
         ).sum(-1)
 
-        return torch.topk(scores, k)
+        return torch.topk(scores, k, largest=not reverse)  # type: ignore
 
     @contextmanager
     def trace(
@@ -159,29 +162,32 @@ class Attributor:
         *,
         precondition: bool = False,
         modules: set[str] | None = None,
+        reverse: bool = False,
     ) -> Generator[TraceResult, None, None]:
         """
         Context manager to trace the gradients of a module and return the
         corresponding Attributor instance.
+
+        Args:
+            module: The module to trace.
+            k: The number of nearest examples to return.
+            precondition: Whether to apply preconditioning.
+            modules: The modules to trace. If None, all modules will be traced.
+            reverse: If True, return the lowest influence examples instead of highest.
         """
-        mod_grads = defaultdict(list)
+
         result = TraceResult()
 
-        def callback(name: str, g: Tensor):
-            g = g.flatten(1)
-
-            # Precondition the gradient using Cholesky solve
-            if precondition:
-                eigval, eigvec = self.processor.preconditioners_eigen[name]
-                eigval_inverse_sqrt = 1.0 / (eigval).sqrt()
-                P = eigvec * eigval_inverse_sqrt @ eigvec.mT
-                g = g.type_as(P)
-                g = g @ P
-
-            # Store the gradient for later use
-            mod_grads[name].append(g.to(self.device, self.dtype, non_blocking=True))
-
-        with GradientCollector(module, callback, self.processor, modules):
+        collector = TraceCollector(
+            model=module,
+            processor=self.processor,
+            precondition=precondition,
+            target_modules=modules,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        mod_grads = collector.mod_grads
+        with collector:
             yield result
 
         if not mod_grads:
@@ -196,4 +202,4 @@ class Attributor:
         if any(q.isnan().any() for q in queries.values()):
             raise ValueError("NaN found in queries.")
 
-        result._scores, result._indices = self.search(queries, k, modules)
+        result._scores, result._indices = self.search(queries, k, modules, reverse)

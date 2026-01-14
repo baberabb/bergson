@@ -12,26 +12,23 @@ license = {text = "MIT License"}
 dependencies = [
     "accelerate", # For device_map in from_pretrained
     "datasets",
-    "hf-transfer>=0.1.9",
-    "matplotlib>=3.10.7",
+    "jaxtyping>=0.3.3",
+    "ml_dtypes",
     "natsort",
-    "notebook>=7.4.7",
+    "numpy",
     "peft>=0.17.0",
+    "pyarrow",
     "simple-parsing",
     "torch",
-    "transformers",
+    "transformers<4.56.0" # 4.56.0 increases fp error from operation order
 ]
-version = "0.2.0"
+version = "0.5.0"
 [project.optional-dependencies]
 dev = [
-    "matplotlib",
     "pre-commit",
     "pytest",
-    "pytest-xdist",
     "pyright",
-    "setuptools",
     "trl",
-    "wandb",
     # Generate documentation
     "furo",
     "myst-parser",
@@ -39,6 +36,7 @@ dev = [
     "sphinx-autodoc-typehints",
     "sphinx-rtd-theme",
     "nbsphinx",
+    "torch-tb-profiler>=0.4.3",
 ]
 example = [
     "trl",
@@ -58,12 +56,10 @@ reportPrivateImportUsage = false
 include = ["bergson*"]
 
 [tool.ruff]
-lint.ignore = ["E741", # Ambiguous variable name
-               "E501", # line-too-long (formatter takes care of it)
-]
+lint.ignore = ["E741","F722"]   # Ambiguous variable name, jaxtyping typing error
 # Enable pycodestyle (`E`), Pyflakes (`F`), and isort (`I`) codes
 # See https://beta.ruff.rs/docs/rules/ for more possible rules
-lint.extend-select = ["E", "F", "I"]
+lint.select = ["E", "F", "I"]
 # Same as Black.
 line-length = 88
 

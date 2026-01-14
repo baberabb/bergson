@@ -12,15 +12,18 @@ from tqdm.auto import tqdm
 from bergson.collection import collect_gradients
 from bergson.config import IndexConfig
 from bergson.data import allocate_batches
-from bergson.utils import assert_type
-from bergson.worker_utils import setup_model_and_peft
-
-from .distributed import launch_distributed_run
-from .worker_utils import create_processor, setup_data_pipeline
+from bergson.distributed import launch_distributed_run
+from bergson.utils.utils import assert_type, setup_reproducibility
+from bergson.utils.worker_utils import (
+    create_processor,
+    setup_data_pipeline,
+    setup_model_and_peft,
+)
 
 
 def build_worker(
     rank: int,
+    local_rank: int,
     world_size: int,
     cfg: IndexConfig,
     ds: Dataset | IterableDataset,
@@ -32,6 +35,8 @@ def build_worker(
     ----------
     rank : int
         Distributed rank / GPU ID for this worker.
+    local_rank : int
+        Local rank / GPU ID for this worker on the node.
     world_size : int
         Total number of workers participating in the run.
     cfg : IndexConfig
@@ -39,7 +44,7 @@ def build_worker(
     ds : Dataset | IterableDataset
         The entire dataset to be indexed. A subset is assigned to each worker.
     """
-    torch.cuda.set_device(rank)
+    torch.cuda.set_device(local_rank)
 
     # These should be set by the main process
     if world_size > 1:
@@ -49,14 +54,14 @@ def build_worker(
         dist.init_process_group(
             "nccl",
             init_method=f"tcp://{addr}:{port}",
-            device_id=torch.device(f"cuda:{rank}"),
+            device_id=torch.device(f"cuda:{local_rank}"),
             rank=rank,
             timeout=timedelta(hours=1),
             world_size=world_size,
         )
 
-    model, target_modules = setup_model_and_peft(cfg, rank)
-    processor = create_processor(cfg, rank)
+    model, target_modules = setup_model_and_peft(cfg)
+    processor = create_processor(model, ds, cfg, target_modules)
 
     attention_cfgs = {module: cfg.attention for module in cfg.split_attention_modules}
 
@@ -110,12 +115,19 @@ def build(index_cfg: IndexConfig):
         Specifies the run path, dataset, model, tokenizer, PEFT adapters,
         and many other gradient collection settings.
     """
+    if index_cfg.debug:
+        setup_reproducibility()
+
     index_cfg.partial_run_path.mkdir(parents=True, exist_ok=True)
     with (index_cfg.partial_run_path / "index_config.json").open("w") as f:
         json.dump(asdict(index_cfg), f, indent=2)
 
     ds = setup_data_pipeline(index_cfg)
 
-    launch_distributed_run("build", build_worker, [index_cfg, ds])
+    launch_distributed_run(
+        "build", build_worker, [index_cfg, ds], index_cfg.distributed
+    )
 
-    shutil.move(index_cfg.partial_run_path, index_cfg.run_path)
+    rank = index_cfg.distributed.rank
+    if rank == 0:
+        shutil.move(index_cfg.partial_run_path, index_cfg.run_path)
