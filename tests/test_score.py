@@ -205,9 +205,7 @@ def test_memmap_score_writer_bfloat16(tmp_path: Path):
     num_items = 10
     num_scores = 3
 
-    writer = MemmapScoreWriter(
-        tmp_path, num_items, num_scores, dtype=torch.bfloat16
-    )
+    writer = MemmapScoreWriter(tmp_path, num_items, num_scores, dtype=torch.bfloat16)
 
     # Create some test scores in bfloat16
     scores_batch1 = torch.tensor(
@@ -267,9 +265,7 @@ def test_memmap_score_writer_float32(tmp_path: Path):
     num_items = 5
     num_scores = 2
 
-    writer = MemmapScoreWriter(
-        tmp_path, num_items, num_scores, dtype=torch.float32
-    )
+    writer = MemmapScoreWriter(tmp_path, num_items, num_scores, dtype=torch.float32)
 
     scores = torch.tensor([[1.5, 2.5], [3.5, 4.5]], dtype=torch.float32)
     writer([0, 1], scores)

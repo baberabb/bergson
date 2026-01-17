@@ -79,7 +79,7 @@ def launch_distributed_run(
             result = ctx.wait()
 
             if result is not None and hasattr(result, "failures") and result.failures:
-                newline = '\n'
+                newline = "\n"
                 raise RuntimeError(
                     f"{process_name} failed with {len(result.failures)} process "
                     f"failure(s): {newline.join(result.failures)}"

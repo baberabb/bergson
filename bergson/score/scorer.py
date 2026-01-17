@@ -49,10 +49,7 @@ class Scorer:
         self.writer = writer
 
         self.query_tensor = torch.cat(
-            [
-                query_grads[m].to(device=self.device, dtype=self.dtype) 
-                for m in modules
-            ],
+            [query_grads[m].to(device=self.device, dtype=self.dtype) for m in modules],
             dim=1,
         )
 

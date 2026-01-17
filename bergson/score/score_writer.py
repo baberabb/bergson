@@ -102,9 +102,7 @@ class MemmapScoreWriter(ScoreWriter):
         itemsize = ((total_bytes + 7) // 8) * 8
 
         # For JSON serialization, convert numpy dtype to string
-        format_strs = [
-            str(f) if isinstance(f, np.dtype) else f for f in formats
-        ]
+        format_strs = [str(f) if isinstance(f, np.dtype) else f for f in formats]
         struct_dtype_json = {
             "names": names,
             "formats": format_strs,
