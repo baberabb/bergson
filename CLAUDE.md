@@ -18,6 +18,8 @@ You can call CLI commands without prefixing `python -m`, like `bergson build`.
 
 Use `pre-commit run --all-files` if you forget to install pre-commit and it doesn't run in the hook.
 
+Don't remove large datasets from the HF cache without asking.
+
 ### Tests
 
 Mark tests requiring GPUs with `@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")`.
