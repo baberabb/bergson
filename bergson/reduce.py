@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import shutil
 from dataclasses import asdict
@@ -10,6 +11,7 @@ from datasets import Dataset, IterableDataset
 from tqdm.auto import tqdm
 
 from bergson.collection import collect_gradients
+from bergson.collector.gradient_collectors import GradientCollector
 from bergson.config import IndexConfig, ReduceConfig
 from bergson.data import allocate_batches
 from bergson.utils.utils import assert_type
@@ -109,6 +111,38 @@ def reduce_worker(
         flush(kwargs=kwargs)  # Final flush
         if rank == 0:
             processor.save(index_cfg.partial_run_path)
+
+    # Save info.json for score command (if it doesn't already exist from Builder)
+    if rank == 0:
+        info_path = index_cfg.partial_run_path / "info.json"
+        if not info_path.exists():
+            # Create temporary collector to get shapes
+            shapes = GradientCollector(
+                model=model,
+                data=Dataset.from_list([]),
+                processor=processor,
+                cfg=index_cfg,
+                target_modules=target_modules,
+            ).shapes()
+
+            grad_sizes = {name: math.prod(s) for name, s in shapes.items()}
+
+            # Build dtype structure matching create_index format for consistency
+            struct_dtype = {
+                "names": list(grad_sizes.keys()),
+                "formats": [f"({size},)<f4" for size in grad_sizes.values()],
+                "itemsize": 4 * sum(grad_sizes.values()),
+            }
+
+            metadata = {
+                "num_grads": 1,
+                "dtype": struct_dtype,
+                "grad_sizes": grad_sizes,
+                "base_dtype": "float32",
+            }
+
+            with info_path.open("w") as f:
+                json.dump(metadata, f, indent=2)
 
 
 def reduce(index_cfg: IndexConfig, reduce_cfg: ReduceConfig):

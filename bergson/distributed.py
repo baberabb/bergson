@@ -76,7 +76,14 @@ def launch_distributed_run(
                 },
                 logs_specs=DefaultLogsSpecs(),
             )
-            ctx.wait()
+            result = ctx.wait()
+
+            if result is not None and hasattr(result, "failures") and result.failures:
+                newline = '\n'
+                raise RuntimeError(
+                    f"{process_name} failed with {len(result.failures)} process "
+                    f"failure(s): {newline.join(result.failures)}"
+                )
         finally:
             if ctx is not None:
                 ctx.close()  # Kill any processes that are still running

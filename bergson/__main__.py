@@ -6,6 +6,7 @@ from typing import Optional, Union
 from simple_parsing import ArgumentParser, ConflictResolution
 
 from .build import build
+from .cli.auto_batch_size import AutoBatchSize
 from .config import IndexConfig, QueryConfig, ReduceConfig, ScoreConfig
 from .query.query_index import query
 from .reduce import reduce
@@ -57,8 +58,7 @@ class Reduce:
         """Reduce a gradient index."""
         if self.index_cfg.projection_dim != 0:
             print(
-                "Warning: projection_dim is not 0. "
-                "Compressed gradients will be reduced."
+                f"Using a projection dimension of " f"{self.index_cfg.projection_dim}. "
             )
 
         validate_run_path(self.index_cfg)
@@ -80,7 +80,7 @@ class Score:
 
         if self.index_cfg.projection_dim != 0:
             print(
-                "Warning: projection_dim is not 0. Compressed gradients will be scored."
+                f"Using a projection dimension of " f"{self.index_cfg.projection_dim}. "
             )
 
         validate_run_path(self.index_cfg)
@@ -103,7 +103,7 @@ class Query:
 class Main:
     """Routes to the subcommands."""
 
-    command: Union[Build, Query, Reduce, Score]
+    command: Union[Build, Query, Reduce, Score, AutoBatchSize]
 
     def execute(self):
         """Run the script."""

@@ -200,6 +200,9 @@ class IndexConfig:
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
     """Configuration for multi-node distributed preconditioner computation."""
 
+    max_tokens: int | None = None
+    """The maximum number of tokens to process. If None, all tokens will be processed. Only available for Dataset."""
+
     @property
     def partial_run_path(self) -> Path:
         """Temporary path to use while writing build artifacts."""

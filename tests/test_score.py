@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 from datasets import Dataset
+from ml_dtypes import bfloat16
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from bergson import (
@@ -17,11 +18,13 @@ from bergson.collector.gradient_collectors import GradientCollector
 from bergson.config import IndexConfig, ScoreConfig
 from bergson.data import create_index, load_scores
 from bergson.score.score import precondition_ds
+from bergson.score.score_writer import MemmapScoreWriter
 from bergson.score.scorer import Scorer
 from bergson.utils.utils import (
     assert_type,
     convert_precision_to_torch,
     get_gradient_dtype,
+    tensor_to_numpy,
 )
 
 
@@ -195,3 +198,87 @@ def test_precondition_ds(tmp_path: Path, model, dataset):
             assert_type(torch.Tensor, preconditioned_query_ds[name][:]),
             assert_type(torch.Tensor, vanilla_query_ds[name][:]),
         )
+
+
+def test_memmap_score_writer_bfloat16(tmp_path: Path):
+    """Test that MemmapScoreWriter correctly writes and reads bfloat16 scores."""
+    num_items = 10
+    num_scores = 3
+
+    writer = MemmapScoreWriter(
+        tmp_path, num_items, num_scores, dtype=torch.bfloat16
+    )
+
+    # Create some test scores in bfloat16
+    scores_batch1 = torch.tensor(
+        [[1.5, 2.5, 3.5], [4.5, 5.5, 6.5]], dtype=torch.bfloat16
+    )
+    scores_batch2 = torch.tensor(
+        [[7.5, 8.5, 9.5], [10.5, 11.5, 12.5], [13.5, 14.5, 15.5]],
+        dtype=torch.bfloat16,
+    )
+
+    # Write scores
+    writer([0, 1], scores_batch1)
+    writer([5, 6, 7], scores_batch2)
+    writer.flush()
+
+    # Verify the files exist
+    assert (tmp_path / "scores.bin").exists()
+    assert (tmp_path / "info.json").exists()
+
+    # Read back and verify
+    with open(tmp_path / "info.json", "r") as f:
+        info = json.load(f)
+
+    assert info["num_items"] == num_items
+    assert info["num_scores"] == num_scores
+    assert "bfloat16" in info["dtype"]["formats"][0]
+
+    # Check written flags
+    assert writer.scores["written_0"][0] == True
+    assert writer.scores["written_0"][1] == True
+    assert writer.scores["written_0"][2] == False  # Not written
+    assert writer.scores["written_0"][5] == True
+    assert writer.scores["written_0"][6] == True
+    assert writer.scores["written_0"][7] == True
+
+    # Check score values (convert back to compare)
+    expected_batch1 = tensor_to_numpy(scores_batch1)
+    expected_batch2 = tensor_to_numpy(scores_batch2)
+
+    np.testing.assert_array_equal(
+        writer.scores["score_0"][[0, 1]].view(bfloat16), expected_batch1[:, 0]
+    )
+    np.testing.assert_array_equal(
+        writer.scores["score_1"][[0, 1]].view(bfloat16), expected_batch1[:, 1]
+    )
+    np.testing.assert_array_equal(
+        writer.scores["score_2"][[0, 1]].view(bfloat16), expected_batch1[:, 2]
+    )
+
+    np.testing.assert_array_equal(
+        writer.scores["score_0"][[5, 6, 7]].view(bfloat16), expected_batch2[:, 0]
+    )
+
+
+def test_memmap_score_writer_float32(tmp_path: Path):
+    """Test that MemmapScoreWriter correctly writes float32 scores (baseline)."""
+    num_items = 5
+    num_scores = 2
+
+    writer = MemmapScoreWriter(
+        tmp_path, num_items, num_scores, dtype=torch.float32
+    )
+
+    scores = torch.tensor([[1.5, 2.5], [3.5, 4.5]], dtype=torch.float32)
+    writer([0, 1], scores)
+    writer.flush()
+
+    # Verify values
+    np.testing.assert_array_almost_equal(
+        writer.scores["score_0"][[0, 1]], np.array([1.5, 3.5], dtype=np.float32)
+    )
+    np.testing.assert_array_almost_equal(
+        writer.scores["score_1"][[0, 1]], np.array([2.5, 4.5], dtype=np.float32)
+    )

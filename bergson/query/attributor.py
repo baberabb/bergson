@@ -9,6 +9,7 @@ from bergson.collector.gradient_collectors import TraceCollector
 from bergson.data import load_gradients
 from bergson.gradients import GradientProcessor
 from bergson.query.faiss_index import FaissConfig, FaissIndex
+from bergson.utils.utils import numpy_to_tensor
 
 
 class TraceResult:
@@ -77,9 +78,9 @@ class Attributor:
         # Load the gradients into memory
         mmap = load_gradients(index_path)
         assert mmap.dtype.names is not None
-        # Copy gradients into device memory
+        # Copy gradients into device memory (handles bfloat16/V2 void types)
         self.grads = {
-            name: torch.tensor(mmap[name], device=device, dtype=dtype)
+            name: numpy_to_tensor(mmap[name]).to(device=device, dtype=dtype)
             for name in mmap.dtype.names
         }
         self.N = mmap[mmap.dtype.names[0]].shape[0]

@@ -1,42 +1,59 @@
-from pathlib import Path
-
 import torch
 
-from bergson.config import ScoreConfig
-from bergson.score.score_writer import MemmapScoreWriter, ScoreWriter
+from bergson.score.score_writer import ScoreWriter
 
 
 class Scorer:
-    writer: ScoreWriter
+    """
+    Scores training gradients against query gradients.
+
+    Accepts a ScoreWriter for saving the scores (disk or in-memory).
+    """
 
     def __init__(
         self,
-        path: Path,
-        num_items: int,
         query_grads: dict[str, torch.Tensor],
-        score_cfg: ScoreConfig,
+        modules: list[str],
+        writer: ScoreWriter,
         device: torch.device,
         dtype: torch.dtype,
+        *,
+        unit_normalize: bool = False,
+        score_mode: str = "inner_product",
     ):
+        """
+        Initialize the scorer.
+
+        Parameters
+        ----------
+        query_grads : dict[str, torch.Tensor]
+            Query gradients keyed by module name.
+        modules : list[str]
+            List of module names to use for scoring.
+        writer : ScoreWriter
+            Writer for score output (InMemoryScoreWriter or MemmapScoreWriter).
+        device : torch.device
+            Device to perform scoring on.
+        dtype : torch.dtype
+            Dtype for scoring computation.
+        unit_normalize : bool
+            Whether to unit normalize gradients before scoring.
+        score_mode : str
+            Scoring mode: "inner_product" or "nearest".
+        """
         self.device = device
         self.dtype = dtype
-        self.num_items = num_items
+        self.modules = modules
+        self.unit_normalize = unit_normalize
+        self.score_mode = score_mode
+        self.writer = writer
 
         self.query_tensor = torch.cat(
             [
-                query_grads[m].to(device=self.device, dtype=self.dtype)
-                for m in score_cfg.modules
+                query_grads[m].to(device=self.device, dtype=self.dtype) 
+                for m in modules
             ],
             dim=1,
-        )
-        self.score_cfg = score_cfg
-
-        num_scores = len(query_grads[score_cfg.modules[0]])
-
-        self.writer = MemmapScoreWriter(
-            path,
-            num_items,
-            num_scores,
         )
 
     def __call__(
@@ -44,21 +61,22 @@ class Scorer:
         indices: list[int],
         mod_grads: dict[str, torch.Tensor],
     ):
+        """Score a batch of training gradients against all queries."""
         # Convert the gradients to the scoring dtype
         if next(iter(mod_grads.values())).dtype != self.dtype:
             mod_grads = {name: grad.to(self.dtype) for name, grad in mod_grads.items()}
 
         scores = self.score(mod_grads)
-
         self.writer(indices, scores)
 
     @torch.inference_mode()
-    def score(self, mod_grads: dict[str, torch.Tensor]):
-        grads = torch.cat([mod_grads[m] for m in self.score_cfg.modules], dim=1)
-        if self.score_cfg.unit_normalize:
-            grads /= grads.norm(dim=1, keepdim=True)
+    def score(self, mod_grads: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Compute scores for a batch of gradients."""
+        grads = torch.cat([mod_grads[m].to(self.device) for m in self.modules], dim=1)
+        if self.unit_normalize:
+            grads = grads / grads.norm(dim=1, keepdim=True)
 
-        if self.score_cfg.score == "nearest":
+        if self.score_mode == "nearest":
             all_scores = grads @ self.query_tensor.T
             return all_scores.max(dim=-1).values
 

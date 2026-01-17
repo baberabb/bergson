@@ -38,6 +38,11 @@ dev = [
     "nbsphinx",
     "torch-tb-profiler>=0.4.3",
 ]
+benchmarks = [
+    "wandb",
+    "kronfluence",
+    "dattri",
+]
 example = [
     "trl",
 ]

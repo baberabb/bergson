@@ -223,11 +223,13 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
 
     remove_columns = ds.column_names if cfg.drop_columns else None
 
-    ds = ds.map(
-        tokenize,
-        batched=True,
-        fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
-    )
+    if "input_ids" not in ds.column_names:
+        ds = ds.map(
+            tokenize,
+            batched=True,
+            fn_kwargs=dict(args=cfg.data, tokenizer=tokenizer),
+        )
+
     if cfg.data.reward_column:
         assert isinstance(ds, Dataset), "Dataset required for advantage estimation"
 
@@ -247,7 +249,34 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
             estimate_advantage(ds, cfg.data),
             new_fingerprint="advantage",  # type: ignore
         )
+
+    # Filter by max_tokens for Dataset
+    if cfg.max_tokens is not None and isinstance(ds, Dataset):
+        total_tokens = 0
+        indices_to_keep = []
+        for idx, length in enumerate(ds["length"]):
+            if total_tokens + length > cfg.max_tokens:
+                break
+            indices_to_keep.append(idx)
+            total_tokens += length
+
+        if indices_to_keep:
+            ds = ds.select(indices_to_keep)
+            print(
+                f"Filtered dataset to {len(indices_to_keep)} examples "
+                f"({total_tokens} tokens) due to max_tokens limit."
+            )
+        else:
+            print("Warning: No examples fit within max_tokens limit.")
+    elif cfg.max_tokens is not None and isinstance(ds, IterableDataset):
+        raise ValueError("max_tokens is not supported for IterableDataset")
+
+    # Keep length and input_ids
     if remove_columns is not None:
-        ds = ds.remove_columns(remove_columns)
+        columns_to_remove = [
+            col for col in remove_columns if col not in {"length", "input_ids"}
+        ]
+        if columns_to_remove:
+            ds = ds.remove_columns(columns_to_remove)
 
     return ds

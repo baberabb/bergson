@@ -2,9 +2,12 @@ import json
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+import ml_dtypes  # noqa: F401  # register bfloat16 dtype with numpy
 import numpy as np
 import torch
 import torch.distributed as dist
+
+from bergson.utils.utils import convert_dtype_to_np, tensor_to_numpy
 
 
 class ScoreWriter(ABC):
@@ -31,9 +34,27 @@ class ScoreWriter(ABC):
         raise NotImplementedError("Subclasses must implement this method")
 
 
+class InMemoryScoreWriter(ScoreWriter):
+    """Stores scores in memory as a torch tensor."""
+
+    def __init__(
+        self, num_items: int, num_scores: int, dtype: torch.dtype = torch.float32
+    ):
+        self.scores = torch.zeros((num_items, num_scores), device="cpu", dtype=dtype)
+
+    def __call__(self, indices: list[int], scores: torch.Tensor):
+        self.scores[indices] = scores.to(dtype=self.scores.dtype).cpu()
+
+    def flush(self):
+        # No-op for in-memory storage
+        pass
+
+
 class MemmapScoreWriter(ScoreWriter):
     """
-    Wraps a score scoring callback and stores the resulting scores in a tensor.
+    Writes scores to a memory-mapped file on disk.
+
+    Supports bfloat16 via ml_dtypes.
     """
 
     def __init__(
@@ -49,28 +70,47 @@ class MemmapScoreWriter(ScoreWriter):
         self.num_scores = num_scores
         self.dtype = dtype
         self.flush_interval = flush_interval
-
         self.num_batches_since_flush = 0
 
         self.path.mkdir(parents=True, exist_ok=True)
         scores_file_path = self.path / "scores.bin"
 
-        # Build a json-serializable structured dtype
+        # Convert torch dtype to numpy dtype (handles bfloat16 via ml_dtypes)
+        np_dtype = convert_dtype_to_np(dtype)
+        score_size = np_dtype.itemsize
+        bool_size = np.dtype("bool").itemsize
+
+        # Build a structured dtype with (score, written) pairs per query
+        # Align each pair to the next power of 2 for efficiency
+        pair_size = score_size + bool_size
+        aligned_pair_size = 1 << (pair_size - 1).bit_length()  # Next power of 2
+
         names = []
         formats = []
         offsets = []
-        for i in range(self.num_scores):
+        for i in range(num_scores):
             names.append(f"score_{i}")
-            formats.append("float32")
-            offsets.append(i * 6)
+            formats.append(np_dtype)
+            offsets.append(i * aligned_pair_size)
 
             names.append(f"written_{i}")
             formats.append("bool")
-            offsets.append(i * 6 + 4)
+            offsets.append(i * aligned_pair_size + score_size)
 
-        total_bytes = sum(np.dtype(fmt).itemsize for fmt in formats)
+        total_bytes = num_scores * aligned_pair_size
         # Round up to the nearest 8 bytes
         itemsize = ((total_bytes + 7) // 8) * 8
+
+        # For JSON serialization, convert numpy dtype to string
+        format_strs = [
+            str(f) if isinstance(f, np.dtype) else f for f in formats
+        ]
+        struct_dtype_json = {
+            "names": names,
+            "formats": format_strs,
+            "offsets": offsets,
+            "itemsize": itemsize,
+        }
 
         struct_dtype = {
             "names": names,
@@ -101,7 +141,7 @@ class MemmapScoreWriter(ScoreWriter):
                     {
                         "num_items": num_items,
                         "num_scores": num_scores,
-                        "dtype": struct_dtype,
+                        "dtype": struct_dtype_json,
                     },
                     f,
                     indent=2,
@@ -119,10 +159,10 @@ class MemmapScoreWriter(ScoreWriter):
 
     def __call__(self, indices: list[int], scores: torch.Tensor):
         # scores: [num_indices, num_scores]
+        scores = scores.to(dtype=self.dtype)
         for i in range(self.num_scores):
-            self.scores[f"score_{i}"][indices] = (
-                scores[:, i].to(dtype=torch.float32).cpu().numpy().flatten()
-            )
+            score_col = tensor_to_numpy(scores[:, i].cpu()).flatten()
+            self.scores[f"score_{i}"][indices] = score_col
             self.scores[f"written_{i}"][indices] = True
 
         self.num_batches_since_flush += 1
