@@ -9,6 +9,7 @@ from bergson.collector.gradient_collectors import TraceCollector
 from bergson.data import load_gradients
 from bergson.gradients import GradientProcessor
 from bergson.query.faiss_index import FaissConfig, FaissIndex
+from bergson.utils.utils import numpy_to_tensor
 
 
 class TraceResult:
@@ -79,7 +80,7 @@ class Attributor:
         assert mmap.dtype.names is not None
         # Copy gradients into device memory
         self.grads = {
-            name: torch.tensor(mmap[name], device=device, dtype=dtype)
+            name: numpy_to_tensor(mmap[name]).to(device=device, dtype=dtype)
             for name in mmap.dtype.names
         }
         self.N = mmap[mmap.dtype.names[0]].shape[0]
@@ -90,8 +91,19 @@ class Attributor:
             norm = torch.cat(
                 [self.grads[name] for name in self.ordered_modules], dim=1
             ).norm(dim=1, keepdim=True)
+
             for name in self.grads:
-                self.grads[name] /= norm
+                # Divide by norm (may create NaN/inf if norm is zero)
+                normalized = self.grads[name] / norm
+                # Convert NaN/inf to 0 and warn if any were found
+                if not torch.isfinite(normalized).all():
+                    print(
+                        f"Warning: NaN/inf values detected after normalization in "
+                        f"{name}, converting to 0"
+                    )
+                self.grads[name] = torch.nan_to_num(
+                    normalized, nan=0.0, posinf=0.0, neginf=0.0
+                )
 
     def search(
         self,

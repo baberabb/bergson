@@ -32,7 +32,6 @@ python -m bergson score \
     --split "train[$SHARD_START:$SHARD_END]" \
     --query_path runs/$QUERY_RUN_NAME \
     --score individual \
-    --projection_dim 0 \
     --dataset NeelNanda/pile-10k \
     --model EleutherAI/pythia-14m \
     --skip_preconditioners \

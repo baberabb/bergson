@@ -204,9 +204,17 @@ def numpy_to_tensor(arr: np.ndarray) -> Tensor:
     PyTorch's from_numpy() doesn't support ml_dtypes bfloat16, so we view
     the array as uint16 and reinterpret as torch.bfloat16.
     This preserves the exact bit pattern without lossy float conversion.
+
+    Also handles V2 void types from structured arrays, which represent
+    bfloat16 values as 2-byte voids.
     """
     if arr.dtype == np.dtype(bfloat16):
-        return torch.from_numpy(arr.view(np.uint16)).view(torch.bfloat16)
+        return torch.from_numpy(arr.view(np.uint16).copy()).view(torch.bfloat16)
+
+    # Handle V2 voids (bfloat16 from structured arrays)
+    if arr.dtype.str == "|V2":
+        return torch.from_numpy(arr.view(np.uint16).copy()).view(torch.bfloat16)
+
     return torch.from_numpy(arr)
 
 

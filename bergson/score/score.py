@@ -16,6 +16,7 @@ from bergson.config import IndexConfig, ScoreConfig
 from bergson.data import allocate_batches, load_gradients
 from bergson.distributed import launch_distributed_run
 from bergson.gradients import GradientProcessor
+from bergson.score.score_writer import MemmapScoreWriter
 from bergson.score.scorer import Scorer
 from bergson.utils.utils import (
     assert_type,
@@ -27,6 +28,28 @@ from bergson.utils.worker_utils import (
     setup_data_pipeline,
     setup_model_and_peft,
 )
+
+
+def create_scorer(
+    path: Path,
+    num_items: int,
+    query_grads: dict[str, torch.Tensor],
+    score_cfg: ScoreConfig,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Scorer:
+    """Create a Scorer with MemmapScoreWriter for disk-based scoring."""
+    num_queries = len(query_grads[score_cfg.modules[0]])
+    writer = MemmapScoreWriter(path, num_items, num_queries, dtype=dtype)
+    return Scorer(
+        query_grads=query_grads,
+        modules=score_cfg.modules,
+        writer=writer,
+        device=device,
+        dtype=dtype,
+        unit_normalize=score_cfg.unit_normalize,
+        score_mode="nearest" if score_cfg.score == "nearest" else "inner_product",
+    )
 
 
 def preprocess_grads(
@@ -286,15 +309,16 @@ def score_worker(
         if score_cfg.precision != "auto"
         else get_gradient_dtype(model)
     )
+    score_device = torch.device(f"cuda:{rank}")
 
     if isinstance(ds, Dataset):
         kwargs["batches"] = allocate_batches(ds["length"], index_cfg.token_batch_size)
-        kwargs["scorer"] = Scorer(
+        kwargs["scorer"] = create_scorer(
             index_cfg.partial_run_path,
             len(ds),
             query_grads,
             score_cfg,
-            device=torch.device(f"cuda:{rank}"),
+            device=score_device,
             dtype=score_dtype,
         )
 
@@ -314,13 +338,13 @@ def score_worker(
             kwargs["ds"] = ds_shard
             kwargs["batches"] = batches
 
-            kwargs["scorer"] = Scorer(
+            kwargs["scorer"] = create_scorer(
                 index_cfg.partial_run_path / f"shard-{shard_id:05d}",
                 len(ds_shard),
                 query_grads,
                 score_cfg,
-                torch.device(f"cuda:{rank}"),
-                score_dtype,
+                device=score_device,
+                dtype=score_dtype,
             )
 
             collect_gradients(**kwargs)

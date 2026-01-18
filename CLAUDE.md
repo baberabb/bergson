@@ -28,6 +28,8 @@ Don't keep default run path values inside low level code - if a module calls ano
 
 Don't save data to a directory that is not in the gitignore - especially the data/ directory.
 
+Don't remove large datasets from the HF cache without asking.
+
 ### Tests
 
 Mark tests requiring GPUs with `@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")`.

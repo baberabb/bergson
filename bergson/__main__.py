@@ -57,8 +57,7 @@ class Reduce:
         """Reduce a gradient index."""
         if self.index_cfg.projection_dim != 0:
             print(
-                "Warning: projection_dim is not 0. "
-                "Compressed gradients will be reduced."
+                f"Using a projection dimension of " f"{self.index_cfg.projection_dim}. "
             )
 
         validate_run_path(self.index_cfg)
@@ -80,7 +79,7 @@ class Score:
 
         if self.index_cfg.projection_dim != 0:
             print(
-                "Warning: projection_dim is not 0. Compressed gradients will be scored."
+                f"Using a projection dimension of " f"{self.index_cfg.projection_dim}. "
             )
 
         validate_run_path(self.index_cfg)
