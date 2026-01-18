@@ -6,7 +6,6 @@ from typing import Optional, Union
 from simple_parsing import ArgumentParser, ConflictResolution
 
 from .build import build
-from .cli.auto_batch_size import AutoBatchSize
 from .config import IndexConfig, QueryConfig, ReduceConfig, ScoreConfig
 from .query.query_index import query
 from .reduce import reduce
@@ -103,7 +102,7 @@ class Query:
 class Main:
     """Routes to the subcommands."""
 
-    command: Union[Build, Query, Reduce, Score, AutoBatchSize]
+    command: Union[Build, Query, Reduce, Score]
 
     def execute(self):
         """Run the script."""

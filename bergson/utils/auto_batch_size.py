@@ -1,15 +1,18 @@
 """
-Auto batch size determination for Bergson benchmarks.
+In-memory auto batch size determination for Bergson benchmarks.
 
 This module provides utilities to automatically find the optimal token_batch_size
-that fits in GPU memory, with caching support for repeated runs.
+that fits in GPU memory for already-loaded models and datasets.
+
+Main function: find_optimal_token_batch_size()
+- Call this with your loaded model, tokenizer, and dataset
+- Returns optimal token_batch_size that fits in memory
 
 Adapted from HuggingFace Accelerate's find_executable_batch_size utility.
 """
 
 import gc
 import json
-import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -19,8 +22,8 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from bergson.collector.collector import CollectorComputer
 from bergson.collector.in_memory_collector import InMemoryCollector
-from bergson.config import IndexConfig
-from bergson.data import allocate_batches
+from bergson.config import DataConfig, IndexConfig
+from bergson.data import allocate_batches, tokenize
 from bergson.gradients import GradientProcessor
 
 
@@ -216,28 +219,30 @@ def find_optimal_token_batch_size_raw(
     return final_batch_size
 
 
-def determine_batch_size_in_memory(
+def find_optimal_token_batch_size(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     dataset: Dataset,
-    max_length: int,
     starting_batch_size: int = 4096,
 ) -> int:
     """
-    Determine optimal token_batch_size for in-memory benchmarks.
+    Determine optimal token_batch_size for loaded models and data.
+
+    This function assumes the model, tokenizer, and dataset are already loaded
+    and ready to use. It will test different batch sizes to find the optimal
+    token_batch_size that fits in available memory.
 
     Args:
-        model: Loaded model
-        tokenizer: Tokenizer
-        dataset: Small test dataset
-        max_length: Maximum sequence length
+        model: Already loaded and initialized model
+        tokenizer: Already loaded tokenizer
+        dataset: Small test dataset (already loaded)
         starting_batch_size: Starting batch size to test
 
     Returns:
         Optimal token_batch_size (power of 2)
     """
     print("\n" + "=" * 60)
-    print("Auto-determining optimal token_batch_size (in-memory)...")
+    print("Finding optimal token_batch_size for loaded model...")
     print("=" * 60 + "\n")
 
     # Cap starting batch size to model's max sequence length
@@ -260,20 +265,11 @@ def determine_batch_size_in_memory(
         """Test function that tries a single forward/backward pass."""
         test_dataset = dataset.select(range(min(5, len(dataset))))
 
-        # Tokenize
-        def tokenize(batch):
-            encoded = tokenizer.batch_encode_plus(
-                batch["text"],
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=max_length,
-            )
-            encoded["labels"] = encoded["input_ids"].clone()
-            encoded["length"] = [len(ids) for ids in encoded["input_ids"]]
-            return encoded
-
-        test_dataset = test_dataset.map(tokenize, batched=True)
+        test_dataset = test_dataset.map(
+            tokenize,
+            batched=True,
+            fn_kwargs=dict(args=DataConfig(truncation=True), tokenizer=tokenizer),
+        )
         test_dataset.set_format(
             type="torch", columns=["input_ids", "attention_mask", "labels", "length"]
         )
@@ -315,121 +311,10 @@ def determine_batch_size_in_memory(
     )
 
 
-def determine_batch_size_cli(
-    model_hf_id: str,
-    dataset: str,
-    test_path: Path,
-    starting_batch_size: int = 4096,
-    use_fsdp: bool = False,
-) -> int:
-    """
-    Determine optimal token_batch_size by testing CLI builds.
-
-    Args:
-        model_hf_id: HuggingFace model ID
-        dataset: Dataset name
-        test_path: Path for test build
-        starting_batch_size: Starting batch size to test
-        use_fsdp: Whether FSDP is enabled
-
-    Returns:
-        Optimal token_batch_size (power of 2)
-    """
-    print("\n" + "=" * 60)
-    print("Auto-determining optimal token_batch_size (CLI)...")
-    print("=" * 60 + "\n")
-
-    # Cap starting batch size to model's max sequence length
-    from transformers import AutoConfig
-
-    config = AutoConfig.from_pretrained(model_hf_id)
-    max_seq_len = getattr(config, "max_position_embeddings", None)
-
-    if max_seq_len is not None and starting_batch_size > max_seq_len:
-        print(
-            f"Capping starting_batch_size from {starting_batch_size} "
-            f"to model's max sequence length {max_seq_len}"
-        )
-        starting_batch_size = max_seq_len
-
-    def test_batch_size(token_batch_size: int) -> None:
-        """Test CLI build with this batch size."""
-        cmd = [
-            "bergson",
-            "build",
-            str(test_path),
-            "--model",
-            model_hf_id,
-            "--dataset",
-            dataset,
-            "--split",
-            "train",
-            "--token_batch_size",
-            str(token_batch_size),
-            "--skip_preconditioners",
-            "--overwrite",
-            "--truncation",
-            "--max_tokens",
-            # Use a high token count so we have documents for larger batch sizes
-            "100_000",
-        ]
-
-        if use_fsdp:
-            cmd.append("--fsdp")
-
-        print(f"Running test build: {' '.join(cmd)}")
-        try:
-            # Use subprocess.run with timeout to prevent hanging
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,  # 2 minute timeout
-            )
-
-            if result.stdout:
-                print(result.stdout, end="")
-            if result.stderr:
-                print(result.stderr, end="")
-
-            full_output = result.stdout + result.stderr
-
-            # Check for distributed worker failures
-            if (
-                "failed (exitcode:" in full_output
-                or "Not enough documents" in full_output
-            ):
-                raise RuntimeError(
-                    "Build failed: distributed worker error or insufficient documents"
-                )
-
-            if result.returncode != 0:
-                if any(
-                    err in full_output
-                    for err in [" out of memory.", "CUDNN_STATUS_NOT_SUPPORTED"]
-                ):
-                    raise RuntimeError("OOM: out of memory")
-                else:
-                    raise RuntimeError(
-                        f"Build failed with return code {result.returncode}"
-                    )
-        except subprocess.TimeoutExpired:
-            print("⏱ Test timed out after 120s - treating as failure")
-            raise RuntimeError("Test timed out")
-
-    return find_optimal_token_batch_size_raw(
-        test_fn=test_batch_size,
-        starting_batch_size=starting_batch_size,
-        round_to_pow2=True,
-        max_batch_size=max_seq_len,
-    )
-
-
 def get_optimal_batch_size(
     cache_path: Path,
     model_hf_id: str,
     fsdp: bool,
-    starting_batch_size: int,
     determine_fn: Callable[[], int],
 ) -> int:
     """
@@ -458,94 +343,3 @@ def get_optimal_batch_size(
     save_batch_size_cache(cache_path, model_hf_id, optimal_batch_size, fsdp)
 
     return optimal_batch_size
-
-
-def determine_batch_size_disk(
-    model_hf_id: str,
-    dataset_name: str,
-    dataset_split: str,
-    max_length: int,
-    starting_batch_size: int = 4096,
-    use_fsdp: bool = False,
-) -> int:
-    """
-    Determine optimal token_batch_size for disk-based benchmarks.
-
-    This function loads the model, determines the batch size, then cleans up.
-    Used when the main benchmark doesn't keep the model in memory.
-
-    Args:
-        model_hf_id: HuggingFace model ID
-        dataset_name: Dataset to use for testing
-        dataset_split: Dataset split to use
-        max_length: Maximum sequence length
-        starting_batch_size: Starting batch size to test
-        use_fsdp: Whether to use FSDP
-
-    Returns:
-        Optimal token_batch_size (power of 2)
-    """
-    from datasets import load_dataset
-    from torch.distributed.fsdp import fully_shard
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-
-    from bergson.utils.utils import assert_type, get_layer_list
-
-    print("\n" + "=" * 60)
-    print("Auto-determining optimal token_batch_size (disk-based)...")
-    print("=" * 60 + "\n")
-
-    # Cap starting batch size to model's max sequence length
-    config = AutoConfig.from_pretrained(model_hf_id)
-    max_seq_len = getattr(config, "max_position_embeddings", None)
-    if max_seq_len is not None and starting_batch_size > max_seq_len:
-        print(
-            f"Capping starting_batch_size from {starting_batch_size} "
-            f"to model's max sequence length {max_seq_len}"
-        )
-        starting_batch_size = max_seq_len
-
-    # Load model
-    device_map = "cpu" if use_fsdp else "auto"
-    model = AutoModelForCausalLM.from_pretrained(
-        model_hf_id, torch_dtype=torch.bfloat16, device_map=device_map
-    )
-
-    if not use_fsdp:
-        model.cuda()
-    else:
-        model = model.cuda()
-
-        # Wrap model with FSDP
-        embed = model.get_input_embeddings()
-        model.requires_grad_(False)
-        embed.requires_grad_(True)
-
-        for layer in get_layer_list(model):
-            fully_shard(layer)
-
-        fully_shard(model)
-
-    tokenizer = AutoTokenizer.from_pretrained(model_hf_id)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    # Load small test dataset
-    test_dataset = assert_type(Dataset, load_dataset(dataset_name, split=dataset_split))
-    test_dataset = test_dataset.select(range(min(10, len(test_dataset))))
-
-    # Determine batch size
-    batch_size = determine_batch_size_in_memory(
-        model=model,
-        tokenizer=tokenizer,
-        dataset=test_dataset,
-        max_length=max_length,
-        starting_batch_size=starting_batch_size,
-    )
-
-    # Clean up to free memory
-    del model
-    del tokenizer
-    del test_dataset
-    torch.cuda.empty_cache()
-
-    return batch_size

@@ -201,7 +201,8 @@ class IndexConfig:
     """Configuration for multi-node distributed preconditioner computation."""
 
     max_tokens: int | None = None
-    """The maximum number of tokens to process. If None, all tokens will be processed. Only available for Dataset."""
+    """Max tokens to process. If None, all tokens processed. Dataset only.
+    This experimental feature may be removed in the future."""
 
     @property
     def partial_run_path(self) -> Path:

@@ -78,7 +78,7 @@ class Attributor:
         # Load the gradients into memory
         mmap = load_gradients(index_path)
         assert mmap.dtype.names is not None
-        # Copy gradients into device memory (handles bfloat16/V2 void types)
+        # Copy gradients into device memory
         self.grads = {
             name: numpy_to_tensor(mmap[name]).to(device=device, dtype=dtype)
             for name in mmap.dtype.names
@@ -91,8 +91,19 @@ class Attributor:
             norm = torch.cat(
                 [self.grads[name] for name in self.ordered_modules], dim=1
             ).norm(dim=1, keepdim=True)
+
             for name in self.grads:
-                self.grads[name] /= norm
+                # Divide by norm (may create NaN/inf if norm is zero)
+                normalized = self.grads[name] / norm
+                # Convert NaN/inf to 0 and warn if any were found
+                if not torch.isfinite(normalized).all():
+                    print(
+                        f"Warning: NaN/inf values detected after normalization in "
+                        f"{name}, converting to 0"
+                    )
+                self.grads[name] = torch.nan_to_num(
+                    normalized, nan=0.0, posinf=0.0, neginf=0.0
+                )
 
     def search(
         self,

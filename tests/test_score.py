@@ -111,11 +111,11 @@ def test_score(tmp_path: Path, model, dataset):
         else get_gradient_dtype(model)
     )
 
+    score_writer = MemmapScoreWriter(tmp_path, len(dataset), 1, dtype=score_dtype)
     scorer = Scorer(
-        tmp_path,
-        len(dataset),
-        query_grads,
-        score_cfg,
+        query_grads=query_grads,
+        modules=list(shapes.keys()),
+        writer=score_writer,
         device=torch.device("cpu"),
         dtype=score_dtype,
     )
@@ -234,12 +234,12 @@ def test_memmap_score_writer_bfloat16(tmp_path: Path):
     assert "bfloat16" in info["dtype"]["formats"][0]
 
     # Check written flags
-    assert writer.scores["written_0"][0] == True
-    assert writer.scores["written_0"][1] == True
-    assert writer.scores["written_0"][2] == False  # Not written
-    assert writer.scores["written_0"][5] == True
-    assert writer.scores["written_0"][6] == True
-    assert writer.scores["written_0"][7] == True
+    assert writer.scores["written_0"][0]
+    assert writer.scores["written_0"][1]
+    assert not writer.scores["written_0"][2]  # Not written
+    assert writer.scores["written_0"][5]
+    assert writer.scores["written_0"][6]
+    assert writer.scores["written_0"][7]
 
     # Check score values (convert back to compare)
     expected_batch1 = tensor_to_numpy(scores_batch1)

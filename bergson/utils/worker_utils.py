@@ -210,6 +210,37 @@ def estimate_advantage(ds: Dataset, cfg: DataConfig):
     return advantages.tolist()
 
 
+def filter_by_max_tokens(
+    ds: Dataset | IterableDataset, cfg: IndexConfig
+) -> Dataset | IterableDataset:
+    """Filter the dataset by the max tokens limit. This is an experimental
+    benchmarking feature that may be removed in the future."""
+    if cfg.max_tokens is None:
+        return ds
+
+    if isinstance(ds, IterableDataset):
+        raise ValueError("max_tokens is not supported for IterableDataset")
+
+    total_tokens = 0
+    indices_to_keep = []
+    for idx, length in enumerate(ds["length"]):
+        if total_tokens + length > cfg.max_tokens:
+            break
+        indices_to_keep.append(idx)
+        total_tokens += length
+
+    if indices_to_keep:
+        ds = ds.select(indices_to_keep)
+        print(
+            f"Filtered dataset to {len(indices_to_keep)} examples "
+            f"({total_tokens} tokens) due to max_tokens limit."
+        )
+    else:
+        print("Warning: No examples fit within max_tokens limit.")
+
+    return ds
+
+
 def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
     """Handle data loading and preprocessing"""
     ds = load_data_string(
@@ -223,7 +254,7 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
 
     remove_columns = ds.column_names if cfg.drop_columns else None
 
-    if "input_ids" not in ds.column_names:
+    if not ds.column_names or "input_ids" not in ds.column_names:
         ds = ds.map(
             tokenize,
             batched=True,
@@ -250,26 +281,7 @@ def setup_data_pipeline(cfg: IndexConfig) -> Dataset | IterableDataset:
             new_fingerprint="advantage",  # type: ignore
         )
 
-    # Filter by max_tokens for Dataset
-    if cfg.max_tokens is not None and isinstance(ds, Dataset):
-        total_tokens = 0
-        indices_to_keep = []
-        for idx, length in enumerate(ds["length"]):
-            if total_tokens + length > cfg.max_tokens:
-                break
-            indices_to_keep.append(idx)
-            total_tokens += length
-
-        if indices_to_keep:
-            ds = ds.select(indices_to_keep)
-            print(
-                f"Filtered dataset to {len(indices_to_keep)} examples "
-                f"({total_tokens} tokens) due to max_tokens limit."
-            )
-        else:
-            print("Warning: No examples fit within max_tokens limit.")
-    elif cfg.max_tokens is not None and isinstance(ds, IterableDataset):
-        raise ValueError("max_tokens is not supported for IterableDataset")
+    ds = filter_by_max_tokens(ds, cfg)
 
     # Keep length and input_ids
     if remove_columns is not None:
