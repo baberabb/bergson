@@ -291,17 +291,6 @@ class AdafactorNormalizer(Normalizer):
         avg_sq = torch.outer(self.row, self.col) / self.row.mean()
         return AdamNormalizer(avg_sq=avg_sq)
 
-    def scale_by_lr(self, lr: float | Tensor) -> None:
-        """Scale normalizer by learning rate.
-
-        Factorized dimensions (row, col) are scaled by lr.
-        Bias is scaled by lr**2.
-        """
-        lr_sqrt = lr**0.5
-        self.row.mul_(lr_sqrt)
-        self.col.mul_(lr_sqrt)
-        self.bias_avg_sq.mul_(lr) if self.bias_avg_sq is not None else None
-
 
 @dataclass
 class AdamNormalizer(Normalizer):
@@ -342,13 +331,7 @@ class AdamNormalizer(Normalizer):
         return AdafactorNormalizer(
             row=self.avg_sq.mean(dim=1),  # shape [O]
             col=self.avg_sq.mean(dim=0),  # shape [I]
-            bias_avg_sq=self.bias_avg_sq,
+            bias_avg_sq=(
+                self.bias_avg_sq.clone() if self.bias_avg_sq is not None else None
+            ),
         )
-
-    def scale_by_lr(self, lr: float | Tensor) -> None:
-        """Scale normalizer to incorporate learning rate.
-
-        Both avg_sq and bias_avg_sq are divided by lr².
-        """
-        self.avg_sq.mul_(lr)
-        self.bias_avg_sq.mul_(lr) if self.bias_avg_sq is not None else None

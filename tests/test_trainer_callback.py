@@ -19,7 +19,11 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
-from trl import SFTConfig, SFTTrainer
+try:
+    from trl import SFTConfig, SFTTrainer
+except ModuleNotFoundError:  # optional dependency
+    SFTConfig = None
+    SFTTrainer = None
 
 from bergson.data import load_gradients
 from bergson.huggingface import (
@@ -200,6 +204,7 @@ class TestGradientCollectorCallback:
             assert record["global_step"] == callback.order[i]["global_step"]
             assert record["epoch"] == callback.order[i]["epoch"]
 
+    @pytest.mark.skipif(SFTTrainer is None, reason="trl not installed")
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_sft_trainer(self, tmp_path, model, dataset):
         """Test that gradient and order files are created and
@@ -352,7 +357,7 @@ class TestGradientCollectorCallback:
 
                 # Ground truth: Adam stores full exp_avg_sq
                 raw_exp_avg_sq = weight_state["exp_avg_sq"]
-                expected_avg_sq = raw_exp_avg_sq * lr
+                expected_avg_sq = raw_exp_avg_sq / (lr**2)
 
                 torch.testing.assert_close(norm.avg_sq, expected_avg_sq)
 
@@ -361,13 +366,13 @@ class TestGradientCollectorCallback:
                 assert isinstance(norm, AdafactorNormalizer)
 
                 # Ground truth: Adafactor stores row/col directly
-                lr_sqrt = lr**0.5
                 raw_row = weight_state["exp_avg_sq_row"]
                 raw_col = weight_state["exp_avg_sq_col"]
 
-                # Our normalizer should match (scaled by LR)
-                expected_row = raw_row * lr_sqrt
-                expected_col = raw_col * lr_sqrt
+                # Our normalizer folds LR into the denominator by scaling moments as 1/lr^2
+                # (so that normalization yields gradients proportional to `lr * g / sqrt(v)`).
+                expected_row = raw_row
+                expected_col = raw_col / (lr**2)
 
                 torch.testing.assert_close(norm.row, expected_row)
                 torch.testing.assert_close(norm.col, expected_col)
@@ -376,7 +381,7 @@ class TestGradientCollectorCallback:
             if include_bias and layer.bias is not None:
                 bias_state = optimizer.state[layer.bias]
                 raw_bias_exp_avg_sq = bias_state["exp_avg_sq"]
-                expected_bias = raw_bias_exp_avg_sq * lr
+                expected_bias = raw_bias_exp_avg_sq / (lr**2)
 
                 assert (
                     norm.bias_avg_sq is not None

@@ -325,21 +325,33 @@ class GradientCollectorCallback(TrainerCallback):
         # Build normalizers from collected second moments
         for layer_name, moments in layer_second_moments.items():
             lr = moments["lr"]
+            # The Normalizer interface only divides by a (sqrt) second-moment estimate.
+            # To make normalized gradients proportional to the optimizer update
+            # (`lr * g / sqrt(v)`), we fold `lr` into the denominator by scaling the
+            # stored second moments as `v / lr^2` (since `g / sqrt(v / lr^2) = lr * g / sqrt(v)`).
+            lr2 = float(lr) ** 2
+            if lr2 == 0.0:
+                # Degenerate case: zero LR would imply a zero update. Avoid division
+                # by zero and fall back to unscaled moments.
+                lr2 = 1.0
 
             # Adam-like: has weight exp_avg_sq
             if "weight" in moments:
-                weight_eas = moments["weight"] * lr
+                weight_eas = moments["weight"] / lr2
                 bias_eas = moments.get("bias")
-                bias_eas = bias_eas * lr if bias_eas is not None else None
+                bias_eas = bias_eas / lr2 if bias_eas is not None else None
 
                 norm = AdamNormalizer(weight_eas, bias_eas)
 
             # Adafactor-like: has row/col factorization
             elif "row" in moments and "col" in moments:
-                row = moments["row"] * lr**0.5
-                col = moments["col"] * lr**0.5
+                # For factorized moments, scaling `row` is mostly canceled by the
+                # Adafactor normalization (due to the mean(row) term), so we scale
+                # `col` to achieve the desired overall `1/lr^2` scaling on V.
+                row = moments["row"]
+                col = moments["col"] / lr2
                 bias_eas = moments.get("bias")
-                bias_eas = bias_eas * lr if bias_eas is not None else None
+                bias_eas = bias_eas / lr2 if bias_eas is not None else None
 
                 norm = AdafactorNormalizer(row, col, bias_eas)
             else:
