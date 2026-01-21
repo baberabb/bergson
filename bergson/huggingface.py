@@ -328,7 +328,7 @@ class GradientCollectorCallback(TrainerCallback):
             # The Normalizer interface only divides by a (sqrt) second-moment estimate.
             # To make normalized gradients proportional to the optimizer update
             # (`lr * g / sqrt(v)`), we fold `lr` into the denominator by scaling the
-            # stored second moments as `v / lr^2` (since `g / sqrt(v / lr^2) = lr * g / sqrt(v)`).
+            # stored second moments as `v / lr^2` (since `g / sqrt(v/lr^2) = lr*g/sqrt(v)`).
             lr2 = float(lr) ** 2
             if lr2 == 0.0:
                 # Degenerate case: zero LR would imply a zero update. Avoid division
@@ -345,15 +345,16 @@ class GradientCollectorCallback(TrainerCallback):
 
             # Adafactor-like: has row/col factorization
             elif "row" in moments and "col" in moments:
-                # For factorized moments, scaling `row` is mostly canceled by the
-                # Adafactor normalization (due to the mean(row) term), so we scale
-                # `col` to achieve the desired overall `1/lr^2` scaling on V.
+                # For factorized moments, the mean-normalization in Adafactor
+                # (sqrt(mean(x)) * rsqrt(x)) cancels out any global scaling on
+                # row or col. Instead, we store lr and apply it after normalization.
                 row = moments["row"]
-                col = moments["col"] / lr2
+                col = moments["col"]
                 bias_eas = moments.get("bias")
+                # Bias doesn't use mean-normalization, so lr^2 scaling works
                 bias_eas = bias_eas / lr2 if bias_eas is not None else None
 
-                norm = AdafactorNormalizer(row, col, bias_eas)
+                norm = AdafactorNormalizer(row, col, bias_eas, lr=float(lr))
             else:
                 # No weight moments found - skip this layer
                 continue

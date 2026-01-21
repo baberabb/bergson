@@ -196,6 +196,7 @@ class GradientCollector(HookCollectorBase):
                     # Compute bias from RAW g (before row normalization)
                     bias_grad = g.sum(dim=1)  # [N, S, O] → [N, O]
                     # Normalize bias with bias second moments
+                    # (bias_avg_sq was pre-scaled by 1/lr² so this includes lr)
                     bias_grad = bias_grad / normalizer.bias_avg_sq.add(1e-30).sqrt()
 
                 # Apply row normalization to g (for weights)
@@ -206,6 +207,9 @@ class GradientCollector(HookCollectorBase):
                 # If bias is present, materialize full gradient then project
                 if bias_grad is not None:
                     P = g.mT @ a  # [N, O, I]
+
+                    # Scale weight gradient by lr (bias already has lr from bias_avg_sq scaling)
+                    P = P * normalizer.lr
 
                     # Append pre-normalized bias gradient
                     P = torch.cat([P, bias_grad.unsqueeze(2)], dim=2)  # [N, O, I+1]
@@ -228,6 +232,8 @@ class GradientCollector(HookCollectorBase):
                         g = g @ g_projection.T  # [N, S, p]
 
                     P = g.mT @ a  # [N, O/p, S] @ [N, S, I/q] → [N, O/p, I/q]
+                    # Scale by lr (mean-normalization cancels any scaling on row/col)
+                    P = P * normalizer.lr
 
             case None:
                 if p is not None:

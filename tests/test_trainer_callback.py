@@ -19,6 +19,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
+
 try:
     from trl import SFTConfig, SFTTrainer
 except ModuleNotFoundError:  # optional dependency
@@ -369,13 +370,12 @@ class TestGradientCollectorCallback:
                 raw_row = weight_state["exp_avg_sq_row"]
                 raw_col = weight_state["exp_avg_sq_col"]
 
-                # Our normalizer folds LR into the denominator by scaling moments as 1/lr^2
-                # (so that normalization yields gradients proportional to `lr * g / sqrt(v)`).
-                expected_row = raw_row
-                expected_col = raw_col / (lr**2)
-
-                torch.testing.assert_close(norm.row, expected_row)
-                torch.testing.assert_close(norm.col, expected_col)
+                # For Adafactor, the mean-normalization (sqrt(mean(x)) * rsqrt(x))
+                # cancels any global scaling on row/col, so we store lr separately
+                # and apply after normalization. Row and col are unscaled.
+                torch.testing.assert_close(norm.row, raw_row)
+                torch.testing.assert_close(norm.col, raw_col)
+                assert norm.lr == lr, f"Expected lr={lr}, got {norm.lr}"
 
             # Verify bias handling
             if include_bias and layer.bias is not None:

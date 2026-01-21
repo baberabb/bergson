@@ -226,11 +226,15 @@ class AdafactorNormalizer(Normalizer):
         row: Row statistics [O]
         col: Column statistics [I]
         bias_avg_sq: Optional second moments for bias [O]
+        lr: Learning rate to scale the normalized gradient by. Required because
+            the mean-normalization in Adafactor cancels out any global scaling
+            applied to row/col, so we must scale the output directly.
     """
 
     row: Tensor  # shape [O]
     col: Tensor  # shape [I]
     bias_avg_sq: Tensor | None = None  # shape [O]
+    lr: float = 1.0
 
     def __post_init__(self):
         assert self.row.ndim == 1, f"Expected 1D tensor for row, got {self.row.ndim}D"
